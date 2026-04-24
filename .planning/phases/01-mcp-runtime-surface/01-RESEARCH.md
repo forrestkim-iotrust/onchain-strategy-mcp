@@ -488,7 +488,7 @@ onchain-strategy-mcp/
 │   │   │   ├── config.rs         # toml 로딩 + 기본값
 │   │   │   └── logging.rs        # tracing_subscriber 초기화
 │   │   └── tests/
-│   │       └── stdio_contract.rs # 통합 테스트 (spawn + round-trip)
+│   │       └── stdio_handshake.rs # 통합 테스트 (spawn + round-trip)
 │   ├── executor-core/
 │   │   ├── Cargo.toml
 │   │   └── src/
@@ -852,22 +852,22 @@ pub fn init(cfg: &crate::config::Config) -> Result<()> {
 
 | Req ID | Behavior | Test Type | Automated Command | File Exists? |
 |--------|----------|-----------|-------------------|-------------|
-| MCP-01 | stdio 서버가 non-MCP를 stdout에 쓰지 않는다 | integration | `cargo test -p executor-mcp --test stdio_contract stdout_is_pure_jsonrpc` | ❌ Wave 0 |
+| MCP-01 | stdio 서버가 non-MCP를 stdout에 쓰지 않는다 | integration | `cargo test -p executor-mcp --test stdio_handshake stdout_is_pure_jsonrpc` | ❌ Wave 0 |
 | MCP-01 | `#![deny(clippy::print_stdout, ...)]` lint CI | lint/integration | `cargo clippy --workspace --all-targets -- -D warnings` | ❌ Wave 0 (설정 파일) |
-| MCP-02 | `tools/list`가 8개 tool + JSON Schema 반환 | integration | `cargo test -p executor-mcp --test stdio_contract tools_list_returns_full_surface` | ❌ Wave 0 |
-| MCP-02 | 쓰기성 tool 호출 시 Unimplemented 에러 data 반환 | integration | `cargo test -p executor-mcp --test stdio_contract write_tools_return_unimplemented` | ❌ Wave 0 |
+| MCP-02 | `tools/list`가 8개 tool + JSON Schema 반환 | integration | `cargo test -p executor-mcp --test stdio_handshake tools_list_returns_full_surface` | ❌ Wave 0 |
+| MCP-02 | 쓰기성 tool 호출 시 Unimplemented 에러 data 반환 | integration | `cargo test -p executor-mcp --test stdio_handshake write_tools_return_unimplemented` | ❌ Wave 0 |
 | MCP-02 | 각 tool input struct의 스키마가 snapshot과 일치 | unit | `cargo test -p executor-core schema_snapshots` | ❌ Wave 0 |
-| MCP-03 | `resources/list`는 빈 배열, `resources/templates/list`는 세 URI 스킴 반환 | integration | `cargo test -p executor-mcp --test stdio_contract resource_surface_declared` | ❌ Wave 0 |
-| MCP-03 | `resources/read` 임의 URI는 `-32002` resource_not_found | integration | `cargo test -p executor-mcp --test stdio_contract read_resource_returns_not_found` | ❌ Wave 0 |
-| MCP-04 | `prompts/list`가 두 prompt + arguments 스키마 반환 | integration | `cargo test -p executor-mcp --test stdio_contract prompts_list_returns_two_prompts` | ❌ Wave 0 |
-| MCP-04 | `prompts/get` 호출 시 placeholder PromptMessage 반환 | integration | `cargo test -p executor-mcp --test stdio_contract get_prompt_returns_placeholder` | ❌ Wave 0 |
+| MCP-03 | `resources/list`는 빈 배열, `resources/templates/list`는 세 URI 스킴 반환 | integration | `cargo test -p executor-mcp --test stdio_handshake resource_surface_declared` | ❌ Wave 0 |
+| MCP-03 | `resources/read` 임의 URI는 `-32002` resource_not_found | integration | `cargo test -p executor-mcp --test stdio_handshake read_resource_returns_not_found` | ❌ Wave 0 |
+| MCP-04 | `prompts/list`가 두 prompt + arguments 스키마 반환 | integration | `cargo test -p executor-mcp --test stdio_handshake prompts_list_returns_two_prompts` | ❌ Wave 0 |
+| MCP-04 | `prompts/get` 호출 시 placeholder PromptMessage 반환 | integration | `cargo test -p executor-mcp --test stdio_handshake get_prompt_returns_placeholder` | ❌ Wave 0 |
 
 ### Integration Test Harness Shape
 
 통합 테스트는 바이너리를 spawn하고 line-delimited JSON-RPC로 대화한다.
 
 ```rust
-// crates/executor-mcp/tests/stdio_contract.rs
+// crates/executor-mcp/tests/stdio_handshake.rs
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::process::Stdio;
@@ -1049,7 +1049,7 @@ fn strategy_register_input_schema_stable() {
 - **Phase gate:** 위 full suite + Claude Desktop 수동 smoke test
 
 ### Wave 0 Gaps
-- [ ] `crates/executor-mcp/tests/stdio_contract.rs` — MCP-01~04 integration (신규)
+- [ ] `crates/executor-mcp/tests/stdio_handshake.rs` — MCP-01~04 integration (신규)
 - [ ] `crates/executor-core/tests/schema_snapshots.rs` + `tests/schemas/*.json` — MCP-02 schema stability (신규)
 - [ ] Workspace `Cargo.toml` `[workspace.lints.clippy]` 설정 — MCP-01 lint (신규)
 - [ ] `Cargo.toml` workspace + 4 crate skeleton — 전체 (신규)
@@ -1164,20 +1164,22 @@ pub struct PolicyUpdateInput {
 | A6 | PromptMessage API 시그니처 (`::new_text`, `PromptMessageRole::User`) | Prompt 등록 패턴 | counter.rs에서 검증됨 [CITED]. 그러나 1.5 구체 시그니처 변동 없는지 planner가 확인. |
 | A7 | `CallToolResult::success(vec![Content::text(...)])` — `Content::text` 생성자 | Tool 등록 패턴 | counter.rs에서 검증됨 [CITED: counter.rs L84-86]. 안전. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **CI 워크플로우를 Phase 1 scope에 넣을까?**
-   - 알려진 것: workspace `[workspace.lints.clippy]` + crate-level `#![deny]`만으로 로컬 `cargo clippy`에서 잡힌다.
-   - 불명: `.github/workflows/ci.yml`이 있어야 MCP-01 완결인지, 아니면 local test pass만으로 충분한지.
-   - 권장: Plan 01-03("resources/prompts and stdout/stderr discipline")에 CI workflow 파일 포함하되, 실패 시 deprioritize 가능.
+   - RESOLVED: Phase 1 scope에서 **deprioritize**. workspace `[workspace.lints.clippy]` + crate-level `#![deny]` + `cargo clippy --workspace -- -D warnings` 로컬 통과만으로 MCP-01 완결로 간주. `.github/workflows/ci.yml`은 Phase 7 문서/테스트 정리 단계 또는 별도 chore 작업으로 미룸.
 
 2. **`list_resources` 빈 배열 vs 생략 응답?**
-   - MCP 스펙은 `resources` capability 선언 시 `resources/list`를 **반드시** 지원해야 한다. 빈 배열 반환이 스펙 부합.
-   - 권장: 빈 배열 + `next_cursor: None` + `meta: None`. counter.rs 패턴 그대로.
+   - RESOLVED: **빈 배열** + `next_cursor: None` + `meta: None`. MCP 2025-11-25 스펙이 `resources` capability 선언 시 `resources/list`를 필수 지원으로 규정하므로 빈 배열이 스펙 부합. counter.rs 패턴 그대로 채택.
 
 3. **Config path 발견 우선순위**
-   - CLI `--config` vs env `EXECUTOR_CONFIG` vs cwd `./config.toml` 셋 중 하나 or all?
-   - 권장: 셋 다. CLI > env > cwd default > 내장 fallback. 위 `config.rs` 예제가 이 순서.
+   - RESOLVED: CLI `--config` > env `EXECUTOR_CONFIG` > cwd `./config.toml` > 내장 default(`[logging] level = "info"`) 순서. 모든 source 부재 시 내장 default로 무중단 부팅. 위 `## Config Loading Pattern` 섹션의 `config.rs` 예제가 이 순서를 구현.
+
+4. **rmcp 1.5 `ErrorCode` 생성 패턴 (Plan 02 fallback 명시)**
+   - RESOLVED (planner-side fallback): Plan 02는 우선 `ErrorCode(-32010)` tuple 생성자를 시도하고, public이 아닐 경우 `McpError::internal_error("unimplemented", Some(json!({...})))` + `data.code: "unimplemented"` 필드로 의미 분기를 보존한다. agent는 `data.code` 문자열로 판별하므로 wire-level 변별성은 유지. 정확한 wire `code` 값은 Plan 02 Wave 2 시작 시 `cargo doc --open -p rmcp`로 5분 내 확정 후 PLAN.md done에 기록.
+
+5. **`PromptRouter::new()` / `ResourceTemplate::default()` 가용성 (Plan 02/03 fallback 명시)**
+   - RESOLVED (planner-side fallback): Plan 02 Task 2는 `prompt_router: PromptRouter::new()`를 시도하되 private이면 빈 `#[prompt_router] impl Server { }` stub을 Plan 02에 미리 두고 Plan 03에서 prompt 함수만 추가. Plan 03 Task 1의 `ResourceTemplate { ..Default::default() }`는 Default 미구현 시 모든 필드 명시 (uri_template / name / description / mime_type / annotations 등 — counter.rs와 docs.rs `model` 모듈 1차 확인 후 Wave 3 시작 시 필드 리스트를 PLAN.md done에 기록).
 
 ## Environment Availability
 
