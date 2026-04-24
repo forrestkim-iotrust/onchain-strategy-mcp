@@ -1,0 +1,6 @@
+# Phase 1 config surface. Phase 2+ will add [state], [evm], [policy], [signer]
+# sections — unknown keys fail `deny_unknown_fields` today, which is intentional:
+# silent drift is harder to debug than an explicit parse error.
+
+[logging]
+level = "info"   # trace | debug | info | warn | error
