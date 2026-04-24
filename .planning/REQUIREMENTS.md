@@ -8,9 +8,9 @@
 ### MCP Runtime
 
 - [x] **MCP-01**: Server can run as a stdio MCP server without writing non-MCP data to stdout.
-- [ ] **MCP-02**: Server exposes JSON-schema-backed tools for strategy, execution, and policy operations.
-- [ ] **MCP-03**: Server exposes resources for strategy details, execution reports, and journal entries.
-- [ ] **MCP-04**: Server exposes prompts for writing and reviewing EVM automation strategies.
+- [x] **MCP-02**: Server exposes JSON-schema-backed tools for strategy, execution, and policy operations.
+- [x] **MCP-03**: Server exposes resources for strategy details, execution reports, and journal entries.
+- [x] **MCP-04**: Server exposes prompts for writing and reviewing EVM automation strategies.
 
 ### Strategy Runtime
 
@@ -99,10 +99,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MCP-01 | Phase 1 | Implemented (scaffold — 01-01) |
-| MCP-02 | Phase 1 | Pending |
-| MCP-03 | Phase 1 | Pending |
-| MCP-04 | Phase 1 | Pending |
+| MCP-01 | Phase 1 | Complete (01-01 scaffold, 01-02 stderr-only tracing, 01-03 stdout_is_strict_jsonrpc test) |
+| MCP-02 | Phase 1 | Complete (01-02 ExecutorServer + 8 tool handlers + schema goldens) |
+| MCP-03 | Phase 1 | Complete (01-03 resources: 3 URI templates + -32002 not_found) |
+| MCP-04 | Phase 1 | Complete (01-03 prompts: 2 placeholder prompts with arg schemas) |
 | STR-01 | Phase 2 | Pending |
 | STR-02 | Phase 2 | Pending |
 | STR-03 | Phase 3 | Pending |

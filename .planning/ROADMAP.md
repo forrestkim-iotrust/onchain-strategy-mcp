@@ -30,7 +30,7 @@ v1 builds a local MCP runtime that lets an AI agent write JavaScript EVM automat
 Plans:
 - [x] 01-01: Rust workspace and crate skeleton
 - [x] 01-02: MCP stdio server and tool schema wiring
-- [ ] 01-03: MCP resources/prompts and stdout/stderr discipline checks
+- [x] 01-03: MCP resources/prompts and stdout/stderr discipline checks
 
 ### Phase 2: Strategy State and Journal
 **Goal**: Runtime can persist strategies, runs, metadata, and journal records.  
@@ -135,7 +135,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. MCP Runtime Surface | 2/3 | In progress | - |
+| 1. MCP Runtime Surface | 3/3 | Complete | 2026-04-24 |
 | 2. Strategy State and Journal | 0/3 | Not started | - |
 | 3. JavaScript Strategy Runner | 0/3 | Not started | - |
 | 4. EVM Context and Actions | 0/4 | Not started | - |
