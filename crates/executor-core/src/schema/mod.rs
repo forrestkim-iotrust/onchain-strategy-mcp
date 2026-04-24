@@ -1,7 +1,10 @@
 //! Tool / prompt input schemas shared across the runtime.
 //!
-//! Task 1 wires up only the `execution` submodule so `executor-signer` can
-//! reference `SignedTransaction`. Task 2 adds `strategy`, `action`, `policy`,
-//! and `prompt_args` with the real `JsonSchema`-derived structs.
+//! Each submodule owns the `schemars::JsonSchema`-derived structs that the
+//! MCP server binds to tool names in Plan 02.
 
+pub mod action;
 pub mod execution;
+pub mod policy;
+pub mod prompt_args;
+pub mod strategy;
