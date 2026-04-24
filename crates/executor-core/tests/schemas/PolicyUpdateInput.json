@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PolicyUpdateInput",
+  "description": "Replace current policy (Phase 5 fills out the real shape).",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "description": "Opaque policy metadata accepted as a placeholder until Phase 5 finalises the policy model."
+    }
+  }
+}

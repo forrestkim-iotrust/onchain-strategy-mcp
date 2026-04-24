@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReviewEvmStrategyArgs",
+  "description": "Arguments for the `review_evm_strategy` prompt — points the reviewer at a strategy id.",
+  "type": "object",
+  "properties": {
+    "strategy_id": {
+      "description": "Strategy id whose source should be reviewed.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "strategy_id"
+  ]
+}

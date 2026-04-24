@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionIdInput",
+  "description": "Input for execution_get (Phase 2 implements persistence).",
+  "type": "object",
+  "properties": {
+    "execution_id": {
+      "description": "Opaque execution identifier returned from a previous `strategy_run_once`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "execution_id"
+  ]
+}

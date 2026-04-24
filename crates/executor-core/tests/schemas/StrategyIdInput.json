@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyIdInput",
+  "description": "Input referencing a registered strategy by id (Phase 2 fills behaviour).",
+  "type": "object",
+  "properties": {
+    "strategy_id": {
+      "description": "Strategy id returned from `strategy_register`.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "strategy_id"
+  ]
+}

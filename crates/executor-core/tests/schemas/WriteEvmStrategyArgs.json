@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WriteEvmStrategyArgs",
+  "description": "Arguments for the `write_evm_strategy` authoring prompt.",
+  "type": "object",
+  "properties": {
+    "chain_hint": {
+      "description": "Optional chain hint (e.g. \"base\", \"mainnet\") to steer prompt output.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "intent": {
+      "description": "Free-form intent describing the EVM automation goal.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "intent"
+  ]
+}
