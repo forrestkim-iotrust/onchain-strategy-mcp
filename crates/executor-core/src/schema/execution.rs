@@ -50,6 +50,37 @@ impl RunStatus {
     }
 }
 
+/// Outcome of a strategy run as recorded in `journal_actions` (D-06).
+///
+/// All six variants are declared at Phase-3 introduction so the schema golden
+/// locks the wire shape; Phase 5 (`SimulationFailure`, `PolicyDenied`) cannot
+/// trigger contract churn (D-05 future-lock pattern carry-over).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalActionOutcome {
+    Noop,
+    Actions,
+    ValidationError,
+    RuntimeError,
+    /// Phase 5 — simulation gate produced a failure result.
+    SimulationFailure,
+    /// Phase 5 — policy gate denied the action.
+    PolicyDenied,
+}
+
+impl JournalActionOutcome {
+    /// Phase-3 production code paths must only emit the first four (D-06
+    /// future-lock). `executor-state::journal::record_action_outcome`
+    /// consults this gate before INSERT and rejects reserved variants
+    /// with `StateError::InvalidInput`.
+    pub fn phase3_emittable(self) -> bool {
+        matches!(
+            self,
+            Self::Noop | Self::Actions | Self::ValidationError | Self::RuntimeError
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(description = "Response for execution_get (Phase 2 base run model).")]
 pub struct ExecutionGetResponse {

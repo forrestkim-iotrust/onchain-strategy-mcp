@@ -124,6 +124,73 @@ pub(crate) fn update_run_status(
     Ok(())
 }
 
+/// D-12 transition guard. Atomically updates `runs.status` only when the
+/// row's current status equals `from`. Returns `StateError::InvalidInput`
+/// (NOT `NotFound`) when the row exists but is in a different state — the
+/// caller's invariant is violated, not the row's existence.
+///
+/// `NotFound` is returned only when the row does not exist at all.
+/// Reserved-variant gate (`phase2_emittable`) is enforced for both `from`
+/// and `to` (you cannot transition INTO a reserved variant from Phase 3 code,
+/// nor declare you expect a reserved one).
+///
+/// Closes 02-REVIEW MR-01: prior `update_run_status` was unconditional and
+/// could overwrite a terminal status with an earlier-stage status. Phase 3's
+/// `strategy_run` handler MUST use this transition-guarded API for every
+/// status change.
+///
+/// `Succeeded → *` and `Failed → *` are Disallowed by D-12 (terminal). The
+/// guard naturally rejects them via the `WHERE status = ?from` clause when
+/// the caller asserts the wrong `from`. To prevent silent self-transitions
+/// such as `Succeeded → Succeeded` (caller asserts `from = Succeeded`, row
+/// IS Succeeded), the function additionally rejects any transition whose
+/// `from` is a terminal status.
+pub(crate) fn update_run_status_with_transition(
+    conn: &Connection,
+    run_id: &str,
+    from: RunStatus,
+    to: RunStatus,
+) -> Result<(), StateError> {
+    if !from.phase2_emittable() || !to.phase2_emittable() {
+        return Err(StateError::InvalidInput(format!(
+            "transition {from:?} → {to:?} involves a Phase 5/6 reserved status; \
+             not allowed from Phase 3 code paths"
+        )));
+    }
+    // D-12: Succeeded / Failed are terminal — any transition out of them is
+    // disallowed, even an idempotent self-transition (Succeeded → Succeeded).
+    if matches!(from, RunStatus::Succeeded | RunStatus::Failed) {
+        return Err(StateError::InvalidInput(format!(
+            "run {run_id} is in terminal state {from:?}; transition to {to:?} is disallowed (D-12)"
+        )));
+    }
+    let finished_at = matches!(to, RunStatus::Succeeded | RunStatus::Failed)
+        .then(super::strategies::now_rfc3339);
+    let affected = conn.execute(
+        "UPDATE runs SET status = ?1, finished_at = COALESCE(?2, finished_at) \
+         WHERE id = ?3 AND status = ?4",
+        params![status_to_wire(to), finished_at, run_id, status_to_wire(from)],
+    )?;
+    if affected == 0 {
+        // Distinguish NotFound vs InvalidInput by re-querying the row.
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM runs WHERE id = ?1",
+                params![run_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Err(StateError::NotFound(format!("run {run_id}")));
+        }
+        return Err(StateError::InvalidInput(format!(
+            "run {run_id} not in expected state {from:?} (transition guard)"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, StateError> {
     let row = conn
         .query_row(

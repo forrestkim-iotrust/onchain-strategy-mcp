@@ -10,12 +10,14 @@
 //! - `runs`: base CRUD (D-04b, D-05a) — Phase 3+ extends.
 
 pub mod error;
+pub mod journal;
 pub mod runs;
 pub mod schema;
 pub mod store;
 pub mod strategies;
 
 pub use error::StateError;
+pub use journal::{ActionEntry, LogEntry, SourceReadEntry};
 pub use runs::{Run, RunRepo};
 pub use store::StateStore;
 pub use strategies::{RegisterOutcome, Strategy, StrategySummary};

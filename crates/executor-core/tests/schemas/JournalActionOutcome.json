@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "JournalActionOutcome",
+  "description": "Outcome of a strategy run as recorded in `journal_actions` (D-06).\n\nAll six variants are declared at Phase-3 introduction so the schema golden\nlocks the wire shape; Phase 5 (`SimulationFailure`, `PolicyDenied`) cannot\ntrigger contract churn (D-05 future-lock pattern carry-over).",
+  "oneOf": [
+    {
+      "type": "string",
+      "enum": [
+        "noop",
+        "actions",
+        "validation_error",
+        "runtime_error"
+      ]
+    },
+    {
+      "description": "Phase 5 — simulation gate produced a failure result.",
+      "type": "string",
+      "const": "simulation_failure"
+    },
+    {
+      "description": "Phase 5 — policy gate denied the action.",
+      "type": "string",
+      "const": "policy_denied"
+    }
+  ]
+}

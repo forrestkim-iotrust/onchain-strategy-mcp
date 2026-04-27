@@ -115,4 +115,73 @@ impl StateStore {
     ) -> Result<Vec<runs::Run>, StateError> {
         runs::list_runs_for_strategy(&self.conn, strategy_id)
     }
+
+    /// D-12: transition-guarded status update. See
+    /// `runs::update_run_status_with_transition` doc.
+    pub fn update_run_status_with_transition(
+        &mut self,
+        run_id: &str,
+        from: RunStatus,
+        to: RunStatus,
+    ) -> Result<(), StateError> {
+        runs::update_run_status_with_transition(&self.conn, run_id, from, to)
+    }
+
+    // ---- Journal façade (Phase 3 D-06) ----
+
+    pub fn record_source_read(
+        &mut self,
+        run_id: &str,
+        kind: &str,
+        target: &str,
+        payload_json: Option<&str>,
+    ) -> Result<String, StateError> {
+        crate::journal::record_source_read(&self.conn, run_id, kind, target, payload_json)
+    }
+
+    pub fn record_action_outcome(
+        &mut self,
+        run_id: &str,
+        outcome: executor_core::schema::execution::JournalActionOutcome,
+        payload_json: &str,
+    ) -> Result<String, StateError> {
+        crate::journal::record_action_outcome(&self.conn, run_id, outcome, payload_json)
+    }
+
+    pub fn record_log(&mut self, run_id: &str, message: &str) -> Result<String, StateError> {
+        crate::journal::record_log(&self.conn, run_id, message)
+    }
+
+    /// Test-only deterministic-time variant for ordering assertions.
+    /// Mirrors `__test_insert_run_with_time`.
+    #[doc(hidden)]
+    pub fn __test_record_log_with_time(
+        &mut self,
+        run_id: &str,
+        message: &str,
+        recorded_at: &str,
+    ) -> Result<String, StateError> {
+        crate::journal::record_log_with_time(&self.conn, run_id, message, recorded_at)
+    }
+
+    pub fn list_source_reads_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::journal::SourceReadEntry>, StateError> {
+        crate::journal::list_source_reads_for_run(&self.conn, run_id)
+    }
+
+    pub fn list_actions_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::journal::ActionEntry>, StateError> {
+        crate::journal::list_actions_for_run(&self.conn, run_id)
+    }
+
+    pub fn list_logs_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::journal::LogEntry>, StateError> {
+        crate::journal::list_logs_for_run(&self.conn, run_id)
+    }
 }

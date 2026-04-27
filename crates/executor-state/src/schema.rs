@@ -31,6 +31,37 @@ CREATE TABLE IF NOT EXISTS runs (
     error        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_strategy_id ON runs(strategy_id);
+
+-- Phase 3 (D-06): three append-only journal tables.
+CREATE TABLE IF NOT EXISTS journal_source_reads (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL REFERENCES runs(id),
+    kind         TEXT NOT NULL,
+    target       TEXT NOT NULL,
+    payload_json TEXT,
+    recorded_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_journal_source_reads_run_id
+    ON journal_source_reads(run_id);
+
+CREATE TABLE IF NOT EXISTS journal_actions (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL REFERENCES runs(id),
+    outcome      TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    recorded_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_journal_actions_run_id
+    ON journal_actions(run_id);
+
+CREATE TABLE IF NOT EXISTS journal_logs (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL REFERENCES runs(id),
+    message      TEXT NOT NULL,
+    recorded_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_journal_logs_run_id
+    ON journal_logs(run_id);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {
