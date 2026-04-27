@@ -56,7 +56,7 @@ async fn tools_list_emits_full_surface() -> Result<()> {
         "strategy_list",
         "strategy_get",
         "strategy_delete",
-        "strategy_run_once",
+        "strategy_run",
         "execution_get",
         "policy_get",
         "policy_update",
@@ -93,13 +93,14 @@ async fn tools_list_emits_full_surface() -> Result<()> {
 // so only the still-phase-gated tools remain.
 #[tokio::test]
 async fn unimplemented_tools_return_phase_hint() -> Result<()> {
-    let cases: [(&str, u64); 2] = [("strategy_run_once", 6), ("policy_update", 5)];
+    // Plan 03-03: strategy_run_once was promoted to strategy_run (Phase 3,
+    // real handler). Only `policy_update` remains as a placeholder for Phase 5.
+    let cases: [(&str, u64); 1] = [("policy_update", 5)];
     for (tool, expected_phase) in cases {
         let mut proc = common::spawn_server_with_state(":memory:").await?;
         let _ = initialize(&mut proc).await?;
 
         let args = match tool {
-            "strategy_run_once" => json!({ "strategy_id": "s-1" }),
             "policy_update" => json!({}),
             _ => unreachable!(),
         };
@@ -207,7 +208,7 @@ async fn resources_surface_matches_contract() -> Result<()> {
         "missing execution template; got {template_uris:?}"
     );
     assert!(
-        template_uris.contains(&"journal://{execution_id}"),
+        template_uris.contains(&"journal://{run_id}"),
         "missing journal template; got {template_uris:?}"
     );
     assert_eq!(
@@ -1085,5 +1086,416 @@ async fn strategies_persist_across_restart() -> Result<()> {
         proc2.child.kill().await?;
     }
 
+    Ok(())
+}
+
+// ─────────── Plan 03-03: D-08a strategy_run integration tests (19) ───────────
+//
+// Each test spawns its own server with a tempdir-backed sqlite DB, drives
+// `strategy_run` via JSON-RPC, and asserts on either the `result` body
+// (success path) or the `error` envelope (failure path). For success
+// paths the test re-opens the StateStore directly to verify journal rows.
+//
+// `call_tool`, `extract_json_result`, and `spawn_server_with_state` are
+// already brought into scope earlier in the file via `use common::{..};`.
+
+/// Helper: register a strategy directly via executor-state and return its id.
+fn seed_strategy(db_path: &std::path::Path, name: &str, source: &str) -> Result<String> {
+    let mut store = executor_state::StateStore::open(db_path)?;
+    let outcome = store.register_strategy(name, source, None, None)?;
+    let id = match outcome {
+        executor_state::RegisterOutcome::Created(s)
+        | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+    };
+    Ok(id)
+}
+
+#[tokio::test]
+async fn strategy_run_returns_noop_for_minimal_strategy() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "noop_test", "(ctx) => \"noop\"")?;
+
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let body = extract_json_result(&r);
+    assert_eq!(body["status"].as_str(), Some("succeeded"));
+    assert_eq!(body["outcome"]["kind"].as_str(), Some("noop"));
+    assert_eq!(body["strategy_id"].as_str(), Some(strategy_id.as_str()));
+    let run_id = body["run_id"].as_str().expect("run_id present").to_string();
+    assert!(!run_id.is_empty());
+    assert!(body["finished_at"].as_str().is_some_and(|s| !s.is_empty()));
+    proc.child.kill().await?;
+
+    let store = executor_state::StateStore::open(&db_path)?;
+    let sources = store.list_source_reads_for_run(&run_id)?;
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].kind, "strategy_source");
+    assert_eq!(sources[0].target, strategy_id);
+    let actions = store.list_actions_for_run(&run_id)?;
+    assert_eq!(actions.len(), 1);
+    let outcome_json = serde_json::to_value(actions[0].outcome)?;
+    assert_eq!(outcome_json.as_str(), Some("noop"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_returns_actions_for_action_array_strategy() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "act", "(ctx) => [{kind:\"noop\"}]")?;
+
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let body = extract_json_result(&r);
+    assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
+    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["kind"].as_str(), Some("noop"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_returns_actions_for_empty_array() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "empty", "(ctx) => []")?;
+
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let body = extract_json_result(&r);
+    assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
+    assert_eq!(body["outcome"]["actions"].as_array().unwrap().len(), 0);
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_number_return() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "num", "(ctx) => 42")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope present");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert!(err["data"]["detail"].as_str().is_some_and(|s| s.contains("number")));
+    assert!(err["data"]["run_id"].as_str().is_some_and(|s| !s.is_empty()));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_object_return() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "obj", "(ctx) => ({foo: 1})")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_null_return() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "n", "(ctx) => null")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_promise_return() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "p", "(ctx) => Promise.resolve(\"noop\")")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(detail.contains("promise"), "detail missing 'promise': {detail}");
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_non_function_source() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    // Top-level expression evaluates to a string, not a function (violates D-05 Shape B).
+    let strategy_id = seed_strategy(&db_path, "nonfn", "\"noop\"")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        detail.contains("function") || detail.contains("(ctx)"),
+        "detail missing function/ctx hint: {detail}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_phase4_action_kind() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    // Action::Noop is the only Phase-3 variant; contract_call belongs to Phase 4.
+    let strategy_id =
+        seed_strategy(&db_path, "p4", "(ctx) => [{kind:\"contract_call\"}]")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_runtime_error_on_throw() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id =
+        seed_strategy(&db_path, "throw", "(ctx) => { throw new Error(\"nope\"); }")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
+    assert_eq!(err["data"]["kind"].as_str(), Some("exception"));
+    assert!(err["data"]["detail"].as_str().is_some_and(|s| s.contains("nope")));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_runtime_error_on_infinite_loop() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "loop", "(ctx) => { while(true){} }")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    // Wall-clock budget is 2s; allow ~5s for spawn + JSON-RPC overhead.
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })),
+    )
+    .await??;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["kind"].as_str(), Some("timeout"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_runtime_error_on_oom() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let src = "(ctx) => { let a=[]; while(true) a.push(new Array(1e6)); }";
+    let strategy_id = seed_strategy(&db_path, "oom", src)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })),
+    )
+    .await??;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    // Allocation-blowup may surface as "oom" or "exception" depending on
+    // where the rquickjs allocator runs out (the heap cap or an interrupt).
+    let kind = err["data"]["kind"].as_str().unwrap_or("");
+    assert!(
+        kind == "oom" || kind == "exception",
+        "expected kind oom|exception, got {kind}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_runtime_error_on_stack_overflow() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id =
+        seed_strategy(&db_path, "stack", "(ctx) => { function f(){f();} f(); }")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    let kind = err["data"]["kind"].as_str().unwrap_or("");
+    // rquickjs surfaces stack overflow either as a typed StackOverflow or
+    // as a generic Exception depending on the recursion depth path.
+    assert!(
+        kind == "stack_overflow" || kind == "exception",
+        "expected stack_overflow|exception, got {kind}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_deleted_strategy() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = {
+        let mut store = executor_state::StateStore::open(&db_path)?;
+        let outcome = store.register_strategy("d", "(ctx) => \"noop\"", None, None)?;
+        let sid = match outcome {
+            executor_state::RegisterOutcome::Created(s)
+            | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+        };
+        store.soft_delete_strategy(&sid)?;
+        sid
+    };
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32011));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_deleted"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_records_source_read_journal_row() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, "src", "(ctx) => \"noop\"")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let body = extract_json_result(&r);
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    proc.child.kill().await?;
+
+    let store = executor_state::StateStore::open(&db_path)?;
+    let sources = store.list_source_reads_for_run(&run_id)?;
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].kind, "strategy_source");
+    assert_eq!(sources[0].target, strategy_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_records_log_messages() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let src = "(ctx) => { ctx.log(\"hello\", 42); ctx.log(\"world\"); return \"noop\"; }";
+    let strategy_id = seed_strategy(&db_path, "logs", src)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let body = extract_json_result(&r);
+    let run_id = body["run_id"].as_str().unwrap().to_string();
+    proc.child.kill().await?;
+
+    let store = executor_state::StateStore::open(&db_path)?;
+    let logs = store.list_logs_for_run(&run_id)?;
+    assert_eq!(logs.len(), 2);
+    // Order between logs sharing the same recorded_at second falls back to
+    // ULID id ASC; ULID monotonicity within the same millisecond is not
+    // guaranteed by `Ulid::new()`, so assert membership rather than order.
+    let messages: std::collections::HashSet<String> =
+        logs.iter().map(|l| l.message.clone()).collect();
+    assert!(messages.contains("hello 42"), "missing 'hello 42'; got {messages:?}");
+    assert!(messages.contains("world"), "missing 'world'; got {messages:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_run_row_status_transitions_to_failed_on_error() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id =
+        seed_strategy(&db_path, "fail", "(ctx) => { throw new Error(\"bad\"); }")?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    let run_id = err["data"]["run_id"].as_str().unwrap().to_string();
+    proc.child.kill().await?;
+
+    let store = executor_state::StateStore::open(&db_path)?;
+    let run = store.get_run(&run_id)?.expect("run row exists");
+    assert_eq!(run.status, executor_core::schema::execution::RunStatus::Failed);
+    assert!(run.finished_at.is_some(), "finished_at must be populated on failed runs");
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_invalid_strategy_id_format_returns_invalid_params() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": "ZZZ" })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32602));
+    assert_eq!(err["data"]["code"].as_str(), Some("invalid_params"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_unknown_strategy_id_returns_not_found() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let strategy_id = "a".repeat(64);
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32014));
+    assert_eq!(err["data"]["code"].as_str(), Some("not_found"));
+    proc.child.kill().await?;
     Ok(())
 }
