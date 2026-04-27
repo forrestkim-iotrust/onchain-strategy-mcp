@@ -44,6 +44,10 @@ pub struct LogEntry {
     pub run_id: String,
     pub message: String,
     pub recorded_at: String,
+    /// Per-run monotonic counter assigned at INSERT (MR-04). Used as the
+    /// primary tie-break for ORDER BY when same-second / same-millisecond
+    /// inserts collide on `recorded_at`.
+    pub seq: i64,
 }
 
 fn outcome_to_wire(o: JournalActionOutcome) -> &'static str {
@@ -112,6 +116,18 @@ pub(crate) fn record_action_outcome(
     Ok(id)
 }
 
+/// Compute the next per-run `seq` for `journal_logs` (MR-04). Phase 3 is
+/// single-writer (one `Mutex<Connection>`), so the SELECT-then-INSERT pair
+/// is race-free; the schema-level `UNIQUE (run_id, seq)` is a backstop.
+fn next_log_seq(conn: &Connection, run_id: &str) -> Result<i64, StateError> {
+    let next: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), -1) + 1 FROM journal_logs WHERE run_id = ?1",
+        params![run_id],
+        |r| r.get(0),
+    )?;
+    Ok(next)
+}
+
 pub(crate) fn record_log(
     conn: &Connection,
     run_id: &str,
@@ -119,10 +135,11 @@ pub(crate) fn record_log(
 ) -> Result<String, StateError> {
     let id = ulid::Ulid::new().to_string();
     let now = super::strategies::now_rfc3339();
+    let seq = next_log_seq(conn, run_id)?;
     conn.execute(
-        "INSERT INTO journal_logs(id, run_id, message, recorded_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![&id, run_id, message, &now],
+        "INSERT INTO journal_logs(id, run_id, message, recorded_at, seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![&id, run_id, message, &now, seq],
     )?;
     Ok(id)
 }
@@ -137,10 +154,11 @@ pub(crate) fn record_log_with_time(
     recorded_at: &str,
 ) -> Result<String, StateError> {
     let id = ulid::Ulid::new().to_string();
+    let seq = next_log_seq(conn, run_id)?;
     conn.execute(
-        "INSERT INTO journal_logs(id, run_id, message, recorded_at) \
-         VALUES (?1, ?2, ?3, ?4)",
-        params![&id, run_id, message, recorded_at],
+        "INSERT INTO journal_logs(id, run_id, message, recorded_at, seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![&id, run_id, message, recorded_at, seq],
     )?;
     Ok(id)
 }
@@ -200,10 +218,13 @@ pub(crate) fn list_logs_for_run(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Vec<LogEntry>, StateError> {
+    // MR-04: tie-break on `seq` (per-run monotonic at INSERT) — recorded_at
+    // is RFC3339 second-granularity and ULID `id` is not insertion-ordered
+    // within a same-millisecond bucket.
     let mut stmt = conn.prepare(
-        "SELECT id, run_id, message, recorded_at \
+        "SELECT id, run_id, message, recorded_at, seq \
          FROM journal_logs WHERE run_id = ?1 \
-         ORDER BY recorded_at ASC, id ASC",
+         ORDER BY recorded_at ASC, seq ASC",
     )?;
     let rows = stmt
         .query_map(params![run_id], |r| {
@@ -212,6 +233,7 @@ pub(crate) fn list_logs_for_run(
                 run_id: r.get(1)?,
                 message: r.get(2)?,
                 recorded_at: r.get(3)?,
+                seq: r.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, rusqlite::Error>>()?;

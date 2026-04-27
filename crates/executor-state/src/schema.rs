@@ -54,11 +54,20 @@ CREATE TABLE IF NOT EXISTS journal_actions (
 CREATE INDEX IF NOT EXISTS idx_journal_actions_run_id
     ON journal_actions(run_id);
 
+-- MR-04: `seq` is a per-run monotonic counter assigned at INSERT
+-- (see `journal::record_log`). It is the primary tie-break for
+-- ORDER BY (recorded_at, seq) — same-second / same-millisecond
+-- log inserts are common (RFC3339 second granularity, ULID random
+-- suffix is not insertion-ordered within a millisecond bucket).
+-- UNIQUE (run_id, seq) makes the monotonic invariant a schema-level
+-- contract: a regression in `record_log` would fail at INSERT.
 CREATE TABLE IF NOT EXISTS journal_logs (
     id           TEXT PRIMARY KEY,
     run_id       TEXT NOT NULL REFERENCES runs(id),
     message      TEXT NOT NULL,
-    recorded_at  TEXT NOT NULL
+    recorded_at  TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    UNIQUE (run_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_journal_logs_run_id
     ON journal_logs(run_id);
