@@ -7,5 +7,21 @@ license.workspace = true
 [lints]
 workspace = true
 
+# New deps (rusqlite/sha2/hex/ulid/chrono/tempfile) are intentionally NOT promoted
+# to workspace dependencies — only `executor-state` consumes them today, mirroring
+# the Phase 1 `[logging]`-only precedent of letting each Phase land its own
+# isolated stack before promotion to workspace scope is justified.
 [dependencies]
 executor-core = { path = "../executor-core" }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sha2 = "0.11"
+hex = "0.4"
+ulid = { version = "1.2", features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
