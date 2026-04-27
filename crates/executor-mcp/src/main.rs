@@ -8,8 +8,12 @@ use rmcp::{ServiceExt, transport::stdio};
 async fn main() -> Result<()> {
     let cfg = config::load()?;
     logging::init(&cfg)?;
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "executor-mcp starting");
-    let service = ExecutorServer::new().serve(stdio()).await?;
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        state_path = cfg.state.path.as_str(),
+        "executor-mcp starting"
+    );
+    let service = ExecutorServer::new(&cfg.state)?.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

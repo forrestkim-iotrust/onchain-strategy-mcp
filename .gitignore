@@ -1,1 +1,9 @@
 /target
+
+# Runtime state files (Phase 2): SQLite DB plus WAL/shm sidecars created
+# whenever the MCP server boots in the current working directory. These are
+# never source-controlled — agents either pass an explicit `[state].path` via
+# config or accept the cwd-relative default `./state.db`.
+state.db
+state.db-shm
+state.db-wal
