@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 03-01 complete; Phase 03 wave 1 of 3
-last_updated: "2026-04-27T07:20:15Z"
+stopped_at: Plan 03-02 complete; Phase 03 wave 2 of 3
+last_updated: "2026-04-27T07:37:44.300Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 7
-  completed_plans: 7
-  percent: 33
+  total_plans: 9
+  completed_plans: 8
+  percent: 89
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 ## Current Position
 
 Phase: 03 (javascript-strategy-runner) — EXECUTING
-Plan: 1 of 3 complete
-Status: Wave 1 complete (strategy-js sandbox + STR-04 closed)
+Plan: 2 of 3 complete
+Status: Ready to execute
 Last activity: 2026-04-27
 
-Progress: [███░░░░░░░] 33%
+Progress: [█████████░] 89%
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Progress: [███░░░░░░░] 33%
 | Phase 02 P02 | 480 | 3 tasks | 11 files |
 | Phase 02 P03 | 5 | 2 tasks | 4 files |
 | Phase 03 P01 | ~8 min | 3 tasks | 8 created + 2 modified |
+| Phase 03 P02 | 25 | 3 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,9 @@ Recent decisions affecting current work:
 - Plan 03-01: `Context::base` cannot evaluate user JS (ships only base objects, no Eval intrinsic). Use `Context::builder().with::<intrinsic::All>()` — covers Eval/Promise/JSON/etc but still excludes module/import/require (those only ride on `Context::full`). D-11 invariant preserved.
 - Plan 03-01: `intrinsic::Promise` exposes `queueMicrotask` on globalThis. A JS prelude scrub (`delete globalThis[name]` for the entire D-11 list) runs before user source — defensive against future intrinsic additions.
 - Plan 03-01: Dynamic `import()` with no module loader returns a rejected Promise (does NOT throw). Test asserts via D-10 InvalidOutput(promise) path.
+- Plan 03-02: STRICT D-12 — Succeeded → * disallowed at the transition guard (terminal state); idempotent re-finalize via COALESCE deferred.
+- Plan 03-02: ctx.log buffer uses Rc<RefCell<Vec<String>>>; rquickjs Function::new requires only 'js (not Send + 'static), single-threaded inside ctx.with — no Arc/Mutex needed.
+- Plan 03-02: tokio sync feature pinned per-crate in strategy-js (workspace tokio omits sync). Mirrors executor-mcp's per-crate feature additions.
 
 ### Pending Todos
 
@@ -111,8 +115,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T07:20:15Z
-Stopped at: Plan 03-01 complete; Phase 03 wave 1 of 3
+Last session: 2026-04-27T07:37:35.592Z
+Stopped at: Plan 03-02 complete; Phase 03 wave 2 of 3
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)

@@ -17,7 +17,8 @@
 - [x] **STR-01**: Agent can register a JavaScript strategy with name, source, and metadata. *(Phase 2-01 storage; 02-02 MCP wiring + stdio tests; 02-03 Phase 2 close.)*
 - [x] **STR-02
 **: Agent can list, inspect, and delete registered strategies.
-- [ ] **STR-03**: Runtime can execute a registered strategy with a sandboxed `ctx`.
+- [x] **STR-03
+**: Runtime can execute a registered strategy with a sandboxed `ctx`.
 - [x] **STR-04**: Strategy code cannot access private keys, filesystem, process APIs, arbitrary network, or direct RPC clients. *(03-01 strategy-js sandbox: D-03 limits, D-11 forbidden-globals scrub + 8 regression tests, no loader/dyn-load features.)*
 - [ ] **STR-05**: Strategy returns `Action[]` or `noop`, and runtime rejects unsupported return shapes.
 
@@ -58,7 +59,8 @@
 
 - [x] **STJ-01**: Runtime persists strategies and strategy metadata locally. *(02-01 schema + repo; 02-02 MCP wiring; 02-02 strategies_persist_across_restart end-to-end stdio test.)*
 - [x] **STJ-02**: Runtime persists each strategy run with run ID, strategy ID, started time, and status. *(02-01 base CRUD + ULID + phase2_emittable; 02-03 lifecycle tests + run_roundtrip_insert_get_update_status end-to-end MCP stdio proof + run_status_schema_includes_future_variants D-08a.)*
-- [ ] **STJ-03**: Runtime records source reads performed during each run.
+- [x] **STJ-03
+**: Runtime records source reads performed during each run.
 - [ ] **STJ-04**: Runtime records returned actions and validation errors.
 - [ ] **STJ-05**: Runtime records simulation results and policy decisions.
 - [ ] **STJ-06**: Runtime records tx hash, receipt status, gas used, and execution errors.
