@@ -81,6 +81,34 @@ impl JournalActionOutcome {
     }
 }
 
+/// Strategy outcome — the success-shape part of [`StrategyRunResponse`].
+/// Validation errors and runtime errors are surfaced as MCP errors, NOT as
+/// `StrategyOutcome` variants (D-08).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[schemars(description = "Outcome of a successful strategy run (D-08).")]
+pub enum StrategyOutcome {
+    Noop,
+    Actions { actions: Vec<crate::schema::action::Action> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Response for strategy_run (Phase 3, D-08).")]
+pub struct StrategyRunResponse {
+    /// ULID of the run row inserted at handler start.
+    pub run_id: String,
+    /// Echo of the requested strategy id.
+    pub strategy_id: String,
+    /// Terminal status — Phase 3 returns only on terminal status (Succeeded
+    /// for normal flow; Failed paths surface as MCP errors instead).
+    pub status: RunStatus,
+    pub started_at: String,
+    /// Always populated for a successful response — Phase 3 runs are
+    /// synchronous to completion.
+    pub finished_at: String,
+    pub outcome: StrategyOutcome,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[schemars(description = "Response for execution_get (Phase 2 base run model).")]
 pub struct ExecutionGetResponse {

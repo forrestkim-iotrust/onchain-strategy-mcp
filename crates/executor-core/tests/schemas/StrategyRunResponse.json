@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyRunResponse",
+  "description": "Response for strategy_run (Phase 3, D-08).",
+  "type": "object",
+  "properties": {
+    "finished_at": {
+      "description": "Always populated for a successful response — Phase 3 runs are\nsynchronous to completion.",
+      "type": "string"
+    },
+    "outcome": {
+      "$ref": "#/$defs/StrategyOutcome"
+    },
+    "run_id": {
+      "description": "ULID of the run row inserted at handler start.",
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "status": {
+      "description": "Terminal status — Phase 3 returns only on terminal status (Succeeded\nfor normal flow; Failed paths surface as MCP errors instead).",
+      "$ref": "#/$defs/RunStatus"
+    },
+    "strategy_id": {
+      "description": "Echo of the requested strategy id.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "strategy_id",
+    "status",
+    "started_at",
+    "finished_at",
+    "outcome"
+  ],
+  "$defs": {
+    "Action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "noop"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "RunStatus": {
+      "description": "All run lifecycle states (D-05). Phase 2 emits only the first four\n(`queued`/`running`/`succeeded`/`failed`); the remaining three are\n**future-reserved** for Phase 5 (`simulation_denied`, `policy_denied`)\nand Phase 6 (`canceled`). They are declared here at Phase 2 to lock the\nagent-facing schema golden once and avoid contract churn later.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed"
+          ]
+        },
+        {
+          "description": "Phase 6 — cancellation pathway not yet wired.",
+          "type": "string",
+          "const": "canceled"
+        },
+        {
+          "description": "Phase 5 — simulation rejection.",
+          "type": "string",
+          "const": "simulation_denied"
+        },
+        {
+          "description": "Phase 5 — policy rejection.",
+          "type": "string",
+          "const": "policy_denied"
+        }
+      ]
+    },
+    "StrategyOutcome": {
+      "description": "Outcome of a successful strategy run (D-08).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "noop"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "actions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Action"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "actions"
+            }
+          },
+          "required": [
+            "kind",
+            "actions"
+          ]
+        }
+      ]
+    }
+  }
+}

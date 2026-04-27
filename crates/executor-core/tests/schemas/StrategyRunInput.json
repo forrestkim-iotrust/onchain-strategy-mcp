@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyRunInput",
+  "description": "Execute a registered JavaScript strategy once in a sandbox.",
+  "type": "object",
+  "properties": {
+    "strategy_id": {
+      "description": "Strategy id (lower-case hex SHA-256, 64 chars).",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "strategy_id"
+  ]
+}

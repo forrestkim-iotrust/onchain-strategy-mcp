@@ -18,6 +18,7 @@
 use executor_state::StateError;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 use serde_json::json;
+use strategy_js::RuntimeError;
 
 /// JSON-RPC 2.0 server-defined range: `-32000..-32099`.
 /// We carve out `-32010` for "unimplemented feature".
@@ -31,6 +32,91 @@ pub const STORAGE_NAME_CONFLICT: ErrorCode = ErrorCode(-32015);
 pub const STORAGE_ERROR: ErrorCode = ErrorCode(-32016);
 /// JSON-RPC 2.0 standard "Invalid params" — used for D-09 validation failures.
 pub const INVALID_PARAMS: ErrorCode = ErrorCode(-32602);
+
+// ─────────── Phase 3 (D-07) ───────────
+
+/// Strategy is soft-deleted (`strategy_run` short-circuit before insert_run).
+pub const STRATEGY_DELETED: ErrorCode = ErrorCode(-32011);
+/// Sandbox-level failure: timeout / OOM / stack_overflow / exception / engine_init.
+pub const STRATEGY_RUNTIME_ERROR: ErrorCode = ErrorCode(-32017);
+/// Strategy returned a value that is not `"noop"` / `Action[]`,
+/// returned a Promise (D-10), or violated Shape B (D-05).
+pub const STRATEGY_INVALID_OUTPUT: ErrorCode = ErrorCode(-32018);
+
+/// Build a `STRATEGY_DELETED` (-32011) error. Carries `data.code = "strategy_deleted"`
+/// and `data.strategy_id` so agents can re-register before retrying.
+pub fn strategy_deleted(strategy_id: &str) -> McpError {
+    McpError::new(
+        STRATEGY_DELETED,
+        format!("strategy {strategy_id} is soft-deleted; cannot run"),
+        Some(json!({
+            "code": "strategy_deleted",
+            "strategy_id": strategy_id,
+        })),
+    )
+}
+
+/// Build a `STRATEGY_RUNTIME_ERROR` (-32017) error with a typed `data.kind`
+/// so agents can dispatch on the runtime failure mode without parsing the
+/// free-form message.
+pub fn strategy_runtime_error(
+    kind: &'static str,
+    detail: impl Into<String>,
+    run_id: &str,
+) -> McpError {
+    let detail = detail.into();
+    McpError::new(
+        STRATEGY_RUNTIME_ERROR,
+        format!("strategy runtime error ({kind}): {detail}"),
+        Some(json!({
+            "code": "strategy_runtime_error",
+            "kind": kind,
+            "detail": detail,
+            "run_id": run_id,
+        })),
+    )
+}
+
+/// Build a `STRATEGY_INVALID_OUTPUT` (-32018) error. `data.detail` carries
+/// the rejection reason; `data.run_id` references the run row whose journal
+/// captured the validation failure.
+pub fn strategy_invalid_output(detail: impl Into<String>, run_id: &str) -> McpError {
+    let detail = detail.into();
+    McpError::new(
+        STRATEGY_INVALID_OUTPUT,
+        format!("strategy invalid output: {detail}"),
+        Some(json!({
+            "code": "strategy_invalid_output",
+            "detail": detail,
+            "run_id": run_id,
+        })),
+    )
+}
+
+/// Classify a [`RuntimeError`] into the appropriate MCP error envelope.
+/// `InvalidOutput` becomes `-32018`; everything else becomes `-32017` with
+/// a typed `data.kind` field for agent dispatch.
+///
+/// `EngineInit` failures are rare host-level problems (rquickjs Runtime
+/// construction failed); we surface them as `kind = "exception"` so agents
+/// only need to handle four runtime-error kinds (`timeout`, `oom`,
+/// `stack_overflow`, `exception`).
+pub fn map_runtime_error(e: RuntimeError, run_id: &str) -> McpError {
+    match e {
+        RuntimeError::Timeout => {
+            strategy_runtime_error("timeout", "wall-clock budget exceeded", run_id)
+        }
+        RuntimeError::Oom => strategy_runtime_error("oom", "heap budget exceeded", run_id),
+        RuntimeError::StackOverflow => {
+            strategy_runtime_error("stack_overflow", "max stack size exceeded", run_id)
+        }
+        RuntimeError::Exception(msg) => strategy_runtime_error("exception", msg, run_id),
+        RuntimeError::EngineInit(msg) => {
+            strategy_runtime_error("exception", format!("engine init: {msg}"), run_id)
+        }
+        RuntimeError::InvalidOutput { detail } => strategy_invalid_output(detail, run_id),
+    }
+}
 
 /// Build an `unimplemented` error for `tool_name`, pointing agents at the
 /// phase where it will land.
@@ -161,6 +247,82 @@ mod tests {
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "storage_error");
         assert!(e.message.contains("boom"), "message missing detail: {}", e.message);
+    }
+
+    #[test]
+    fn strategy_deleted_uses_32011() {
+        let e = strategy_deleted("abc");
+        assert_eq!(e.code, STRATEGY_DELETED);
+        assert_eq!(e.code, ErrorCode(-32011));
+        let data = e.data.as_ref().expect("data present");
+        assert_eq!(data["code"], "strategy_deleted");
+        assert_eq!(data["strategy_id"], "abc");
+    }
+
+    #[test]
+    fn strategy_invalid_output_uses_32018_carries_run_id_and_detail() {
+        let e = strategy_invalid_output("got number", "01ARZ123");
+        assert_eq!(e.code, STRATEGY_INVALID_OUTPUT);
+        assert_eq!(e.code, ErrorCode(-32018));
+        let data = e.data.as_ref().expect("data present");
+        assert_eq!(data["code"], "strategy_invalid_output");
+        assert_eq!(data["detail"], "got number");
+        assert_eq!(data["run_id"], "01ARZ123");
+    }
+
+    #[test]
+    fn strategy_runtime_error_timeout_uses_32017_with_kind_timeout() {
+        let e = strategy_runtime_error("timeout", "wall clock", "01ARZ123");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.code, ErrorCode(-32017));
+        let data = e.data.as_ref().expect("data present");
+        assert_eq!(data["code"], "strategy_runtime_error");
+        assert_eq!(data["kind"], "timeout");
+        assert_eq!(data["detail"], "wall clock");
+        assert_eq!(data["run_id"], "01ARZ123");
+    }
+
+    #[test]
+    fn map_runtime_error_classifies_each_variant() {
+        // Timeout
+        let e = map_runtime_error(RuntimeError::Timeout, "rid");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "timeout");
+        // Oom
+        let e = map_runtime_error(RuntimeError::Oom, "rid");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "oom");
+        // StackOverflow
+        let e = map_runtime_error(RuntimeError::StackOverflow, "rid");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "stack_overflow");
+        // Exception
+        let e = map_runtime_error(RuntimeError::Exception("boom".into()), "rid");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "exception");
+        assert_eq!(e.data.as_ref().unwrap()["detail"], "boom");
+        // EngineInit → mapped to "exception"
+        let e = map_runtime_error(RuntimeError::EngineInit("rt fail".into()), "rid");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "exception");
+        assert!(
+            e.data
+                .as_ref()
+                .unwrap()["detail"]
+                .as_str()
+                .is_some_and(|s| s.contains("engine init"))
+        );
+        // InvalidOutput → -32018, no kind
+        let e = map_runtime_error(
+            RuntimeError::InvalidOutput {
+                detail: "promise return".into(),
+            },
+            "rid",
+        );
+        assert_eq!(e.code, STRATEGY_INVALID_OUTPUT);
+        assert_eq!(e.data.as_ref().unwrap()["code"], "strategy_invalid_output");
+        assert_eq!(e.data.as_ref().unwrap()["detail"], "promise return");
+        assert_eq!(e.data.as_ref().unwrap()["run_id"], "rid");
     }
 
     #[test]

@@ -25,6 +25,7 @@ toml.workspace = true
 executor-core = { path = "../executor-core" }
 executor-state = { path = "../executor-state" }
 executor-signer = { path = "../executor-signer" }
+strategy-js = { path = "../strategy-js" }            # Plan 03-03: needed by tools.rs strategy_run handler.
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal", "process", "io-util", "time"] }

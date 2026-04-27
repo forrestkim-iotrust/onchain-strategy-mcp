@@ -13,13 +13,16 @@
 //! contract.
 
 use executor_core::schema::{
-    execution::{ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome, RunStatus},
+    execution::{
+        ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome, RunStatus, StrategyOutcome,
+        StrategyRunResponse,
+    },
     policy::PolicyUpdateInput,
     prompt_args::{ReviewEvmStrategyArgs, WriteEvmStrategyArgs},
     strategy::{
         StrategyDeleteResponse, StrategyGetInput, StrategyGetResponse, StrategyIdInput,
         StrategyListResponse, StrategyRegisterInput, StrategyRegisterResponse,
-        StrategyRunOnceInput,
+        StrategyRunInput,
     },
 };
 use schemars::schema_for;
@@ -59,8 +62,18 @@ fn strategy_id_input_schema_stable() {
 }
 
 #[test]
-fn strategy_run_once_input_schema_stable() {
-    assert_schema_matches_golden("StrategyRunOnceInput", schema_for!(StrategyRunOnceInput));
+fn strategy_run_input_schema_stable() {
+    assert_schema_matches_golden("StrategyRunInput", schema_for!(StrategyRunInput));
+}
+
+#[test]
+fn strategy_run_response_schema_stable() {
+    assert_schema_matches_golden("StrategyRunResponse", schema_for!(StrategyRunResponse));
+}
+
+#[test]
+fn strategy_outcome_schema_stable() {
+    assert_schema_matches_golden("StrategyOutcome", schema_for!(StrategyOutcome));
 }
 
 #[test]

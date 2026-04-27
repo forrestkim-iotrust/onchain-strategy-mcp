@@ -31,12 +31,20 @@ pub struct StrategyIdInput {
     pub strategy_id: String,
 }
 
+/// Phase-3 input for the `strategy_run` MCP tool. Replaces the Phase-1
+/// `StrategyRunOnceInput` placeholder; the alias below preserves the old
+/// name for one phase to soften the rename.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Input for strategy_run_once (Phase 3 wires the JS sandbox).")]
-pub struct StrategyRunOnceInput {
-    #[schemars(description = "Strategy id to execute once.")]
+#[serde(deny_unknown_fields)]
+#[schemars(description = "Execute a registered JavaScript strategy once in a sandbox.")]
+pub struct StrategyRunInput {
+    #[schemars(description = "Strategy id (lower-case hex SHA-256, 64 chars).")]
     pub strategy_id: String,
 }
+
+/// Deprecated alias preserved for one phase. Phase 4 may delete it.
+#[deprecated(note = "Use `StrategyRunInput` instead. The `_once` qualifier was a Phase-1 placeholder.")]
+pub use StrategyRunInput as StrategyRunOnceInput;
 
 /// XOR input for `strategy_get`: agent supplies either the content-addressed
 /// `strategy_id` or the human-friendly `name` (active strategies only).
