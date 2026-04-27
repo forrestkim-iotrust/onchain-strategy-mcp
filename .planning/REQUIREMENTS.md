@@ -23,7 +23,7 @@
 
 ### Context API
 
-- [ ] **CTX-01**: `ctx.evm.readContract` can perform ABI-based generic contract reads.
+- [x] **CTX-01**: `ctx.evm.readContract` can perform ABI-based generic contract reads. *(04-01 executor-evm crate + read_contract eth_call lifecycle + ctx.evm.readContract host binding; demonstrable end-to-end via `cargo test -p executor-evm --features anvil-tests --test read_contract_anvil read_counter_number_returns_zero`.)*
 - [ ] **CTX-02**: `ctx.evm.erc20Balance` can read ERC20 balances.
 - [ ] **CTX-03**: `ctx.evm.erc20Allowance` can read ERC20 allowances.
 - [ ] **CTX-04**: `ctx.evm.nativeBalance` can read native token balance.
@@ -109,7 +109,7 @@
 | STR-03 | Phase 3 | Complete (03-03 strategy_run MCP tool — 8-step handler + 19 D-08a stdio tests) |
 | STR-04 | Phase 3 | Complete (03-01 strategy-js sandbox + D-11 regression suite) |
 | STR-05 | Phase 3 | Complete (03-03 validate_strategy_output + STRATEGY_INVALID_OUTPUT -32018) |
-| CTX-01 | Phase 4 | Pending |
+| CTX-01 | Phase 4 | Complete (04-01 executor-evm crate + ctx.evm.readContract host binding) |
 | CTX-02 | Phase 4 | Pending |
 | CTX-03 | Phase 4 | Pending |
 | CTX-04 | Phase 4 | Pending |

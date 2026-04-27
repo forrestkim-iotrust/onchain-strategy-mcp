@@ -75,7 +75,7 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 04-01: Alloy provider and ABI read adapter
+- [x] 04-01: Alloy provider and ABI read adapter
 - [ ] 04-02: ERC20/native read helpers
 - [ ] 04-03: Contract call, raw call, ERC20, and native action builders
 - [ ] 04-04: Units/address helpers and action validation fixtures

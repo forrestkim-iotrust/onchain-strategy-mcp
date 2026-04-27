@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 03-03 complete; Phase 03 complete (3/3 plans)
-last_updated: "2026-04-27T08:30:00.000Z"
+stopped_at: Plan 04-01 complete; Phase 04 in progress (1/4 plans)
+last_updated: "2026-04-27T10:30:00.000Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 3
-  total_plans: 9
-  completed_plans: 9
-  percent: 100
+  total_plans: 13
+  completed_plans: 10
+  percent: 77
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 03 (javascript-strategy-runner) — COMPLETE
-Plan: 3 of 3 complete
-Status: Phase 3 closed; ready to plan Phase 4 (EVM Context and Actions)
+Phase: 04 (evm-context-and-actions) — IN PROGRESS
+Plan: 1 of 4 complete
+Status: Plan 04-01 closed (executor-evm scaffold + readContract host binding); next is 04-02 (ERC20 + native helpers)
 Last activity: 2026-04-27
 
-Progress: [██████████] 100% of currently-planned phases (Phase 3/9 of v1)
+Progress: [████████░░] ~77% across 13 planned plans (10/13)
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ Progress: [██████████] 100% of currently-planned phases (Pha
 | Phase 03 P01 | ~8 min | 3 tasks | 8 created + 2 modified |
 | Phase 03 P02 | 25 | 3 tasks | 16 files |
 | Phase 03 P03 | ~12 min | 3 tasks | 3 created + 9 modified + 1 deleted |
+| Phase 04 P01 | ~30 min | 3 tasks | 14 created + 14 modified |
 
 ## Accumulated Context
 
@@ -98,12 +99,20 @@ Recent decisions affecting current work:
 - Plan 03-03: kept unimplemented_tools_return_phase_hint with one case (policy_update) instead of deleting — preserves regression-detection lattice.
 - Plan 03-03: log-message ordering test asserts HashSet membership (ULID monotonicity within the same millisecond is not guaranteed by Ulid::new()).
 - Plan 03-03: journal:// resource serialises JournalActionOutcome via serde_json::to_value (NEVER format!("{:?}",..) which corrupts SimulationFailure -> "simulationfailure").
+- Plan 04-01: alloy 2.0.1 verified via `cargo tree -p executor-evm`; per-crate dep pinning preserved (NOT promoted to workspace.dependencies until Phase 5 adds executor-mcp as second consumer).
+- Plan 04-01: alloy 2.0 requires `Provider` trait in scope for `.erased()`; `JsonAbiExt + FunctionExt` for `abi_encode_input/abi_decode_output` — added explicit trait imports.
+- Plan 04-01: rquickjs `Function::new` closure for `Object<'js> → Value<'js>` needs explicit `for<'js>` higher-rank lifetime via a helper `fn make_..._closure(...) -> impl for<'js> Fn(...) + 'static` — Value<'js> is invariant.
+- Plan 04-01: NOTE-3 logged — empty-bytes "calling missing contract" surfaces as `evm_decode_error` (not `evm_revert`); custom-revert errors with non-`Error(string)` selector surface as `evm_revert{reason:"unknown"}`. Both shapes accepted by tests.
+- Plan 04-01: ctx.evm.readContract uses `Handle::try_current() + block_in_place + handle.block_on()` inside spawn_blocking; falls back to a transient current-thread runtime for sync unit tests with no ambient runtime.
+- Plan 04-01: `ctx_object_shape_matches_d04` Phase-3 test updated to include `"evm"` key — expected breaking change as Phase 4 adds the namespace.
+- Plan 04-01: executor-evm re-exports `alloy::providers::DynProvider` so executor-mcp / strategy-js can name `Arc<DynProvider>` without direct alloy deps (D-02 isolation).
 
 ### Pending Todos
 
 - Phase 3 complete (3/3 plans). All 5 phase requirements (STR-03/04/05, STJ-03/04) closed.
-- Workspace: 175 tests passing across 23 suites; clippy clean (`-D warnings`); no `println!`/`eprintln!`/`dbg!` in `src/`.
-- Next: plan Phase 4 (EVM Context and Actions) — `ctx.evm.*` reads, action builders for ContractCall/RawCall/Erc20*/NativeTransfer (CTX-01..09).
+- Phase 4 — Plan 04-01 complete (CTX-01 wired end-to-end via anvil-gated read_counter_number_returns_zero).
+- Workspace: 213 tests passing across 29 suites; clippy clean (`-D warnings`); no `println!`/`eprintln!`/`dbg!` in `src/` (one approved `eprintln!` in AnvilFixture skip path per D-14).
+- Next: Plan 04-02 (ERC20 read helpers + native read helpers + flat aliases).
 
 ### Blockers/Concerns
 
@@ -121,8 +130,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T08:30:00.000Z
-Stopped at: Plan 03-03 complete; Phase 03 complete (3/3 plans)
+Last session: 2026-04-27T10:30:00.000Z
+Stopped at: Plan 04-01 complete; Phase 04 in progress (1/4 plans). CTX-01 demonstrable end-to-end. Workspace 213 tests / clippy clean.
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)
