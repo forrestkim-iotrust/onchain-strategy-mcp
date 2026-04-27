@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Plan 02-03 complete; Phase 02 closed
-last_updated: "2026-04-27T03:37:45.378Z"
+status: executing
+stopped_at: Plan 03-01 complete; Phase 03 wave 1 of 3
+last_updated: "2026-04-27T07:20:15Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 2
-  total_plans: 6
-  completed_plans: 6
-  percent: 100
+  total_plans: 7
+  completed_plans: 7
+  percent: 33
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 02 (strategy-state-and-journal) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 03 (javascript-strategy-runner) — EXECUTING
+Plan: 1 of 3 complete
+Status: Wave 1 complete (strategy-js sandbox + STR-04 closed)
 Last activity: 2026-04-27
 
-Progress: [██████████] 100%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
@@ -54,6 +54,7 @@ Progress: [██████████] 100%
 
 | Phase 02 P02 | 480 | 3 tasks | 11 files |
 | Phase 02 P03 | 5 | 2 tasks | 4 files |
+| Phase 03 P01 | ~8 min | 3 tasks | 8 created + 2 modified |
 
 ## Accumulated Context
 
@@ -84,12 +85,15 @@ Recent decisions affecting current work:
 - Plan 02-03: list_runs_for_strategy ORDER BY changed from DESC (Plan 02-01 vestigial) to ASC, id ASC per D-04b — id tie-breaker handles same-second now_rfc3339 collisions
 - Plan 02-03: RunStatus future-variants walker collects BOTH enum[] strings and const strings — schemars 1.x emits oneOf:[{enum:[4]},const,const,const] not flat enum[7]
 - Phase 02 complete: STJ-02 closed; STR-01/STR-02/STJ-01 still tracked (planning artifact lifecycle vs runtime emission distinction)
+- Plan 03-01: `Context::base` cannot evaluate user JS (ships only base objects, no Eval intrinsic). Use `Context::builder().with::<intrinsic::All>()` — covers Eval/Promise/JSON/etc but still excludes module/import/require (those only ride on `Context::full`). D-11 invariant preserved.
+- Plan 03-01: `intrinsic::Promise` exposes `queueMicrotask` on globalThis. A JS prelude scrub (`delete globalThis[name]` for the entire D-11 list) runs before user source — defensive against future intrinsic additions.
+- Plan 03-01: Dynamic `import()` with no module loader returns a rejected Promise (does NOT throw). Test asserts via D-10 InvalidOutput(promise) path.
 
 ### Pending Todos
 
-- Plan 02-01 complete: `executor-state` storage layer + response schemas + `[state]` config section all landed. `cargo test --workspace` runs 52 tests, all green; clippy clean.
-- Next: Plan 02-02 — wire `strategy_register` / `strategy_list` / `strategy_get` / `strategy_delete` / `execution_get` MCP tool handlers to `StateStore`, add `Arc<tokio::sync::Mutex<StateStore>>` field to `ExecutorServer` with `spawn_blocking` + `blocking_lock` bridge, populate `resources/read` for `strategy://{id}`, add input validation (D-09 limits), and `map_state_error` (-32014/-32015/-32016).
-- Plan 02-03 — Run-status emission paths (queued→running→succeeded/failed) wired from MCP layer; reused tempdir test harness for `strategies_persist_across_restart`.
+- Plan 03-01 complete: `strategy-js` crate with `Sandbox::execute(source, &mut CtxHost) -> serde_json::Value`, D-03 limits, D-05 Shape B, D-10 promise reject, D-11 forbidden-globals scrub. STR-04 closed at runtime layer. `cargo test --workspace` runs 114 tests; clippy clean.
+- Next: Plan 03-02 — replace `CtxStub` with real `RuntimeContext` impl `CtxHost` holding `Arc<Mutex<StateStore>>`, wire D-04 `ctx` host surface (strategy.id / .name / run.id / now / log / actions.noop), add D-06 journal tables (journal_source_reads / journal_actions / journal_logs) + repo methods, add D-12 `update_run_status_with_transition` API to close 02-REVIEW MR-01.
+- Plan 03-03 — wire `strategy_run` MCP tool (replace Phase-1 `strategy_run_once` placeholder), three new error codes (-32011/-32017/-32018), 19 stdio integration tests (D-08a), `journal://{run_id}` resource activation.
 
 ### Blockers/Concerns
 
@@ -107,8 +111,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T03:37:33.318Z
-Stopped at: Plan 02-03 complete; Phase 02 closed
+Last session: 2026-04-27T07:20:15Z
+Stopped at: Plan 03-01 complete; Phase 03 wave 1 of 3
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)

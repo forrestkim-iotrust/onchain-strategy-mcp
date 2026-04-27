@@ -18,7 +18,7 @@
 - [x] **STR-02
 **: Agent can list, inspect, and delete registered strategies.
 - [ ] **STR-03**: Runtime can execute a registered strategy with a sandboxed `ctx`.
-- [ ] **STR-04**: Strategy code cannot access private keys, filesystem, process APIs, arbitrary network, or direct RPC clients.
+- [x] **STR-04**: Strategy code cannot access private keys, filesystem, process APIs, arbitrary network, or direct RPC clients. *(03-01 strategy-js sandbox: D-03 limits, D-11 forbidden-globals scrub + 8 regression tests, no loader/dyn-load features.)*
 - [ ] **STR-05**: Strategy returns `Action[]` or `noop`, and runtime rejects unsupported return shapes.
 
 ### Context API
@@ -107,7 +107,7 @@
 | STR-01 | Phase 2 | Complete (02-01 storage + 02-02 MCP wiring + stdio tests) |
 | STR-02 | Phase 2 | Complete (02-02 strategy_list/get/delete tools + 14 stdio tests) |
 | STR-03 | Phase 3 | Pending |
-| STR-04 | Phase 3 | Pending |
+| STR-04 | Phase 3 | Complete (03-01 strategy-js sandbox + D-11 regression suite) |
 | STR-05 | Phase 3 | Pending |
 | CTX-01 | Phase 4 | Pending |
 | CTX-02 | Phase 4 | Pending |

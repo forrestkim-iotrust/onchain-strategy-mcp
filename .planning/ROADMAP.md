@@ -59,7 +59,7 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 03-01: QuickJS sandbox and runtime limits
+- [x] 03-01: QuickJS sandbox and runtime limits
 - [ ] 03-02: Minimal `ctx` host API and source-read capture
 - [ ] 03-03: Action output validation and journal integration
 
