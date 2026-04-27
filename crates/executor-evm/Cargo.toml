@@ -1,0 +1,44 @@
+[package]
+name = "executor-evm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# New deps (alloy + dyn-abi family) are intentionally NOT promoted to workspace
+# dependencies — only `executor-evm` consumes alloy today (Phase 4 D-01). When
+# Phase 5 adds `executor-mcp` as a second consumer (TransactionRequest
+# construction), promote then. Mirrors crates/strategy-js/Cargo.toml comment
+# block.
+[dependencies]
+executor-core = { path = "../executor-core" }
+alloy = { version = "2.0", default-features = false, features = [
+    "provider-http",
+    "contract",
+    "rpc-types-eth",
+    "json-rpc",
+    "reqwest-rustls-tls",
+] }
+alloy-dyn-abi = "1"
+alloy-json-abi = "1"
+alloy-primitives = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = "2"
+
+[features]
+default = []
+# Spawns anvil via alloy::node_bindings; requires `anvil` (foundry) on PATH.
+anvil-tests = []
+# Exposes tests/common/anvil_fixture.rs to Phase 5/6 via dev-dep
+# `executor-evm = { path = "...", features = ["test-fixtures"] }`.
+test-fixtures = []
+
+[dev-dependencies]
+alloy = { version = "2.0", features = ["node-bindings"] }
+tokio = { workspace = true, features = ["rt", "macros"] }

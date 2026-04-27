@@ -33,13 +33,18 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_strategy_id ON runs(strategy_id);
 
 -- Phase 3 (D-06): three append-only journal tables.
+-- Phase 4 (D-15d / MR-04 carry-forward): `seq` is a per-run monotonic
+-- counter — same-millisecond `ctx.evm.*` calls during a loop need a
+-- deterministic tie-break. Mirrors the journal_logs pattern below.
 CREATE TABLE IF NOT EXISTS journal_source_reads (
     id           TEXT PRIMARY KEY,
     run_id       TEXT NOT NULL REFERENCES runs(id),
     kind         TEXT NOT NULL,
     target       TEXT NOT NULL,
     payload_json TEXT,
-    recorded_at  TEXT NOT NULL
+    recorded_at  TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    UNIQUE (run_id, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_journal_source_reads_run_id
     ON journal_source_reads(run_id);

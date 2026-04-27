@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/executor-mcp", "crates/executor-core", "crates/executor-state", "crates/executor-signer", "crates/strategy-js"]
+members = ["crates/executor-mcp", "crates/executor-core", "crates/executor-state", "crates/executor-signer", "crates/strategy-js", "crates/executor-evm"]
 
 [workspace.package]
 edition = "2024"

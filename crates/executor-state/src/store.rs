@@ -176,6 +176,22 @@ impl StateStore {
         crate::journal::record_log_with_time(&self.conn, run_id, message, recorded_at)
     }
 
+    /// Test-only deterministic-time variant of `record_source_read` (Phase 4
+    /// MR-04 carry-forward — same-millisecond ordering proof).
+    #[doc(hidden)]
+    pub fn __test_record_source_read_with_time(
+        &mut self,
+        run_id: &str,
+        kind: &str,
+        target: &str,
+        payload_json: Option<&str>,
+        recorded_at: &str,
+    ) -> Result<String, StateError> {
+        crate::journal::record_source_read_with_time(
+            &self.conn, run_id, kind, target, payload_json, recorded_at,
+        )
+    }
+
     pub fn list_source_reads_for_run(
         &self,
         run_id: &str,

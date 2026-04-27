@@ -27,6 +27,9 @@ pub struct SourceReadEntry {
     pub target: String,
     pub payload_json: Option<String>,
     pub recorded_at: String,
+    /// Per-run monotonic counter assigned at INSERT (Phase 4 D-15d / MR-04
+    /// carry-forward). Mirrors `LogEntry::seq`.
+    pub seq: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +80,19 @@ fn outcome_from_wire(s: &str) -> Result<JournalActionOutcome, StateError> {
     })
 }
 
+/// Compute the next per-run `seq` for `journal_source_reads` (Phase 4 D-15d
+/// / MR-04 carry-forward). Mirrors `next_log_seq`. Single-writer
+/// (`Mutex<Connection>`) makes the SELECT-then-INSERT pair race-free; the
+/// schema-level `UNIQUE (run_id, seq)` is a backstop.
+fn next_source_read_seq(conn: &Connection, run_id: &str) -> Result<i64, StateError> {
+    let next: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), -1) + 1 FROM journal_source_reads WHERE run_id = ?1",
+        params![run_id],
+        |r| r.get(0),
+    )?;
+    Ok(next)
+}
+
 pub(crate) fn record_source_read(
     conn: &Connection,
     run_id: &str,
@@ -86,10 +102,32 @@ pub(crate) fn record_source_read(
 ) -> Result<String, StateError> {
     let id = ulid::Ulid::new().to_string();
     let now = super::strategies::now_rfc3339();
+    let seq = next_source_read_seq(conn, run_id)?;
     conn.execute(
-        "INSERT INTO journal_source_reads(id, run_id, kind, target, payload_json, recorded_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![&id, run_id, kind, target, payload_json, &now],
+        "INSERT INTO journal_source_reads(id, run_id, kind, target, payload_json, recorded_at, seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![&id, run_id, kind, target, payload_json, &now, seq],
+    )?;
+    Ok(id)
+}
+
+/// Test-only deterministic-time variant for ordering assertions. Mirrors
+/// `record_log_with_time`.
+#[doc(hidden)]
+pub(crate) fn record_source_read_with_time(
+    conn: &Connection,
+    run_id: &str,
+    kind: &str,
+    target: &str,
+    payload_json: Option<&str>,
+    recorded_at: &str,
+) -> Result<String, StateError> {
+    let id = ulid::Ulid::new().to_string();
+    let seq = next_source_read_seq(conn, run_id)?;
+    conn.execute(
+        "INSERT INTO journal_source_reads(id, run_id, kind, target, payload_json, recorded_at, seq) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![&id, run_id, kind, target, payload_json, recorded_at, seq],
     )?;
     Ok(id)
 }
@@ -167,10 +205,11 @@ pub(crate) fn list_source_reads_for_run(
     conn: &Connection,
     run_id: &str,
 ) -> Result<Vec<SourceReadEntry>, StateError> {
+    // MR-04 carry-forward: tie-break on `seq` (per-run monotonic at INSERT).
     let mut stmt = conn.prepare(
-        "SELECT id, run_id, kind, target, payload_json, recorded_at \
+        "SELECT id, run_id, kind, target, payload_json, recorded_at, seq \
          FROM journal_source_reads WHERE run_id = ?1 \
-         ORDER BY recorded_at ASC, id ASC",
+         ORDER BY recorded_at ASC, seq ASC",
     )?;
     let rows = stmt
         .query_map(params![run_id], |r| {
@@ -181,6 +220,7 @@ pub(crate) fn list_source_reads_for_run(
                 target: r.get(3)?,
                 payload_json: r.get(4)?,
                 recorded_at: r.get(5)?,
+                seq: r.get(6)?,
             })
         })?
         .collect::<Result<Vec<_>, rusqlite::Error>>()?;
