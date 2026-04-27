@@ -129,6 +129,18 @@ impl Sandbox {
                 .set("__ctx", stub_ctx)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
+            // 4a-prime. D-11 scrub. The Promise intrinsic ships
+            // `queueMicrotask` on globalThis; remove it so the forbidden-
+            // globals regression suite holds. The list below mirrors D-11
+            // and is defensive against future intrinsic additions:
+            // we delete each name unconditionally — a `delete` of an
+            // already-absent property is a no-op.
+            c.eval::<(), _>(
+                FORBIDDEN_GLOBALS_SCRUB.as_bytes().to_vec(),
+            )
+            .catch(&c)
+            .map_err(|caught| caught_to_runtime_error(caught, &timed_out))?;
+
             // 4b. D-05 Shape B: source MUST evaluate to a function. We wrap
             //     in an IIFE that returns either the call result or the
             //     sentinel `__STRATEGY_NOT_FUNCTION__` so the failure mode
@@ -184,6 +196,26 @@ impl Sandbox {
         }
     }
 }
+
+/// JavaScript prelude that scrubs D-11 forbidden globals from `globalThis`.
+/// QuickJS's `Promise` intrinsic exposes `queueMicrotask`; future intrinsic
+/// versions may surface other names. We `delete` each unconditionally so
+/// the deny-by-default contract is enforced even when an intrinsic leaks.
+const FORBIDDEN_GLOBALS_SCRUB: &str = r#"
+    (function() {
+        const names = [
+            "console", "fetch",
+            "setTimeout", "setInterval", "setImmediate", "queueMicrotask",
+            "XMLHttpRequest", "WebSocket",
+            "process", "Worker",
+            "child_process", "fs",
+            "Deno",
+        ];
+        for (const n of names) {
+            try { delete globalThis[n]; } catch (e) { /* ignore non-configurable */ }
+        }
+    })();
+"#;
 
 /// Convert a [`rquickjs::CaughtError`] into a typed [`RuntimeError`]. The
 /// caller handles the deadline-hit override after `Context::with` returns.
