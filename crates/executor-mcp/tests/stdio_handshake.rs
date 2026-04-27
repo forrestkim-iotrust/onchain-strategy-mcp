@@ -88,22 +88,17 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     Ok(())
 }
 
-// VALIDATION.md 1-02-02
+// VALIDATION.md 1-02-02 — narrowed in Plan 02-02:
+// `strategy_register` and `strategy_delete` now hit real storage in Phase 2,
+// so only the still-phase-gated tools remain.
 #[tokio::test]
 async fn unimplemented_tools_return_phase_hint() -> Result<()> {
-    let cases: [(&str, u64); 4] = [
-        ("strategy_register", 2),
-        ("strategy_delete", 2),
-        ("strategy_run_once", 6),
-        ("policy_update", 5),
-    ];
+    let cases: [(&str, u64); 2] = [("strategy_run_once", 6), ("policy_update", 5)];
     for (tool, expected_phase) in cases {
-        let mut proc = spawn_server().await?;
+        let mut proc = common::spawn_server_with_state(":memory:").await?;
         let _ = initialize(&mut proc).await?;
 
         let args = match tool {
-            "strategy_register" => json!({ "name": "x", "source": "// noop" }),
-            "strategy_delete" => json!({ "strategy_id": "s-1" }),
             "strategy_run_once" => json!({ "strategy_id": "s-1" }),
             "policy_update" => json!({}),
             _ => unreachable!(),
@@ -135,36 +130,19 @@ async fn unimplemented_tools_return_phase_hint() -> Result<()> {
     Ok(())
 }
 
-// VALIDATION.md 1-02-03
+// VALIDATION.md 1-02-03 — narrowed in Plan 02-02:
+// `strategy_list` / `strategy_get` / `execution_get` are now storage-backed
+// (covered by the new Phase 2 tests below). `policy_get` keeps its
+// placeholder shape (Phase 5 wires the real engine).
 #[tokio::test]
-async fn readonly_tools_return_placeholder() -> Result<()> {
-    let mut proc = spawn_server().await?;
+async fn policy_get_returns_placeholder() -> Result<()> {
+    let mut proc = common::spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
-    // strategy_list → []
     send(
         &mut proc,
         json!({
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": { "name": "strategy_list", "arguments": {} }
-        }),
-    )
-    .await?;
-    let r = recv(&mut proc).await?;
-    let content = r["result"]["content"][0]["text"]
-        .as_str()
-        .expect("content text");
-    let list: Value = serde_json::from_str(content)?;
-    assert!(
-        list.is_array() && list.as_array().unwrap().is_empty(),
-        "strategy_list must return []"
-    );
-
-    // policy_get → placeholder object with chains/targets/selectors arrays
-    send(
-        &mut proc,
-        json!({
-            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": "policy_get", "arguments": {} }
         }),
     )
@@ -180,30 +158,6 @@ async fn readonly_tools_return_placeholder() -> Result<()> {
         policy["selectors"].is_array(),
         "policy.selectors must be array"
     );
-
-    // strategy_get → resource_not_found with data.phase == 2
-    send(
-        &mut proc,
-        json!({
-            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-            "params": { "name": "strategy_get", "arguments": { "strategy_id": "none" } }
-        }),
-    )
-    .await?;
-    let r = recv(&mut proc).await?;
-    assert_eq!(r["error"]["data"]["phase"], 2);
-
-    // execution_get → resource_not_found with data.phase == 6
-    send(
-        &mut proc,
-        json!({
-            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-            "params": { "name": "execution_get", "arguments": { "execution_id": "none" } }
-        }),
-    )
-    .await?;
-    let r = recv(&mut proc).await?;
-    assert_eq!(r["error"]["data"]["phase"], 6);
 
     proc.child.kill().await?;
     Ok(())
@@ -263,7 +217,10 @@ async fn resources_surface_matches_contract() -> Result<()> {
         templates.len()
     );
 
-    // resources/read → resource_not_found (-32002) with data.phase=1, data.uri echoed
+    // resources/read → resource_not_found (-32002) with data.uri echoed.
+    // Plan 02-02 narrows the assertion: a non-hex id surfaces as
+    // `data.code == "malformed_id"`; the legacy `data.phase == 1` envelope
+    // belongs to Phase 1 and no longer applies now that `strategy://` is wired.
     send(
         &mut proc,
         json!({
@@ -274,8 +231,8 @@ async fn resources_surface_matches_contract() -> Result<()> {
     .await?;
     let r = recv(&mut proc).await?;
     assert_eq!(r["error"]["code"], -32002, "expected resource_not_found");
-    assert_eq!(r["error"]["data"]["phase"], 1);
     assert_eq!(r["error"]["data"]["uri"], "strategy://nonexistent");
+    assert_eq!(r["error"]["data"]["code"], "malformed_id");
 
     proc.child.kill().await?;
     Ok(())
@@ -465,5 +422,497 @@ async fn schema_contract_round_trip() -> Result<()> {
     for (name, sample) in &cases {
         assert!(sample.is_object(), "{name}: sample is not a JSON object");
     }
+    Ok(())
+}
+
+// ─────────── Plan 02-02: Phase 2 strategy behaviours (D-08a) ───────────
+
+use common::{call_tool, extract_json_result, spawn_server_with_state};
+
+#[tokio::test]
+async fn strategy_register_creates_row() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({
+            "name": "arb",
+            "source": "// noop v1",
+            "description": "demo",
+            "tags": ["a", "b"]
+        }),
+    )
+    .await?;
+    let body = extract_json_result(&r);
+    assert_eq!(body["already_exists"], false);
+    assert_eq!(body["name"], "arb");
+    assert_eq!(body["strategy_id"].as_str().unwrap().len(), 64);
+    assert!(
+        !body["created_at"].as_str().unwrap_or_default().is_empty(),
+        "created_at must be populated"
+    );
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_register_idempotent_same_source() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r1 = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "first", "source": "// SAME", "description": "v1" }),
+    )
+    .await?;
+    let b1 = extract_json_result(&r1);
+    assert_eq!(b1["already_exists"], false);
+    let id1 = b1["strategy_id"].as_str().unwrap().to_string();
+
+    // Second register with SAME source but a different (unique) name +
+    // description: server must report idempotent, preserving the original
+    // row's name/description.
+    let r2 = call_tool(
+        &mut proc,
+        3,
+        "strategy_register",
+        json!({ "name": "second", "source": "// SAME", "description": "v2" }),
+    )
+    .await?;
+    let b2 = extract_json_result(&r2);
+    assert_eq!(b2["already_exists"], true);
+    assert_eq!(b2["strategy_id"].as_str().unwrap(), id1);
+    // The response surfaces the FIRST registration's name, not the new one.
+    assert_eq!(b2["name"], "first");
+    assert_eq!(b2["existing_name"], "first");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_register_conflict_same_name_different_source() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r1 = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "arb", "source": "// src-A" }),
+    )
+    .await?;
+    let b1 = extract_json_result(&r1);
+    let id1 = b1["strategy_id"].as_str().unwrap().to_string();
+
+    // Different source but same active name → name_conflict (-32015).
+    let r2 = call_tool(
+        &mut proc,
+        3,
+        "strategy_register",
+        json!({ "name": "arb", "source": "// src-B" }),
+    )
+    .await?;
+    let err = &r2["error"];
+    assert_eq!(err["code"], -32015);
+    assert_eq!(err["data"]["code"], "name_conflict");
+    assert_eq!(err["data"]["attempted_name"], "arb");
+    assert_eq!(err["data"]["existing_strategy_id"], id1);
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_register_rejects_oversized_source() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let big = "x".repeat(262_145);
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "huge", "source": big }),
+    )
+    .await?;
+    let err = &r["error"];
+    assert_eq!(err["code"], -32602);
+    assert_eq!(err["data"]["code"], "invalid_params");
+    let msg = err["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("262145"), "msg missing actual size: {msg}");
+    assert!(msg.contains("262144"), "msg missing limit: {msg}");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_register_rejects_empty_name() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "   ", "source": "// ok" }),
+    )
+    .await?;
+    let err = &r["error"];
+    assert_eq!(err["code"], -32602);
+    let msg = err["message"].as_str().unwrap_or_default();
+    assert!(msg.contains("whitespace-only"), "msg: {msg}");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_list_excludes_source_payload() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    for (i, src) in ["// one", "// two"].iter().enumerate() {
+        let r = call_tool(
+            &mut proc,
+            (2 + i) as u64,
+            "strategy_register",
+            json!({ "name": format!("s{i}"), "source": src }),
+        )
+        .await?;
+        assert!(r["error"].is_null(), "register {i} failed: {r}");
+    }
+
+    let r = call_tool(&mut proc, 10, "strategy_list", json!({})).await?;
+    let body = extract_json_result(&r);
+    let items = body["strategies"].as_array().expect("strategies array");
+    assert_eq!(items.len(), 2);
+    for it in items {
+        assert!(
+            it.get("source").is_none(),
+            "list item must not contain source: {it}"
+        );
+    }
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_list_filters_deleted_by_default() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r1 = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "keep", "source": "// keep" }),
+    )
+    .await?;
+    let _id_keep = extract_json_result(&r1)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r2 = call_tool(
+        &mut proc,
+        3,
+        "strategy_register",
+        json!({ "name": "drop", "source": "// drop" }),
+    )
+    .await?;
+    let id_drop = extract_json_result(&r2)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let dr = call_tool(
+        &mut proc,
+        4,
+        "strategy_delete",
+        json!({ "strategy_id": id_drop }),
+    )
+    .await?;
+    assert!(dr["error"].is_null(), "delete failed: {dr}");
+
+    let active = extract_json_result(&call_tool(&mut proc, 5, "strategy_list", json!({})).await?);
+    assert_eq!(active["strategies"].as_array().unwrap().len(), 1);
+
+    let all = extract_json_result(
+        &call_tool(
+            &mut proc,
+            6,
+            "strategy_list",
+            json!({ "include_deleted": true }),
+        )
+        .await?,
+    );
+    assert_eq!(all["strategies"].as_array().unwrap().len(), 2);
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_get_by_id_returns_source() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let src = "// the-source";
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "x", "source": src }),
+    )
+    .await?;
+    let id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let g = call_tool(
+        &mut proc,
+        3,
+        "strategy_get",
+        json!({ "strategy_id": id }),
+    )
+    .await?;
+    let body = extract_json_result(&g);
+    assert_eq!(body["source"], src);
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_get_by_name_only_returns_active() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "arb", "source": "// arb" }),
+    )
+    .await?;
+    let id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let _ = call_tool(
+        &mut proc,
+        3,
+        "strategy_delete",
+        json!({ "strategy_id": id }),
+    )
+    .await?;
+
+    let g = call_tool(&mut proc, 4, "strategy_get", json!({ "name": "arb" })).await?;
+    let err = &g["error"];
+    assert_eq!(err["code"], -32014);
+    assert_eq!(err["data"]["code"], "not_found");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_delete_is_soft_and_idempotent() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "x", "source": "// x" }),
+    )
+    .await?;
+    let id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let d1 = extract_json_result(
+        &call_tool(
+            &mut proc,
+            3,
+            "strategy_delete",
+            json!({ "strategy_id": id.clone() }),
+        )
+        .await?,
+    );
+    let deleted_at_1 = d1["deleted_at"].as_str().unwrap().to_string();
+
+    let d2 = extract_json_result(
+        &call_tool(
+            &mut proc,
+            4,
+            "strategy_delete",
+            json!({ "strategy_id": id.clone() }),
+        )
+        .await?,
+    );
+    assert_eq!(d2["deleted_at"].as_str().unwrap(), deleted_at_1);
+
+    // get_by_id still returns the row, with deleted_at populated.
+    let g = call_tool(
+        &mut proc,
+        5,
+        "strategy_get",
+        json!({ "strategy_id": id }),
+    )
+    .await?;
+    let body = extract_json_result(&g);
+    assert_eq!(body["deleted_at"].as_str().unwrap(), deleted_at_1);
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn soft_deleted_name_can_be_reused() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r1 = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "arb", "source": "// src-A" }),
+    )
+    .await?;
+    let id1 = extract_json_result(&r1)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let _ = call_tool(
+        &mut proc,
+        3,
+        "strategy_delete",
+        json!({ "strategy_id": id1.clone() }),
+    )
+    .await?;
+
+    let r2 = call_tool(
+        &mut proc,
+        4,
+        "strategy_register",
+        json!({ "name": "arb", "source": "// src-B" }),
+    )
+    .await?;
+    let body = extract_json_result(&r2);
+    assert_eq!(body["already_exists"], false);
+    let id2 = body["strategy_id"].as_str().unwrap().to_string();
+    assert_ne!(id1, id2, "new content-addressed id must differ");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn resource_read_strategy_uri_returns_body() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let src = "// resource-test";
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "rsrc", "source": src }),
+    )
+    .await?;
+    let id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 3, "method": "resources/read",
+            "params": { "uri": format!("strategy://{id}") }
+        }),
+    )
+    .await?;
+    let resp = recv(&mut proc).await?;
+    let contents = resp["result"]["contents"]
+        .as_array()
+        .expect("contents array");
+    assert_eq!(contents.len(), 1);
+    assert_eq!(contents[0]["mimeType"], "application/json");
+    let text = contents[0]["text"].as_str().expect("contents.text");
+    let body: Value = serde_json::from_str(text)?;
+    assert_eq!(body["source"], src);
+    assert_eq!(body["strategy_id"], id);
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execution_get_returns_not_found_when_empty() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r = call_tool(
+        &mut proc,
+        2,
+        "execution_get",
+        json!({ "execution_id": "01HGXNONEXISTENTRUNIDXXXXX" }),
+    )
+    .await?;
+    let err = &r["error"];
+    assert_eq!(err["code"], -32014);
+    assert_eq!(err["data"]["code"], "not_found");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategies_persist_across_restart() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+
+    {
+        let mut proc1 = spawn_server_with_state(&db_path_str).await?;
+        let _ = initialize(&mut proc1).await?;
+        let r = call_tool(
+            &mut proc1,
+            2,
+            "strategy_register",
+            json!({ "name": "persist", "source": "// persist" }),
+        )
+        .await?;
+        assert!(r["error"].is_null(), "first-spawn register failed: {r}");
+        proc1.child.kill().await?;
+    }
+
+    {
+        let mut proc2 = spawn_server_with_state(&db_path_str).await?;
+        let _ = initialize(&mut proc2).await?;
+        let body = extract_json_result(
+            &call_tool(&mut proc2, 2, "strategy_list", json!({})).await?,
+        );
+        let items = body["strategies"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "persist");
+        proc2.child.kill().await?;
+    }
+
     Ok(())
 }

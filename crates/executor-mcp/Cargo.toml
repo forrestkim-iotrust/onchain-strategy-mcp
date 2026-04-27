@@ -30,3 +30,7 @@ executor-signer = { path = "../executor-signer" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal", "process", "io-util", "time"] }
 serde_json.workspace = true
 anyhow.workspace = true
+# Plan 02-02: integration tests need a temp config file (per-test ephemeral
+# `[state].path`) and a temp dir for the restart-persistence test. Pinned
+# per-crate to mirror Phase 1's [logging]-only workspace-deps precedent.
+tempfile = "3"
