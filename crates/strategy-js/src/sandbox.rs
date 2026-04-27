@@ -244,6 +244,38 @@ impl Sandbox {
             actions_obj
                 .set("noop", noop_fn)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // Phase 4 D-08 / D-09 (CTX-05/06/07/08): action builders.
+            // Each builder is a sync host function: validates inputs (address
+            // shape, hex calldata, decimal amount, ABI parse + dry-run encode)
+            // and returns a JS Object that round-trips through the
+            // executor-mcp validate_strategy_output gate as the matching
+            // Action variant.
+            //
+            // CRITICAL ORDERING (D-15a / HR-01): these closures are added to
+            // `actions_obj` BEFORE the FORBIDDEN_GLOBALS_SCRUB eval below; the
+            // scrub still runs BEFORE `c.globals().set("__ctx", ...)`, so a
+            // future intrinsic colliding with `__ctx` cannot delete a binding
+            // we already installed.
+            macro_rules! install_builder {
+                ($name:expr, $kind:expr) => {{
+                    let kind: ActionBuilderKind = $kind;
+                    let f = Function::new(
+                        c.clone(),
+                        make_action_builder_closure(kind),
+                    )
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                    actions_obj
+                        .set($name, f)
+                        .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                }};
+            }
+            install_builder!("contractCall", ActionBuilderKind::ContractCall);
+            install_builder!("rawCall", ActionBuilderKind::RawCall);
+            install_builder!("erc20Transfer", ActionBuilderKind::Erc20Transfer);
+            install_builder!("erc20Approve", ActionBuilderKind::Erc20Approve);
+            install_builder!("nativeTransfer", ActionBuilderKind::NativeTransfer);
+
             ctx_obj
                 .set("actions", actions_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
@@ -1278,6 +1310,297 @@ fn json_to_qjs_value<'js>(
             Ok(out.into_value())
         }
     }
+}
+
+/// Phase 4 D-08 / D-09: action builder kinds.
+///
+/// Each variant maps 1:1 to one of the Phase-4 `Action` wire variants. Used
+/// by [`make_action_builder_closure`] to dispatch to the correct field set
+/// + validators (`executor_evm::action::*`).
+#[derive(Debug, Clone, Copy)]
+enum ActionBuilderKind {
+    ContractCall,
+    RawCall,
+    Erc20Transfer,
+    Erc20Approve,
+    NativeTransfer,
+}
+
+impl ActionBuilderKind {
+    fn js_name(self) -> &'static str {
+        match self {
+            Self::ContractCall => "contractCall",
+            Self::RawCall => "rawCall",
+            Self::Erc20Transfer => "erc20Transfer",
+            Self::Erc20Approve => "erc20Approve",
+            Self::NativeTransfer => "nativeTransfer",
+        }
+    }
+}
+
+/// Build a `Fn(Object) -> Value` closure for the given action kind. Each
+/// invocation drives one of the [`build_*_action`] free functions which
+/// performs D-09 input validation and returns the action JSON object.
+fn make_action_builder_closure(
+    kind: ActionBuilderKind,
+) -> impl for<'js> Fn(rquickjs::Object<'js>) -> rquickjs::Result<rquickjs::Value<'js>> + 'static {
+    move |opts: rquickjs::Object<'_>| -> rquickjs::Result<rquickjs::Value<'_>> {
+        let ctx = opts.ctx().clone();
+        let action_json = match kind {
+            ActionBuilderKind::ContractCall => build_contract_call_action(&opts),
+            ActionBuilderKind::RawCall => build_raw_call_action(&opts),
+            ActionBuilderKind::Erc20Transfer => build_erc20_transfer_action(&opts),
+            ActionBuilderKind::Erc20Approve => build_erc20_approve_action(&opts),
+            ActionBuilderKind::NativeTransfer => build_native_transfer_action(&opts),
+        };
+        match action_json {
+            Ok(json) => json_to_qjs_value(&ctx, &json).map_err(|e| {
+                throw_js_error(&ctx, &format!("ctx.actions.{}: {e}", kind.js_name()))
+            }),
+            Err(BuilderError::Stable(msg)) => Err(throw_js_error(&ctx, &msg)),
+        }
+    }
+}
+
+/// Wire-safe builder error (HR/MR-01 carry-forward). The string passed to
+/// [`throw_js_error`] is what the user-facing JS Error.message exposes; raw
+/// `EvmError::detail_for_log` content goes via `tracing::warn!` only.
+enum BuilderError {
+    Stable(String),
+}
+
+fn evm_err_to_builder_error(e: executor_evm::EvmError, helper: &str) -> BuilderError {
+    tracing::warn!(
+        helper = helper,
+        kind = %e.data_kind(),
+        detail = %e.detail_for_log(),
+        "ctx.actions builder rejected input"
+    );
+    // Surface the wire-safe Display string. EvmError::Display emits stable
+    // taxonomy strings (e.g. "evm encode error: bad_address").
+    BuilderError::Stable(format!("ctx.actions.{helper}: {e}"))
+}
+
+fn require_string_field<'js>(
+    opts: &rquickjs::Object<'js>,
+    field: &str,
+    helper: &str,
+) -> Result<String, BuilderError> {
+    // Detect BigInt explicitly so we can emit the stable D-03 rejection
+    // message instead of a confused "must be a string" error (Pitfall 2).
+    let v: rquickjs::Value<'js> = opts.get(field).map_err(|e| {
+        BuilderError::Stable(format!("ctx.actions.{helper}: reading '{field}' failed: {e}"))
+    })?;
+    if matches!(v.type_of(), rquickjs::Type::BigInt) {
+        return Err(BuilderError::Stable(format!(
+            "ctx.actions.{helper}: '{field}' must be a decimal string, got BigInt — use ctx.units.parseUnits(...) or pass a literal string"
+        )));
+    }
+    let s = v.as_string().ok_or_else(|| {
+        BuilderError::Stable(format!(
+            "ctx.actions.{helper}: '{field}' must be a string"
+        ))
+    })?;
+    s.to_string().map_err(|e| {
+        BuilderError::Stable(format!("ctx.actions.{helper}: '{field}' utf8 error: {e}"))
+    })
+}
+
+fn optional_value_field<'js>(
+    opts: &rquickjs::Object<'js>,
+    field: &str,
+    helper: &str,
+) -> Result<String, BuilderError> {
+    let v: rquickjs::Value<'js> = match opts.get(field) {
+        Ok(x) => x,
+        Err(_) => return Ok("0".to_string()),
+    };
+    if v.is_undefined() || v.is_null() {
+        return Ok("0".to_string());
+    }
+    if matches!(v.type_of(), rquickjs::Type::BigInt) {
+        return Err(BuilderError::Stable(format!(
+            "ctx.actions.{helper}: '{field}' must be a decimal string, got BigInt — use ctx.units.parseUnits(...) or pass a literal string"
+        )));
+    }
+    if let Some(s) = v.as_string() {
+        return s.to_string().map_err(|e| {
+            BuilderError::Stable(format!("ctx.actions.{helper}: '{field}' utf8 error: {e}"))
+        });
+    }
+    Err(BuilderError::Stable(format!(
+        "ctx.actions.{helper}: '{field}' must be a decimal string when present"
+    )))
+}
+
+/// Extract the `abi` field — accept either a JSON string or a JS array of
+/// fragments (mirrors `ctx.evm.readContract` D-05 dual shape).
+fn require_abi_field<'js>(
+    opts: &rquickjs::Object<'js>,
+    helper: &str,
+) -> Result<String, BuilderError> {
+    let v: rquickjs::Value<'js> = opts.get("abi").map_err(|e| {
+        BuilderError::Stable(format!(
+            "ctx.actions.{helper}: reading 'abi' failed: {e}"
+        ))
+    })?;
+    if let Some(s) = v.as_string() {
+        return s.to_string().map_err(|e| {
+            BuilderError::Stable(format!("ctx.actions.{helper}: 'abi' utf8 error: {e}"))
+        });
+    }
+    if v.is_array() || v.is_object() {
+        let json = qjs_value_to_json(&v).map_err(|e| {
+            BuilderError::Stable(format!("ctx.actions.{helper}: 'abi' walk: {e}"))
+        })?;
+        return serde_json::to_string(&json).map_err(|e| {
+            BuilderError::Stable(format!(
+                "ctx.actions.{helper}: 'abi' serialize: {e}"
+            ))
+        });
+    }
+    Err(BuilderError::Stable(format!(
+        "ctx.actions.{helper}: 'abi' must be a JSON string or an array of fragments"
+    )))
+}
+
+/// Extract `args` as a JSON array. Missing / undefined / null → empty array.
+fn require_args_field<'js>(
+    opts: &rquickjs::Object<'js>,
+    helper: &str,
+) -> Result<Vec<serde_json::Value>, BuilderError> {
+    let v: rquickjs::Value<'js> = match opts.get("args") {
+        Ok(x) => x,
+        Err(_) => return Ok(Vec::new()),
+    };
+    if v.is_undefined() || v.is_null() {
+        return Ok(Vec::new());
+    }
+    let json = qjs_value_to_json(&v).map_err(|e| {
+        BuilderError::Stable(format!("ctx.actions.{helper}: 'args' walk: {e}"))
+    })?;
+    match json {
+        serde_json::Value::Array(a) => Ok(a),
+        other => Err(BuilderError::Stable(format!(
+            "ctx.actions.{helper}: 'args' must be an array, got {}",
+            json_value_kind(&other)
+        ))),
+    }
+}
+
+fn build_contract_call_action(
+    opts: &rquickjs::Object<'_>,
+) -> Result<serde_json::Value, BuilderError> {
+    let helper = "contractCall";
+    let address = require_string_field(opts, "address", helper)?;
+    let abi = require_abi_field(opts, helper)?;
+    let function = require_string_field(opts, "function", helper)?;
+    let args = require_args_field(opts, helper)?;
+    let value = optional_value_field(opts, "value", helper)?;
+
+    executor_evm::action::validate_address(&address)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_decimal_amount(&value)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::dry_run_abi_encode(&abi, &function, &args)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+
+    Ok(serde_json::json!({
+        "kind": "contract_call",
+        "address": address,
+        "abi": abi,
+        "function": function,
+        "args": args,
+        "value": value,
+    }))
+}
+
+fn build_raw_call_action(
+    opts: &rquickjs::Object<'_>,
+) -> Result<serde_json::Value, BuilderError> {
+    let helper = "rawCall";
+    let address = require_string_field(opts, "address", helper)?;
+    let data = require_string_field(opts, "data", helper)?;
+    let value = optional_value_field(opts, "value", helper)?;
+
+    executor_evm::action::validate_address(&address)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_calldata(&data)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_decimal_amount(&value)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+
+    Ok(serde_json::json!({
+        "kind": "raw_call",
+        "address": address,
+        "data": data,
+        "value": value,
+    }))
+}
+
+fn build_erc20_transfer_action(
+    opts: &rquickjs::Object<'_>,
+) -> Result<serde_json::Value, BuilderError> {
+    let helper = "erc20Transfer";
+    let token = require_string_field(opts, "token", helper)?;
+    let to = require_string_field(opts, "to", helper)?;
+    let amount = require_string_field(opts, "amount", helper)?;
+
+    executor_evm::action::validate_address(&token)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_address(&to)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_decimal_amount(&amount)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+
+    Ok(serde_json::json!({
+        "kind": "erc20_transfer",
+        "token": token,
+        "to": to,
+        "amount": amount,
+    }))
+}
+
+fn build_erc20_approve_action(
+    opts: &rquickjs::Object<'_>,
+) -> Result<serde_json::Value, BuilderError> {
+    let helper = "erc20Approve";
+    let token = require_string_field(opts, "token", helper)?;
+    let spender = require_string_field(opts, "spender", helper)?;
+    let amount = require_string_field(opts, "amount", helper)?;
+
+    executor_evm::action::validate_address(&token)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_address(&spender)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_decimal_amount(&amount)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+
+    Ok(serde_json::json!({
+        "kind": "erc20_approve",
+        "token": token,
+        "spender": spender,
+        "amount": amount,
+    }))
+}
+
+fn build_native_transfer_action(
+    opts: &rquickjs::Object<'_>,
+) -> Result<serde_json::Value, BuilderError> {
+    let helper = "nativeTransfer";
+    let to = require_string_field(opts, "to", helper)?;
+    let value = require_string_field(opts, "value", helper)?;
+
+    executor_evm::action::validate_address(&to)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+    executor_evm::action::validate_decimal_amount(&value)
+        .map_err(|e| evm_err_to_builder_error(e, helper))?;
+
+    Ok(serde_json::json!({
+        "kind": "native_transfer",
+        "to": to,
+        "value": value,
+    }))
 }
 
 /// Walk a `rquickjs::Value` and produce a `serde_json::Value`. Returns

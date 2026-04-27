@@ -66,6 +66,34 @@ pub fn validate_register(input: &StrategyRegisterInput) -> Result<(), String> {
     Ok(())
 }
 
+/// Phase-4 D-09: action `kind` allowlist enforced at the JSON-output gate.
+///
+/// Six allowed kinds: `noop` (Phase 3), plus the five Phase-4 write
+/// variants. Non-allowlisted kinds (`multi_call`, `swap`, `bridge`, …)
+/// produce -32018 STRATEGY_INVALID_OUTPUT with the stable detail string
+/// emitted below.
+///
+/// Serde alone would also reject (the `Action` enum has only these
+/// variants), but having an explicit allowlist gives a CLEARER error
+/// message and a future-proof place to add Phase-5 gating.
+pub fn validate_action_kind_allowlisted(kind: &str) -> Result<(), String> {
+    const ALLOWED: &[&str] = &[
+        "noop",
+        "contract_call",
+        "raw_call",
+        "erc20_transfer",
+        "erc20_approve",
+        "native_transfer",
+    ];
+    if ALLOWED.contains(&kind) {
+        Ok(())
+    } else {
+        Err(format!(
+            "action kind {kind:?} not allowed in Phase 4; expected one of {ALLOWED:?}"
+        ))
+    }
+}
+
 /// D-09a: `strategy_delete.strategy_id` must match `^[0-9a-f]{64}$`.
 pub fn validate_strategy_id_format(id: &str) -> Result<(), String> {
     if id.len() != 64 {
@@ -181,5 +209,34 @@ mod tests {
         let id = "a".repeat(63);
         let err = validate_strategy_id_format(&id).unwrap_err();
         assert!(err.contains("63"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_action_kind_allowlisted_accepts_phase4_variants() {
+        for k in [
+            "noop",
+            "contract_call",
+            "raw_call",
+            "erc20_transfer",
+            "erc20_approve",
+            "native_transfer",
+        ] {
+            assert!(
+                validate_action_kind_allowlisted(k).is_ok(),
+                "kind {k:?} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_action_kind_allowlisted_rejects_phase5_variants() {
+        for k in ["multi_call", "swap", "bridge", "deploy"] {
+            let err = validate_action_kind_allowlisted(k).unwrap_err();
+            assert!(err.contains(k), "error should name the kind: {err}");
+            assert!(
+                err.contains("not allowed in Phase 4"),
+                "stable detail string: {err}"
+            );
+        }
     }
 }

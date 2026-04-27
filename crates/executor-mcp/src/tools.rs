@@ -38,7 +38,7 @@ use crate::{
         strategy_invalid_output, unimplemented_err,
     },
     server::ExecutorServer,
-    validation::{validate_register, validate_strategy_id_format},
+    validation::{validate_action_kind_allowlisted, validate_register, validate_strategy_id_format},
 };
 
 /// `strategy_list` input — single optional boolean. Declared inline because
@@ -431,6 +431,24 @@ fn validate_strategy_output(v: &serde_json::Value) -> Result<StrategyOutcome, St
     match v {
         serde_json::Value::String(s) if s == "noop" => Ok(StrategyOutcome::Noop),
         serde_json::Value::Array(items) => {
+            // Phase-4 D-09 pre-pass: walk each element, extract `kind`, and
+            // reject non-allowlisted kinds with a CLEAR error before serde
+            // gets a chance to emit a less-specific "unknown variant"
+            // message. Serde still enforces deny_unknown_fields per
+            // variant struct (defense in depth).
+            for (i, item) in items.iter().enumerate() {
+                let kind = item
+                    .as_object()
+                    .and_then(|o| o.get("kind"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| {
+                        format!("action at index {i} missing required `kind` field")
+                    })?;
+                validate_action_kind_allowlisted(kind)
+                    .map_err(|e| format!("action at index {i}: {e}"))?;
+            }
+            // MR-03 carry-forward: ?-propagate serde failures (no silent
+            // fallback to empty Vec).
             let actions: Vec<Action> = items
                 .iter()
                 .enumerate()
