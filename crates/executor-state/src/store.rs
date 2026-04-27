@@ -97,11 +97,23 @@ impl StateStore {
         runs::insert_run_with_started_at(&self.conn, strategy_id, status, started_at)
     }
 
+    /// **Deprecated** — use [`StateStore::update_run_status_with_transition`]
+    /// (D-12 transition guard). The unguarded API allows non-monotonic
+    /// status mutations and is a defense-in-depth bypass surface (MR-02).
+    /// Phase 5/6 simulation/policy-failure transitions MUST also route
+    /// through the transition-guarded variant.
+    #[deprecated(
+        note = "use update_run_status_with_transition (D-12 transition guard); \
+                the unguarded variant bypasses the state-machine and will be \
+                removed once Phase 5/6 emit reserved-variant transitions \
+                through the guarded API"
+    )]
     pub fn update_run_status(
         &mut self,
         run_id: &str,
         status: RunStatus,
     ) -> Result<(), StateError> {
+        #[allow(deprecated)]
         runs::update_run_status(&self.conn, run_id, status)
     }
 

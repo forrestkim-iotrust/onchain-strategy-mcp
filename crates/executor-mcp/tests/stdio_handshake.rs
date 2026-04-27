@@ -936,6 +936,9 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
     // Step 3: transition to Running out-of-band.
     {
         let mut store = StateStore::open(&db_path)?;
+        // MR-02: deprecated legacy API used here intentionally — the test
+        // simulates an out-of-band lifecycle without a strategy_run handler.
+        #[allow(deprecated)]
         store.update_run_status(&run_id, RunStatus::Running)?;
     }
 
@@ -962,6 +965,8 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
     // Step 5: transition to Succeeded out-of-band.
     {
         let mut store = StateStore::open(&db_path)?;
+        // MR-02: deprecated legacy API used here intentionally (see Step 3).
+        #[allow(deprecated)]
         store.update_run_status(&run_id, RunStatus::Succeeded)?;
     }
 

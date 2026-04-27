@@ -102,6 +102,10 @@ pub(crate) fn insert_run_with_started_at(
     Ok(id)
 }
 
+#[deprecated(
+    note = "use update_run_status_with_transition (D-12 transition guard); \
+            the unguarded variant bypasses the state-machine"
+)]
 pub(crate) fn update_run_status(
     conn: &Connection,
     run_id: &str,

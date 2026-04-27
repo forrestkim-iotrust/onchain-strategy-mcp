@@ -1,4 +1,11 @@
 //! Run repository contract tests (D-04b, D-05a, D-05c).
+//!
+//! NOTE: This file intentionally exercises the deprecated legacy
+//! `update_run_status` API (MR-02) to lock in pre-D-12 contract semantics
+//! (reserved-variant gate, terminal `finished_at` autofill, NotFound).
+//! The transition-guarded variant has its own tests in
+//! `update_run_status_with_transition.rs` etc.
+#![allow(deprecated)]
 
 mod common;
 
