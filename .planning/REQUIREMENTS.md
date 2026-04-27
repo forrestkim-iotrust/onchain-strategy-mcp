@@ -17,10 +17,9 @@
 - [x] **STR-01**: Agent can register a JavaScript strategy with name, source, and metadata. *(Phase 2-01 storage; 02-02 MCP wiring + stdio tests; 02-03 Phase 2 close.)*
 - [x] **STR-02
 **: Agent can list, inspect, and delete registered strategies.
-- [x] **STR-03
-**: Runtime can execute a registered strategy with a sandboxed `ctx`.
+- [x] **STR-03**: Runtime can execute a registered strategy with a sandboxed `ctx`. *(03-03 strategy_run MCP tool wires Sandbox::execute + RuntimeContext through 8-step lifecycle.)*
 - [x] **STR-04**: Strategy code cannot access private keys, filesystem, process APIs, arbitrary network, or direct RPC clients. *(03-01 strategy-js sandbox: D-03 limits, D-11 forbidden-globals scrub + 8 regression tests, no loader/dyn-load features.)*
-- [ ] **STR-05**: Strategy returns `Action[]` or `noop`, and runtime rejects unsupported return shapes.
+- [x] **STR-05**: Strategy returns `Action[]` or `noop`, and runtime rejects unsupported return shapes. *(03-03 validate_strategy_output + STRATEGY_INVALID_OUTPUT -32018; 9 D-08a regression tests cover number/object/null/promise/non-function/phase4-action shapes.)*
 
 ### Context API
 
@@ -59,9 +58,8 @@
 
 - [x] **STJ-01**: Runtime persists strategies and strategy metadata locally. *(02-01 schema + repo; 02-02 MCP wiring; 02-02 strategies_persist_across_restart end-to-end stdio test.)*
 - [x] **STJ-02**: Runtime persists each strategy run with run ID, strategy ID, started time, and status. *(02-01 base CRUD + ULID + phase2_emittable; 02-03 lifecycle tests + run_roundtrip_insert_get_update_status end-to-end MCP stdio proof + run_status_schema_includes_future_variants D-08a.)*
-- [x] **STJ-03
-**: Runtime records source reads performed during each run.
-- [ ] **STJ-04**: Runtime records returned actions and validation errors.
+- [x] **STJ-03**: Runtime records source reads performed during each run. *(03-02 RuntimeContext::flush emits one journal_source_reads row per run with kind="strategy_source"; 03-03 stdio test verifies end-to-end.)*
+- [x] **STJ-04**: Runtime records returned actions and validation errors. *(03-03 record_action / record_validation_error / record_runtime_error helpers; one journal_actions row per run with outcome ∈ {noop, actions, validation_error, runtime_error}.)*
 - [ ] **STJ-05**: Runtime records simulation results and policy decisions.
 - [ ] **STJ-06**: Runtime records tx hash, receipt status, gas used, and execution errors.
 - [ ] **STJ-07**: Agent can query execution status by execution/run ID.
@@ -108,9 +106,9 @@
 | MCP-04 | Phase 1 | Complete (01-03 prompts: 2 placeholder prompts with arg schemas) |
 | STR-01 | Phase 2 | Complete (02-01 storage + 02-02 MCP wiring + stdio tests) |
 | STR-02 | Phase 2 | Complete (02-02 strategy_list/get/delete tools + 14 stdio tests) |
-| STR-03 | Phase 3 | Pending |
+| STR-03 | Phase 3 | Complete (03-03 strategy_run MCP tool — 8-step handler + 19 D-08a stdio tests) |
 | STR-04 | Phase 3 | Complete (03-01 strategy-js sandbox + D-11 regression suite) |
-| STR-05 | Phase 3 | Pending |
+| STR-05 | Phase 3 | Complete (03-03 validate_strategy_output + STRATEGY_INVALID_OUTPUT -32018) |
 | CTX-01 | Phase 4 | Pending |
 | CTX-02 | Phase 4 | Pending |
 | CTX-03 | Phase 4 | Pending |
@@ -137,8 +135,8 @@
 | POL-06 | Phase 5 | Pending |
 | STJ-01 | Phase 2 | Complete (02-01 schema + 02-02 strategies_persist_across_restart) |
 | STJ-02 | Phase 2 | Complete (02-01 base CRUD + 02-03 lifecycle + run_roundtrip_insert_get_update_status) |
-| STJ-03 | Phase 3 | Pending |
-| STJ-04 | Phase 3 | Pending |
+| STJ-03 | Phase 3 | Complete (03-02 RuntimeContext::flush emits journal_source_reads; 03-03 stdio coverage) |
+| STJ-04 | Phase 3 | Complete (03-03 record_action / record_validation_error / record_runtime_error → journal_actions) |
 | STJ-05 | Phase 5 | Pending |
 | STJ-06 | Phase 6 | Pending |
 | STJ-07 | Phase 6 | Pending |

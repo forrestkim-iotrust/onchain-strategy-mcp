@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 03-02 complete; Phase 03 wave 2 of 3
-last_updated: "2026-04-27T07:37:44.300Z"
+stopped_at: Plan 03-03 complete; Phase 03 complete (3/3 plans)
+last_updated: "2026-04-27T08:30:00.000Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 8
-  percent: 89
+  completed_plans: 9
+  percent: 100
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 03 (javascript-strategy-runner) — EXECUTING
-Plan: 2 of 3 complete
-Status: Ready to execute
+Phase: 03 (javascript-strategy-runner) — COMPLETE
+Plan: 3 of 3 complete
+Status: Phase 3 closed; ready to plan Phase 4 (EVM Context and Actions)
 Last activity: 2026-04-27
 
-Progress: [█████████░] 89%
+Progress: [██████████] 100% of currently-planned phases (Phase 3/9 of v1)
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [█████████░] 89%
 | Phase 02 P03 | 5 | 2 tasks | 4 files |
 | Phase 03 P01 | ~8 min | 3 tasks | 8 created + 2 modified |
 | Phase 03 P02 | 25 | 3 tasks | 16 files |
+| Phase 03 P03 | ~12 min | 3 tasks | 3 created + 9 modified + 1 deleted |
 
 ## Accumulated Context
 
@@ -92,12 +93,17 @@ Recent decisions affecting current work:
 - Plan 03-02: STRICT D-12 — Succeeded → * disallowed at the transition guard (terminal state); idempotent re-finalize via COALESCE deferred.
 - Plan 03-02: ctx.log buffer uses Rc<RefCell<Vec<String>>>; rquickjs Function::new requires only 'js (not Send + 'static), single-threaded inside ctx.with — no Arc/Mutex needed.
 - Plan 03-02: tokio sync feature pinned per-crate in strategy-js (workspace tokio omits sync). Mirrors executor-mcp's per-crate feature additions.
+- Plan 03-03: per-call Sandbox::execute construction (no pooling) — Plan 03-01 measurement of Runtime::new() stays well below the 50 ms threshold.
+- Plan 03-03: EngineInit -> map_runtime_error("exception", ...) so agents see exactly four kinds (timeout/oom/stack_overflow/exception).
+- Plan 03-03: kept unimplemented_tools_return_phase_hint with one case (policy_update) instead of deleting — preserves regression-detection lattice.
+- Plan 03-03: log-message ordering test asserts HashSet membership (ULID monotonicity within the same millisecond is not guaranteed by Ulid::new()).
+- Plan 03-03: journal:// resource serialises JournalActionOutcome via serde_json::to_value (NEVER format!("{:?}",..) which corrupts SimulationFailure -> "simulationfailure").
 
 ### Pending Todos
 
-- Plan 03-01 complete: `strategy-js` crate with `Sandbox::execute(source, &mut CtxHost) -> serde_json::Value`, D-03 limits, D-05 Shape B, D-10 promise reject, D-11 forbidden-globals scrub. STR-04 closed at runtime layer. `cargo test --workspace` runs 114 tests; clippy clean.
-- Next: Plan 03-02 — replace `CtxStub` with real `RuntimeContext` impl `CtxHost` holding `Arc<Mutex<StateStore>>`, wire D-04 `ctx` host surface (strategy.id / .name / run.id / now / log / actions.noop), add D-06 journal tables (journal_source_reads / journal_actions / journal_logs) + repo methods, add D-12 `update_run_status_with_transition` API to close 02-REVIEW MR-01.
-- Plan 03-03 — wire `strategy_run` MCP tool (replace Phase-1 `strategy_run_once` placeholder), three new error codes (-32011/-32017/-32018), 19 stdio integration tests (D-08a), `journal://{run_id}` resource activation.
+- Phase 3 complete (3/3 plans). All 5 phase requirements (STR-03/04/05, STJ-03/04) closed.
+- Workspace: 175 tests passing across 23 suites; clippy clean (`-D warnings`); no `println!`/`eprintln!`/`dbg!` in `src/`.
+- Next: plan Phase 4 (EVM Context and Actions) — `ctx.evm.*` reads, action builders for ContractCall/RawCall/Erc20*/NativeTransfer (CTX-01..09).
 
 ### Blockers/Concerns
 
@@ -115,8 +121,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T07:37:35.592Z
-Stopped at: Plan 03-02 complete; Phase 03 wave 2 of 3
+Last session: 2026-04-27T08:30:00.000Z
+Stopped at: Plan 03-03 complete; Phase 03 complete (3/3 plans)
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)

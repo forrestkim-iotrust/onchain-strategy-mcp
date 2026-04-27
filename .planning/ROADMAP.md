@@ -8,7 +8,7 @@ v1 builds a local MCP runtime that lets an AI agent write JavaScript EVM automat
 
 - [x] **Phase 1: MCP Runtime Surface** - Create the Rust workspace and stdio MCP server with stable tools/resources/prompts.
 - [x] **Phase 2: Strategy State and Journal** - Persist strategies, runs, and journal records locally.
-- [ ] **Phase 3: JavaScript Strategy Runner** - Run sandboxed JavaScript strategies with a constrained `ctx`.
+- [x] **Phase 3: JavaScript Strategy Runner** - Run sandboxed JavaScript strategies with a constrained `ctx`.
 - [ ] **Phase 4: EVM Context and Actions** - Implement generic EVM reads/writes plus ERC20/native helpers.
 - [ ] **Phase 5: Simulation and Policy Gate** - Validate actions, simulate, and enforce policy before signing.
 - [ ] **Phase 6: Local Managed Execution** - Sign locally, broadcast transactions, wait receipts, and record execution reports.
@@ -60,8 +60,8 @@ Plans:
 
 Plans:
 - [x] 03-01: QuickJS sandbox and runtime limits
-- [ ] 03-02: Minimal `ctx` host API and source-read capture
-- [ ] 03-03: Action output validation and journal integration
+- [x] 03-02: Minimal `ctx` host API and source-read capture
+- [x] 03-03: Action output validation and journal integration
 
 ### Phase 4: EVM Context and Actions
 **Goal**: Strategy code can express broad EVM reads and write actions through `ctx`.  
@@ -136,8 +136,8 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. MCP Runtime Surface | 3/3 | Complete | 2026-04-24 |
-| 2. Strategy State and Journal | 0/3 | Not started | - |
-| 3. JavaScript Strategy Runner | 0/3 | Not started | - |
+| 2. Strategy State and Journal | 3/3 | Complete | 2026-04-26 |
+| 3. JavaScript Strategy Runner | 3/3 | Complete | 2026-04-27 |
 | 4. EVM Context and Actions | 0/4 | Not started | - |
 | 5. Simulation and Policy Gate | 0/4 | Not started | - |
 | 6. Local Managed Execution | 0/3 | Not started | - |
