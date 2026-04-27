@@ -12,7 +12,11 @@ use crate::limits::{
     GC_THRESHOLD_BYTES, MAX_STACK_BYTES, MEMORY_LIMIT_BYTES, WALL_CLOCK_MS,
 };
 use rquickjs::context::intrinsic;
-use rquickjs::{CatchResultExt, Context, Ctx, Runtime, Value};
+use rquickjs::convert::Coerced;
+use rquickjs::function::Rest;
+use rquickjs::{CatchResultExt, Context, Ctx, Function, Object, Runtime, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -75,7 +79,7 @@ impl Sandbox {
     /// through unused (Plan 03-02 wires the real `ctx` host bindings).
     pub fn execute<H: CtxHost>(
         source: &str,
-        _host: &mut H,
+        host: &mut H,
     ) -> Result<serde_json::Value, RuntimeError> {
         // 1. Fresh runtime per call (RESEARCH Concurrency Plan / Pitfall 6).
         let rt = Runtime::new()
@@ -119,14 +123,94 @@ impl Sandbox {
 
         // 4. Evaluate inside Context::with — rquickjs::Value is `'js`-bound
         //    (Pitfall 5). All conversion to serde_json must happen here.
+        //
+        // Plan 03-02: install the real D-04 ctx surface (strategy / run /
+        // now / log / actions.noop). Logs are buffered host-side via a
+        // single-threaded `Rc<RefCell<Vec<String>>>` shared between the
+        // `ctx.log` closure and the post-`ctx.with` drain pass — no DB IO
+        // inside the JS callback (RESEARCH Pitfall 2).
+        let log_buffer: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let log_buffer_for_drain = log_buffer.clone();
+
+        // Snapshot host fields BEFORE `ctx.with` — closures must own their
+        // captures (rquickjs `Function::new` requires `'js`, not `&'js mut H`).
+        let strategy_id_owned = host.strategy_id().to_string();
+        let strategy_name_owned = host.strategy_name().to_string();
+        let run_id_owned = host.run_id().to_string();
+        let now_value = host.now_millis() as f64;
+
         let result = ctx.with(|c| -> Result<serde_json::Value, RuntimeError> {
-            // 4a. Phase-3 ctx stub: install an empty `__ctx` object on the
-            //     globals so the Shape-B wrapper `(SOURCE)(__ctx)` does not
-            //     ReferenceError. Plan 03-02 replaces with the real binding.
-            let stub_ctx = rquickjs::Object::new(c.clone())
+            // 4a. D-04 ctx surface — real injection (replaces the 03-01 stub).
+            let ctx_obj = Object::new(c.clone())
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // strategy.id, strategy.name (read-only string fields).
+            let strategy_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            strategy_obj
+                .set("id", strategy_id_owned.as_str())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            strategy_obj
+                .set("name", strategy_name_owned.as_str())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("strategy", strategy_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // run.id (read-only string field).
+            let run_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            run_obj
+                .set("id", run_id_owned.as_str())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("run", run_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // ctx.now() — captured snapshot at injection time. Phase-3
+            // determinism: agent-visible "now" is fixed for the run; Phase-4+
+            // may revisit if intra-strategy clock progression is needed.
+            let now_fn = Function::new(c.clone(), move || -> rquickjs::Result<f64> {
+                Ok(now_value)
+            })
+            .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("now", now_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // ctx.log(...args) — JS-spec String() coercion via `Coerced<String>`,
+            // single-space joined, appended to the host buffer. NO DB IO in
+            // the callback (Pitfall 2).
+            let buf = log_buffer.clone();
+            let log_fn = Function::new(
+                c.clone(),
+                move |args: Rest<Coerced<String>>| -> rquickjs::Result<()> {
+                    let parts: Vec<String> = args.0.into_iter().map(|c| c.0).collect();
+                    buf.borrow_mut().push(parts.join(" "));
+                    Ok(())
+                },
+            )
+            .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("log", log_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // ctx.actions.noop() — returns the literal "noop".
+            let actions_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let noop_fn = Function::new(c.clone(), || -> rquickjs::Result<String> {
+                Ok("noop".to_string())
+            })
+            .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            actions_obj
+                .set("noop", noop_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("actions", actions_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
             c.globals()
-                .set("__ctx", stub_ctx)
+                .set("__ctx", ctx_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
             // 4a-prime. D-11 scrub. The Promise intrinsic ships
@@ -185,7 +269,19 @@ impl Sandbox {
             Ok(json)
         });
 
-        // 5. Outside the closure: prefer `Timeout` over `Exception` if the
+        // 5. Drain the host-side log buffer (filled by `ctx.log` callbacks
+        //    inside the closure) into the host BEFORE we propagate any error.
+        //    Even on a Timeout/Exception we still want to surface logs the
+        //    strategy emitted up to the failure point. Borrow_mut() works
+        //    regardless of whether the rquickjs runtime retained Rc clones.
+        {
+            let drained: Vec<String> = log_buffer_for_drain.borrow_mut().drain(..).collect();
+            for msg in drained {
+                host.append_log(msg);
+            }
+        }
+
+        // 6. Outside the closure: prefer `Timeout` over `Exception` if the
         //    interrupt handler raised the deadline flag (Pitfall 14).
         match result {
             Ok(v) => Ok(v),
