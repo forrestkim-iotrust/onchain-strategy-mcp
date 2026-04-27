@@ -21,7 +21,9 @@
 
 pub mod error;
 pub mod limits;
+pub mod runtime;
 pub mod sandbox;
 
 pub use error::RuntimeError;
+pub use runtime::{NowMillisProvider, RuntimeContext};
 pub use sandbox::{CtxHost, CtxStub, Sandbox};

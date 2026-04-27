@@ -14,7 +14,17 @@ workspace = true
 # `crates/executor-state/Cargo.toml:10-13` for the original justification.)
 [dependencies]
 executor-core = { path = "../executor-core" }
+# Plan 03-02 Task 3: RuntimeContext holds Arc<tokio::sync::Mutex<StateStore>>
+# and flushes buffered logs + source-read marker to the journal tables.
+executor-state = { path = "../executor-state" }
 rquickjs = { version = "0.11", default-features = false }
+# tokio::sync::Mutex (RuntimeContext state handle); per-crate pin — mirrors
+# executor-mcp's choice (Phase-2 D-03d) over std::sync::Mutex because the
+# upstream caller integrates with `spawn_blocking` and `blocking_lock`.
+# Feature `sync` is gated separately from `rt-multi-thread` in tokio 1.52, so
+# we add it explicitly on top of the workspace defaults.
+tokio = { workspace = true, features = ["sync"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -1022,12 +1022,15 @@ dependencies = [
 name = "strategy-js"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "executor-core",
+ "executor-state",
  "rquickjs",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
 ]
 
