@@ -163,11 +163,20 @@ pub fn map_state_error(e: StateError) -> McpError {
             })),
         ),
         StateError::InvalidInput(msg) => invalid_params(msg),
-        StateError::Storage(msg) => McpError::new(
-            STORAGE_ERROR,
-            format!("storage error: {msg}"),
-            Some(json!({ "code": "storage_error", "detail": msg })),
-        ),
+        StateError::Storage(msg) => {
+            // MR-01: Do NOT echo raw rusqlite text (constraint names, table
+            // names, SQLite-internal phrasing) onto the wire — it leaks
+            // schema details. Route the raw text to `tracing::warn!` for
+            // operator forensics, and surface a stable taxonomy string in
+            // `data.detail` so agent dispatch on `data.code == "storage_error"`
+            // remains robust.
+            tracing::warn!(detail = %msg, "storage error");
+            McpError::new(
+                STORAGE_ERROR,
+                "storage backend error".to_string(),
+                Some(json!({ "code": "storage_error", "detail": "storage backend error" })),
+            )
+        }
     }
 }
 
@@ -246,7 +255,19 @@ mod tests {
         assert_eq!(e.code, ErrorCode(-32016));
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "storage_error");
-        assert!(e.message.contains("boom"), "message missing detail: {}", e.message);
+        // MR-01: raw rusqlite text MUST NOT appear on the wire. The detail
+        // is a stable taxonomy string; the raw text goes to tracing only.
+        assert!(
+            !e.message.contains("boom"),
+            "raw rusqlite text leaked to wire: {}",
+            e.message
+        );
+        assert!(
+            !data["detail"].as_str().unwrap_or("").contains("boom"),
+            "raw rusqlite text leaked to data.detail: {}",
+            data["detail"]
+        );
+        assert_eq!(data["detail"], "storage backend error");
     }
 
     #[test]
