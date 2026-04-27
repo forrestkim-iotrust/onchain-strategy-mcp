@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 04-02 complete; Phase 04 in progress (2/4 plans)
-last_updated: "2026-04-27T09:33:07.000Z"
+stopped_at: Plan 04-03 complete; Phase 04 in progress (3/4 plans)
+last_updated: "2026-04-27T10:30:00.000Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 13
-  completed_plans: 11
-  percent: 85
+  completed_plans: 12
+  percent: 92
 ---
 
 # Project State
@@ -26,8 +26,8 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 ## Current Position
 
 Phase: 04 (evm-context-and-actions) — IN PROGRESS
-Plan: 2 of 4 complete
-Status: Plan 04-02 closed (ERC20 + native helpers + flat aliases — CTX-02/03/04 wired); next is 04-03 (action builders)
+Plan: 3 of 4 complete
+Status: Plan 04-03 closed (5 Action variants + builders + validator widening + D-16 flip — CTX-05/06/07/08 wired); next is 04-04 (units/address + negative grid + schema goldens)
 Last activity: 2026-04-27
 
 Progress: [████████▌░] ~85% across 13 planned plans (11/13)

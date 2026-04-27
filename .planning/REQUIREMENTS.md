@@ -27,10 +27,10 @@
 - [x] **CTX-02**: `ctx.evm.erc20Balance` can read ERC20 balances. *(04-02 executor_evm::erc20::erc20_balance_of + ctx.evm.readErc20.balanceOf + flat alias ctx.evm.erc20Balance, anvil-gated end-to-end against MockERC20 fixture.)*
 - [x] **CTX-03**: `ctx.evm.erc20Allowance` can read ERC20 allowances. *(04-02 executor_evm::erc20::erc20_allowance + ctx.evm.readErc20.allowance + flat alias ctx.evm.erc20Allowance.)*
 - [x] **CTX-04**: `ctx.evm.nativeBalance` can read native token balance. *(04-02 executor_evm::native::native_balance + ctx.evm.readNative.balance + flat alias ctx.evm.nativeBalance, decimal-string per D-03.)*
-- [ ] **CTX-05**: `ctx.actions.contractCall` can create ABI-based contract call actions.
-- [ ] **CTX-06**: `ctx.actions.rawCall` can create explicit raw calldata actions.
-- [ ] **CTX-07**: `ctx.actions.erc20Approve` and `ctx.actions.erc20Transfer` can create ERC20 actions.
-- [ ] **CTX-08**: `ctx.actions.nativeTransfer` can create native transfer actions.
+- [x] **CTX-05**: `ctx.actions.contractCall` can create ABI-based contract call actions.
+- [x] **CTX-06**: `ctx.actions.rawCall` can create explicit raw calldata actions.
+- [x] **CTX-07**: `ctx.actions.erc20Approve` and `ctx.actions.erc20Transfer` can create ERC20 actions.
+- [x] **CTX-08**: `ctx.actions.nativeTransfer` can create native transfer actions.
 - [ ] **CTX-09**: `ctx.units` and address helpers reduce common EVM value/address mistakes.
 
 ### Execution Pipeline
@@ -113,10 +113,10 @@
 | CTX-02 | Phase 4 | Complete (04-02 erc20_balance_of + ctx.evm.readErc20.balanceOf + flat alias erc20Balance) |
 | CTX-03 | Phase 4 | Complete (04-02 erc20_allowance + ctx.evm.readErc20.allowance + flat alias erc20Allowance) |
 | CTX-04 | Phase 4 | Complete (04-02 native_balance + ctx.evm.readNative.balance + flat alias nativeBalance) |
-| CTX-05 | Phase 4 | Pending |
-| CTX-06 | Phase 4 | Pending |
-| CTX-07 | Phase 4 | Pending |
-| CTX-08 | Phase 4 | Pending |
+| CTX-05 | Phase 4 | Closed |
+| CTX-06 | Phase 4 | Closed |
+| CTX-07 | Phase 4 | Closed |
+| CTX-08 | Phase 4 | Closed |
 | CTX-09 | Phase 4 | Pending |
 | EXE-01 | Phase 5 | Pending |
 | EXE-02 | Phase 5 | Pending |
