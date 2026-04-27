@@ -147,10 +147,23 @@ fn ctx_run_object_shape() {
 
 #[test]
 fn ctx_actions_object_shape() {
+    // Phase 4 D-08 / 04-03: ctx.actions gains 5 builder bindings on top of
+    // the Phase-3 `noop`. Insertion order is preserved by V8 / QuickJS for
+    // string keys, so we pin the exact sequence.
     let mut host = make_host();
     let r = run_with_host("(ctx) => Object.keys(ctx.actions)", &mut host).unwrap();
     let actual: Vec<String> = serde_json::from_value(r).unwrap();
-    assert_eq!(actual, vec!["noop".to_string()]);
+    assert_eq!(
+        actual,
+        vec![
+            "noop".to_string(),
+            "contractCall".to_string(),
+            "rawCall".to_string(),
+            "erc20Transfer".to_string(),
+            "erc20Approve".to_string(),
+            "nativeTransfer".to_string(),
+        ]
+    );
 }
 
 #[test]
