@@ -554,7 +554,21 @@ JavaScript execution adds a second concern: rquickjs `Runtime` is `!Sync` by def
 
 14. **rquickjs error type variance.** `rquickjs::Error::Exception` carries the JS exception value, not a string. Convert via `ctx.exception().and_then(|e| e.into_string())` or similar. Pattern-match exhaustively so `Error::OutOfMemory`, `Error::Panic`, `Error::IntoJs`, etc. all map to the right `kind` in `strategy_runtime_error`.
 
-## Open Questions for Planner / User
+## Open Questions (RESOLVED in 03-CONTEXT.md)
+
+> **All questions in this section were resolved during planner-locked context capture (`/gsd-discuss-phase` was skipped per orchestrator brief).** This section is retained for historical traceability — every question below is answered by a locked `D-XX` decision in `03-CONTEXT.md`. Read CONTEXT for the binding answer; this section just records the original framing.
+>
+> Resolution map:
+> - Q1 (entry-point shape) → **D-05** (Shape B locked)
+> - Q2 (separate `journal_logs` table) → **D-06** (three separate tables)
+> - Q3 (wall-clock default) → **D-03** (2 s)
+> - Q4 (memory cap default) → **D-03** (64 MiB)
+> - Q5 (`strategy-js` as new crate) → **D-02** (new `crates/strategy-js/`)
+> - Q6 (`Runtime` reuse vs fresh per run) → **deferred to Phase 6 pool** (fresh-per-run for v1; pool only if Wave-0 measurement > 50 ms)
+> - Q7 (`ctx.log` immediate vs buffered) → **D-04** (buffered logs)
+> - Q8 (MCP error code numbers) → **D-07** (-32011 / -32017 / -32018)
+> - Q9 (Promise return handling) → **D-10** (rejected as `STRATEGY_INVALID_OUTPUT`)
+> - Q10 (`Action::Noop` survival) → Action wire-shape stays canonical (Phase 4 extends the variant set; `Noop` remains valid)
 
 1. **Strategy entry-point shape: A or B?** (See *Strategy entry-point shape* above.) Recommendation: **B** (`(ctx) => ...` arrow). Cleaner contract; rejects ambiguous styles. Force the agent to write `(ctx) => "noop"` or `(ctx) => [{kind:"noop"}]`. This is a stronger contract than letting top-level expressions or `globalThis.strategy` work. → Decide in `gsd-discuss-phase`.
 
