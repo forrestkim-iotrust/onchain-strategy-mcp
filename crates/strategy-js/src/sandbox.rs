@@ -292,6 +292,104 @@ impl Sandbox {
             evm_obj
                 .set("readContract", read_contract_fn)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // Phase 4 D-06 / D-07 / CTX-02 / CTX-03 / CTX-04: ERC20 + native
+            // helper bindings. Structured forms live under
+            // `ctx.evm.readErc20.*` and `ctx.evm.readNative.*`; the flat
+            // aliases REQUIREMENTS demands (`erc20Balance`, `erc20Allowance`,
+            // `nativeBalance`) sit alongside `readErc20`/`readNative` on
+            // `ctx.evm`. All forms route to the SAME backing helper functions
+            // in `executor_evm::{erc20, native}` — flat-alias and structured
+            // calls with identical arguments produce identical results and
+            // identical journal payloads (D-15 / threat T-04-02-01).
+            //
+            // Each helper records exactly one `journal_source_reads` row with
+            // `kind="evm_read"`, `target="<lower_address>:<helper_function>"`,
+            // and `payload_json.helper` set to the helper name (e.g.
+            // `"balanceOf"`) — NOT the alias name. The structured-form name
+            // is the canonical helper identity; aliases are name-only.
+            let read_erc20 = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            macro_rules! install_erc20 {
+                ($obj:expr, $name:expr, $kind:expr) => {{
+                    let provider_local = provider_clone.clone();
+                    let cfg_local = evm_cfg_clone.clone();
+                    let buf_local = evm_reads.clone();
+                    let kind: Erc20Helper = $kind;
+                    let f = Function::new(
+                        c.clone(),
+                        make_erc20_closure(provider_local, cfg_local, buf_local, kind),
+                    )
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                    $obj.set($name, f)
+                        .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                }};
+            }
+            install_erc20!(read_erc20, "balanceOf", Erc20Helper::BalanceOf);
+            install_erc20!(read_erc20, "allowance", Erc20Helper::Allowance);
+            install_erc20!(read_erc20, "decimals", Erc20Helper::Decimals);
+            install_erc20!(read_erc20, "symbol", Erc20Helper::Symbol);
+            install_erc20!(read_erc20, "name", Erc20Helper::Name);
+            install_erc20!(read_erc20, "totalSupply", Erc20Helper::TotalSupply);
+            evm_obj
+                .set("readErc20", read_erc20)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // readNative — native_balance + native_block_number
+            let read_native = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            {
+                let provider_local = provider_clone.clone();
+                let cfg_local = evm_cfg_clone.clone();
+                let buf_local = evm_reads.clone();
+                let f = Function::new(
+                    c.clone(),
+                    make_native_balance_closure(provider_local, cfg_local, buf_local),
+                )
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                read_native
+                    .set("balance", f)
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            }
+            {
+                let provider_local = provider_clone.clone();
+                let cfg_local = evm_cfg_clone.clone();
+                let buf_local = evm_reads.clone();
+                let f = Function::new(
+                    c.clone(),
+                    make_native_block_number_closure(provider_local, cfg_local, buf_local),
+                )
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                read_native
+                    .set("blockNumber", f)
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            }
+            evm_obj
+                .set("readNative", read_native)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // Flat aliases per REQUIREMENTS naming (CTX-02 / CTX-03 / CTX-04).
+            // Each alias is a separate JS Function whose body invokes the SAME
+            // Rust helper (executor_evm::erc20::erc20_{balance_of, allowance}
+            // / executor_evm::native::native_balance) the structured form
+            // does — identical results, identical journal payloads.
+            install_erc20!(evm_obj, "erc20Balance", Erc20Helper::BalanceOf);
+            install_erc20!(evm_obj, "erc20Allowance", Erc20Helper::Allowance);
+            {
+                let provider_local = provider_clone.clone();
+                let cfg_local = evm_cfg_clone.clone();
+                let buf_local = evm_reads.clone();
+                let f = Function::new(
+                    c.clone(),
+                    make_native_balance_closure(provider_local, cfg_local, buf_local),
+                )
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                evm_obj
+                    .set("nativeBalance", f)
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            }
+
             ctx_obj
                 .set("evm", evm_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
@@ -636,6 +734,453 @@ fn read_contract_host_binding<'js>(
         .borrow_mut()
         .push(crate::runtime::EvmReadRecord {
             target,
+            payload_json: payload,
+        });
+
+    json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+/// Phase 4 D-06 helper kinds. Each variant maps 1:1 to a function in the
+/// bundled `executor_evm::erc20` ABI. The helper name appears verbatim in
+/// the journal payload (`payload.helper`) — the JS-side flat aliases
+/// (`erc20Balance` / `erc20Allowance`) re-use these same kinds, so the
+/// helper identity recorded in the journal is the structured-form name.
+#[derive(Debug, Clone, Copy)]
+enum Erc20Helper {
+    BalanceOf,
+    Allowance,
+    Decimals,
+    Symbol,
+    Name,
+    TotalSupply,
+}
+
+impl Erc20Helper {
+    fn helper_name(self) -> &'static str {
+        match self {
+            Erc20Helper::BalanceOf => "balanceOf",
+            Erc20Helper::Allowance => "allowance",
+            Erc20Helper::Decimals => "decimals",
+            Erc20Helper::Symbol => "symbol",
+            Erc20Helper::Name => "name",
+            Erc20Helper::TotalSupply => "totalSupply",
+        }
+    }
+    /// Number of address-shaped positional args BEFORE the optional blockTag
+    /// (token is always arg 0; allowance also takes owner+spender).
+    fn arg_arity(self) -> usize {
+        match self {
+            Erc20Helper::BalanceOf => 2,    // token, account
+            Erc20Helper::Allowance => 3,    // token, owner, spender
+            Erc20Helper::Decimals => 1,     // token
+            Erc20Helper::Symbol => 1,       // token
+            Erc20Helper::Name => 1,         // token
+            Erc20Helper::TotalSupply => 1,  // token
+        }
+    }
+}
+
+fn make_erc20_closure(
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: executor_evm::EvmConfig,
+    evm_reads: Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+    kind: Erc20Helper,
+) -> impl for<'js> Fn(rquickjs::function::Rest<rquickjs::Value<'js>>) -> rquickjs::Result<rquickjs::Value<'js>>
+       + 'static {
+    move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
+        erc20_host_binding(args.0, provider.as_ref(), &cfg, &evm_reads, kind)
+    }
+}
+
+fn make_native_balance_closure(
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: executor_evm::EvmConfig,
+    evm_reads: Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> impl for<'js> Fn(rquickjs::function::Rest<rquickjs::Value<'js>>) -> rquickjs::Result<rquickjs::Value<'js>>
+       + 'static {
+    move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
+        native_balance_host_binding(args.0, provider.as_ref(), &cfg, &evm_reads)
+    }
+}
+
+fn make_native_block_number_closure(
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: executor_evm::EvmConfig,
+    evm_reads: Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> impl for<'js> Fn(Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> + 'static {
+    move |ctx: Ctx<'_>| {
+        native_block_number_host_binding(ctx, provider.as_ref(), &cfg, &evm_reads)
+    }
+}
+
+/// Phase 4 D-06 host binding for `ctx.evm.readErc20.*` and the flat aliases
+/// (`erc20Balance` / `erc20Allowance`). Positional JS args:
+///   - balanceOf(token, account, blockTag?)
+///   - allowance(token, owner, spender, blockTag?)
+///   - decimals(token, blockTag?)
+///   - symbol(token, blockTag?)
+///   - name(token, blockTag?)
+///   - totalSupply(token, blockTag?)
+///
+/// `blockTag` defaults to `"latest"` when missing or `undefined` (NOTE-2 from
+/// plan-checker: `flat_alias_default_blockTag_is_latest` test pins this).
+fn erc20_host_binding<'js>(
+    raw_args: Vec<rquickjs::Value<'js>>,
+    provider: Option<&std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: &executor_evm::EvmConfig,
+    evm_reads: &Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+    kind: Erc20Helper,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use executor_evm::read::BlockTag;
+
+    // Recover ctx via the FIRST argument (we always have at least the token
+    // arg; the host binding rejects empty arg lists). When raw_args is
+    // empty we have to construct a Ctx from a borrowed value — but rquickjs
+    // requires a Ctx for throwing. We bail with a generic Error path: this
+    // is structurally impossible for our binding because rquickjs's Function
+    // fn-like glue ensures Rest<Value> is always given a context.
+    let ctx = match raw_args.first() {
+        Some(v) => v.ctx().clone(),
+        None => return Err(rquickjs::Error::Exception),
+    };
+
+    let provider = match provider {
+        Some(p) => p.clone(),
+        None => {
+            return Err(throw_js_error(
+                &ctx,
+                &format!(
+                    "ctx.evm.readErc20.{} not available: no provider configured",
+                    kind.helper_name()
+                ),
+            ));
+        }
+    };
+
+    let arity = kind.arg_arity();
+    if raw_args.len() < arity {
+        return Err(throw_js_error(
+            &ctx,
+            &format!(
+                "ctx.evm.readErc20.{} expects at least {arity} positional arg(s), got {}",
+                kind.helper_name(),
+                raw_args.len()
+            ),
+        ));
+    }
+
+    let mut addrs: Vec<String> = Vec::with_capacity(arity);
+    for (i, v) in raw_args.iter().take(arity).enumerate() {
+        let s = v
+            .as_string()
+            .ok_or_else(|| {
+                throw_js_error(
+                    &ctx,
+                    &format!(
+                        "ctx.evm.readErc20.{}: arg #{} must be a string (address)",
+                        kind.helper_name(),
+                        i
+                    ),
+                )
+            })?
+            .to_string()?;
+        addrs.push(s);
+    }
+
+    // Optional blockTag. Tag arg index = arity (zero-indexed; e.g. balanceOf
+    // takes (token, account) so blockTag is at index 2). Missing or
+    // `undefined` → Latest (NOTE-2 default).
+    let block_tag = if raw_args.len() > arity {
+        let v = &raw_args[arity];
+        if v.is_undefined() || v.is_null() {
+            BlockTag::Latest
+        } else {
+            parse_block_tag(v).map_err(|e| throw_js_error(&ctx, &e))?
+        }
+    } else {
+        BlockTag::Latest
+    };
+
+    let token = addrs[0].clone();
+    let result: Result<serde_json::Value, executor_evm::EvmError> = {
+        let provider = provider.clone();
+        let cfg = cfg.clone();
+        let block_tag_for_call = block_tag;
+        let call_addrs = addrs.clone();
+        let dispatch = async move {
+            match kind {
+                Erc20Helper::BalanceOf => {
+                    executor_evm::erc20::erc20_balance_of(
+                        provider,
+                        &cfg,
+                        &call_addrs[0],
+                        &call_addrs[1],
+                        block_tag_for_call,
+                    )
+                    .await
+                }
+                Erc20Helper::Allowance => {
+                    executor_evm::erc20::erc20_allowance(
+                        provider,
+                        &cfg,
+                        &call_addrs[0],
+                        &call_addrs[1],
+                        &call_addrs[2],
+                        block_tag_for_call,
+                    )
+                    .await
+                }
+                Erc20Helper::Decimals => {
+                    executor_evm::erc20::erc20_decimals(
+                        provider,
+                        &cfg,
+                        &call_addrs[0],
+                        block_tag_for_call,
+                    )
+                    .await
+                }
+                Erc20Helper::Symbol => {
+                    executor_evm::erc20::erc20_symbol(
+                        provider,
+                        &cfg,
+                        &call_addrs[0],
+                        block_tag_for_call,
+                    )
+                    .await
+                }
+                Erc20Helper::Name => {
+                    executor_evm::erc20::erc20_name(
+                        provider,
+                        &cfg,
+                        &call_addrs[0],
+                        block_tag_for_call,
+                    )
+                    .await
+                }
+                Erc20Helper::TotalSupply => {
+                    executor_evm::erc20::erc20_total_supply(
+                        provider,
+                        &cfg,
+                        &call_addrs[0],
+                        block_tag_for_call,
+                    )
+                    .await
+                }
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(dispatch)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        throw_js_error(
+                            &ctx,
+                            &format!("evm rpc error: runtime build failed: {e}"),
+                        )
+                    })?;
+                rt.block_on(dispatch)
+            }
+        }
+    };
+
+    let json = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let stable = e.to_string();
+            tracing::warn!(
+                detail = %e.detail_for_log(),
+                kind = %e.data_kind(),
+                helper = kind.helper_name(),
+                "ctx.evm.readErc20.* failed"
+            );
+            return Err(throw_js_error(&ctx, &stable));
+        }
+    };
+
+    // Phase 4 D-13 journal record. Helper-specific args (allowance has 2
+    // address args; the rest have 1).
+    let token_lower = token.to_lowercase();
+    let target = format!("{token_lower}:{}", kind.helper_name());
+    let payload_args: Vec<serde_json::Value> = addrs
+        .iter()
+        .skip(1)
+        .map(|s| serde_json::Value::String(s.clone()))
+        .collect();
+    let payload = serde_json::json!({
+        "helper": kind.helper_name(),
+        "args": payload_args,
+        "address": token,
+        "block_tag": block_tag_to_json(block_tag),
+    });
+    evm_reads
+        .borrow_mut()
+        .push(crate::runtime::EvmReadRecord {
+            target,
+            payload_json: payload,
+        });
+
+    json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+/// Phase 4 D-07 host binding for `ctx.evm.readNative.balance` + the flat
+/// alias `ctx.evm.nativeBalance`. Positional args:
+///   - balance(account, blockTag?)
+fn native_balance_host_binding<'js>(
+    raw_args: Vec<rquickjs::Value<'js>>,
+    provider: Option<&std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: &executor_evm::EvmConfig,
+    evm_reads: &Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use executor_evm::read::BlockTag;
+
+    let ctx = match raw_args.first() {
+        Some(v) => v.ctx().clone(),
+        None => return Err(rquickjs::Error::Exception),
+    };
+
+    let provider = match provider {
+        Some(p) => p.clone(),
+        None => {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.evm.readNative.balance not available: no provider configured",
+            ));
+        }
+    };
+
+    if raw_args.is_empty() {
+        return Err(throw_js_error(
+            &ctx,
+            "ctx.evm.readNative.balance expects at least 1 positional arg (account), got 0",
+        ));
+    }
+    let account = raw_args[0]
+        .as_string()
+        .ok_or_else(|| throw_js_error(&ctx, "ctx.evm.readNative.balance: account must be a string"))?
+        .to_string()?;
+
+    let block_tag = if raw_args.len() > 1 {
+        let v = &raw_args[1];
+        if v.is_undefined() || v.is_null() {
+            BlockTag::Latest
+        } else {
+            parse_block_tag(v).map_err(|e| throw_js_error(&ctx, &e))?
+        }
+    } else {
+        BlockTag::Latest
+    };
+
+    let dispatch =
+        executor_evm::native::native_balance(provider, cfg, &account, block_tag);
+    let result: Result<serde_json::Value, executor_evm::EvmError> =
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(dispatch)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        throw_js_error(
+                            &ctx,
+                            &format!("evm rpc error: runtime build failed: {e}"),
+                        )
+                    })?;
+                rt.block_on(dispatch)
+            }
+        };
+
+    let json = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let stable = e.to_string();
+            tracing::warn!(
+                detail = %e.detail_for_log(),
+                kind = %e.data_kind(),
+                helper = "balance",
+                "ctx.evm.readNative.balance failed"
+            );
+            return Err(throw_js_error(&ctx, &stable));
+        }
+    };
+
+    let target = account.to_lowercase();
+    let payload = serde_json::json!({
+        "helper": "balance",
+        "args": [],
+        "account": account,
+        "block_tag": block_tag_to_json(block_tag),
+    });
+    evm_reads
+        .borrow_mut()
+        .push(crate::runtime::EvmReadRecord {
+            target,
+            payload_json: payload,
+        });
+
+    json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+/// Phase 4 D-07 host binding for `ctx.evm.readNative.blockNumber()`.
+/// Returns a JSON Number per D-07. Journals one row with
+/// `target="(block_number)"` per D-13.
+fn native_block_number_host_binding<'js>(
+    ctx: Ctx<'js>,
+    provider: Option<&std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: &executor_evm::EvmConfig,
+    evm_reads: &Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let provider = match provider {
+        Some(p) => p.clone(),
+        None => {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.evm.readNative.blockNumber not available: no provider configured",
+            ));
+        }
+    };
+
+    let dispatch = executor_evm::native::native_block_number(provider, cfg);
+    let result: Result<serde_json::Value, executor_evm::EvmError> =
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(dispatch)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        throw_js_error(
+                            &ctx,
+                            &format!("evm rpc error: runtime build failed: {e}"),
+                        )
+                    })?;
+                rt.block_on(dispatch)
+            }
+        };
+
+    let json = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let stable = e.to_string();
+            tracing::warn!(
+                detail = %e.detail_for_log(),
+                kind = %e.data_kind(),
+                helper = "blockNumber",
+                "ctx.evm.readNative.blockNumber failed"
+            );
+            return Err(throw_js_error(&ctx, &stable));
+        }
+    };
+
+    let payload = serde_json::json!({
+        "helper": "blockNumber",
+        "args": [],
+    });
+    evm_reads
+        .borrow_mut()
+        .push(crate::runtime::EvmReadRecord {
+            target: "(block_number)".to_string(),
             payload_json: payload,
         });
 
