@@ -19,6 +19,7 @@
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use executor_evm::{DynProvider, EvmConfig};
 use executor_state::{StateError, StateStore};
 
 use crate::sandbox::CtxHost;
@@ -39,6 +40,24 @@ pub struct RuntimeContext {
     /// marker. Cleared after a successful flush so a second `flush()` call
     /// is a no-op (idempotent).
     source_read_pending: bool,
+    /// Phase 4 D-04: lazy provider clone (set by the MCP layer when the
+    /// strategy is invoked). `None` for hosts that do not support
+    /// `ctx.evm.*`; `Some` for runtime contexts built by the strategy_run
+    /// handler.
+    provider: Option<Arc<DynProvider>>,
+    /// Phase 4 D-04: per-call timeout / RPC URL config.
+    evm_config: EvmConfig,
+    /// Phase 4 D-13: pending `journal_source_reads` rows for `ctx.evm.*`
+    /// calls. Drained in [`RuntimeContext::flush`] alongside logs and the
+    /// strategy_source marker.
+    evm_reads: Vec<EvmReadRecord>,
+}
+
+/// One `ctx.evm.*` call's journal payload (Phase 4 D-13).
+#[derive(Debug, Clone)]
+pub struct EvmReadRecord {
+    pub target: String,
+    pub payload_json: serde_json::Value,
 }
 
 impl RuntimeContext {
@@ -57,7 +76,23 @@ impl RuntimeContext {
             now_provider,
             log_buffer: Vec::new(),
             source_read_pending: true,
+            provider: None,
+            evm_config: EvmConfig::default(),
+            evm_reads: Vec::new(),
         }
+    }
+
+    /// Phase 4: attach a lazy `Arc<DynProvider>` and the typed
+    /// [`EvmConfig`]. Builder-style; mutates and returns the same context
+    /// so the strategy_run handler can chain after `new`.
+    pub fn with_evm(
+        mut self,
+        provider: Option<Arc<DynProvider>>,
+        evm_config: EvmConfig,
+    ) -> Self {
+        self.provider = provider;
+        self.evm_config = evm_config;
+        self
     }
 
     /// Default chrono-backed clock provider (Phase-3 v1 — D-04).
@@ -86,7 +121,23 @@ impl RuntimeContext {
             )?;
             self.source_read_pending = false;
         }
-        // 2. Logs (D-04 ctx.log → journal_logs).
+        // 2. Phase 4 D-13: ctx.evm.* journal rows (kind="evm_read").
+        //    MR-03 carry-forward: `?`-propagate serde failures via
+        //    StateError::SerializationError — never silently fall back.
+        for record in self.evm_reads.drain(..) {
+            let payload_str = serde_json::to_string(&record.payload_json).map_err(|e| {
+                StateError::SerializationError(format!(
+                    "journal_source_reads.payload (evm_read): {e}"
+                ))
+            })?;
+            store.record_source_read(
+                &self.run_id,
+                "evm_read",
+                &record.target,
+                Some(&payload_str),
+            )?;
+        }
+        // 3. Logs (D-04 ctx.log → journal_logs).
         for msg in self.log_buffer.drain(..) {
             store.record_log(&self.run_id, &msg)?;
         }
@@ -109,5 +160,17 @@ impl CtxHost for RuntimeContext {
     }
     fn append_log(&mut self, message: String) {
         self.log_buffer.push(message);
+    }
+    fn provider(&self) -> Option<&Arc<DynProvider>> {
+        self.provider.as_ref()
+    }
+    fn evm_config(&self) -> &EvmConfig {
+        &self.evm_config
+    }
+    fn record_evm_read(&mut self, target: String, payload: serde_json::Value) {
+        self.evm_reads.push(EvmReadRecord {
+            target,
+            payload_json: payload,
+        });
     }
 }

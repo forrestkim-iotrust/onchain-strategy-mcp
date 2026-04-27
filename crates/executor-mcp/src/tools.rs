@@ -268,6 +268,18 @@ impl ExecutorServer {
         transition(&self.state, &run_id, RunStatus::Queued, RunStatus::Running).await?;
 
         // STEP 5: spawn_blocking { Sandbox::execute + RuntimeContext::flush }
+        // Phase 4 D-04: lazy-init the alloy provider BEFORE spawn_blocking so
+        // any config error surfaces as a typed Mcp error (not a cryptic
+        // exception thrown from inside the JS sandbox). Server boot is still
+        // independent of devnet liveness — this is the FIRST opportunity the
+        // provider would be touched on this run, and a bad URL here is a
+        // legitimate runtime config error to surface.
+        // Provider build failure (e.g. URL parse error) does NOT fail the
+        // whole run — strategies that don't call ctx.evm.* should still
+        // succeed. We pass `None` and let the host binding throw a typed
+        // error if they DO call it.
+        let evm_provider = self.evm_provider().await.ok();
+        let evm_config = self.evm_config.clone();
         let state_for_run = self.state.clone();
         let source = strategy.source.clone();
         let sid_for_ctx = strategy.id.clone();
@@ -281,7 +293,8 @@ impl ExecutorServer {
                     sname_for_ctx,
                     rid_for_ctx,
                     RuntimeContext::default_clock(),
-                );
+                )
+                .with_evm(evm_provider, evm_config);
                 let r = Sandbox::execute(&source, &mut runtime_ctx);
                 if let Err(flush_err) = runtime_ctx.flush() {
                     tracing::warn!(?flush_err, "RuntimeContext::flush failed after execute");

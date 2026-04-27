@@ -118,6 +118,7 @@ fn ctx_object_shape_matches_d04() {
     actual.sort();
     let mut expected = vec![
         "actions".to_string(),
+        "evm".to_string(), // Phase 4 D-04: ctx.evm.* sub-namespace.
         "log".to_string(),
         "now".to_string(),
         "run".to_string(),

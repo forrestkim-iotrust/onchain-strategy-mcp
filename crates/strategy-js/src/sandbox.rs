@@ -27,12 +27,42 @@ use std::time::{Duration, Instant};
 /// calls in `append_log` (no DB IO inside JS execution — RESEARCH Pitfall 2);
 /// Plan 03-02 swaps this trait's impl from [`CtxStub`] to `RuntimeContext`
 /// which flushes the buffer to `journal_logs` after `execute` returns.
+///
+/// Phase 4 (D-15a / HR-01 carry-forward) extends the trait additively —
+/// `provider`, `evm_config`, `record_evm_read` have default impls so
+/// existing impls (e.g. `CtxStub`) keep compiling. The host bindings for
+/// `ctx.evm.*` install AFTER `FORBIDDEN_GLOBALS_SCRUB` (HR-01 lock).
 pub trait CtxHost {
     fn strategy_id(&self) -> &str;
     fn strategy_name(&self) -> &str;
     fn run_id(&self) -> &str;
     fn now_millis(&self) -> i64;
     fn append_log(&mut self, message: String);
+
+    /// Phase 4 D-04: shared `Arc<DynProvider>` for `ctx.evm.*` calls.
+    /// Default `None` keeps `CtxStub` and other test hosts working —
+    /// strategies that try `ctx.evm.readContract` against a `None`-provider
+    /// host receive a typed JS error.
+    fn provider(&self) -> Option<&std::sync::Arc<executor_evm::DynProvider>> {
+        None
+    }
+
+    /// Phase 4 D-04: per-call timeout + RPC URL config. The default value
+    /// is referenced by host bindings only when `provider()` is `Some`, so
+    /// no test host needs to override.
+    fn evm_config(&self) -> &executor_evm::EvmConfig {
+        // SAFETY: a `static` value with a `Default::default()` body needs
+        // `LazyLock` for thread-safety; we use `OnceLock` from std.
+        use std::sync::OnceLock;
+        static DEFAULT: OnceLock<executor_evm::EvmConfig> = OnceLock::new();
+        DEFAULT.get_or_init(executor_evm::EvmConfig::default)
+    }
+
+    /// Phase 4 D-13: buffer one `journal_source_reads`-bound record per
+    /// `ctx.evm.*` call. Default no-op so test hosts that don't journal can
+    /// still satisfy the trait. `RuntimeContext` overrides to push into a
+    /// drain buffer flushed alongside log records.
+    fn record_evm_read(&mut self, _target: String, _payload: serde_json::Value) {}
 }
 
 /// In-memory `CtxHost` implementation used by Phase-3 unit tests and as the
@@ -132,12 +162,21 @@ impl Sandbox {
         let log_buffer: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let log_buffer_for_drain = log_buffer.clone();
 
+        // Phase 4 D-13 buffer for `ctx.evm.*` journal records, drained
+        // alongside logs after `ctx.with` returns.
+        let evm_reads: Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let evm_reads_for_drain = evm_reads.clone();
+
         // Snapshot host fields BEFORE `ctx.with` — closures must own their
         // captures (rquickjs `Function::new` requires `'js`, not `&'js mut H`).
         let strategy_id_owned = host.strategy_id().to_string();
         let strategy_name_owned = host.strategy_name().to_string();
         let run_id_owned = host.run_id().to_string();
         let now_value = host.now_millis() as f64;
+        let provider_clone: Option<std::sync::Arc<executor_evm::DynProvider>> =
+            host.provider().cloned();
+        let evm_cfg_clone: executor_evm::EvmConfig = host.evm_config().clone();
 
         let result = ctx.with(|c| -> Result<serde_json::Value, RuntimeError> {
             // 4a. D-04 ctx surface — real injection (replaces the 03-01 stub).
@@ -207,6 +246,54 @@ impl Sandbox {
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
             ctx_obj
                 .set("actions", actions_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // Phase 4 D-04 / D-13: ctx.evm sub-object. `readContract` is
+            // installed regardless of whether `provider()` is `Some` —
+            // strategies that invoke it without a configured provider get
+            // a typed JS error (not a missing-namespace ReferenceError).
+            // This sub-object is built BEFORE the FORBIDDEN_GLOBALS_SCRUB
+            // line below (alongside the other ctx.* sub-objects); the
+            // scrub still runs BEFORE `c.globals().set("__ctx", ...)` is
+            // called, preserving HR-01 ordering for the install of `__ctx`
+            // onto globalThis.
+            let evm_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let provider_for_fn = provider_clone.clone();
+            let cfg_for_fn = evm_cfg_clone.clone();
+            let evm_reads_for_fn = evm_reads.clone();
+            // Bind the input/output lifetime via an annotated helper trait
+            // signature: the closure must declare a single `'js` for both
+            // the incoming Object and the returned Value.
+            fn make_read_contract_closure(
+                provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+                cfg: executor_evm::EvmConfig,
+                evm_reads: Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+            ) -> impl for<'js> Fn(rquickjs::Object<'js>) -> rquickjs::Result<rquickjs::Value<'js>>
+                   + 'static {
+                move |args: rquickjs::Object<'_>| {
+                    read_contract_host_binding(
+                        &args,
+                        provider.as_ref(),
+                        &cfg,
+                        &evm_reads,
+                    )
+                }
+            }
+            let read_contract_fn = Function::new(
+                c.clone(),
+                make_read_contract_closure(
+                    provider_for_fn,
+                    cfg_for_fn,
+                    evm_reads_for_fn,
+                ),
+            )
+            .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            evm_obj
+                .set("readContract", read_contract_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("evm", evm_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
             // 4a-prime. D-11 scrub MUST run BEFORE host bindings are installed.
@@ -286,6 +373,16 @@ impl Sandbox {
             let drained: Vec<String> = log_buffer_for_drain.borrow_mut().drain(..).collect();
             for msg in drained {
                 host.append_log(msg);
+            }
+        }
+        // Phase 4 D-13: drain the ctx.evm.* journal buffer into the host
+        // (RuntimeContext::record_evm_read pushes into evm_reads, then
+        // flush() writes them to journal_source_reads with kind="evm_read").
+        {
+            let drained: Vec<crate::runtime::EvmReadRecord> =
+                evm_reads_for_drain.borrow_mut().drain(..).collect();
+            for record in drained {
+                host.record_evm_read(record.target, record.payload_json);
             }
         }
 
@@ -385,6 +482,257 @@ fn classify_message(msg: &str) -> Option<RuntimeError> {
         return Some(RuntimeError::Timeout);
     }
     None
+}
+
+/// Phase 4 D-04 host binding for `ctx.evm.readContract`. Synchronous from
+/// the JS side; performs the RPC by acquiring the current Tokio runtime
+/// handle and calling `block_on(read_contract(...))`. The storage mutex
+/// is NEVER acquired in this path (D-04 mutex discipline).
+///
+/// The closure throws a typed JS Error when:
+/// - no `Arc<DynProvider>` is wired (host returned `None` from `provider()`),
+/// - args are malformed (missing fields, wrong types, BigInt — D-03),
+/// - the underlying `read_contract` returns `EvmError` (transport / decode
+///   / revert / timeout). The thrown `Error.message` carries `EvmError::Display`
+///   (wire-safe stable string), which the MCP boundary classifies via the
+///   exception classifier (Phase 3 `classify_message`) — fallback to
+///   `RuntimeError::Exception(stable_string)`. The wire taxonomy upgrade to
+///   `evm_*` `data.kind` is the responsibility of `executor-mcp` mapping
+///   (Plan 04-01 Task 2 `map_evm_error`); here we just emit the typed
+///   exception text so QuickJS surfaces it correctly.
+fn read_contract_host_binding<'js>(
+    args: &Object<'js>,
+    provider: Option<&std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: &executor_evm::EvmConfig,
+    evm_reads: &Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use executor_evm::read::{BlockTag, ReadContractInput};
+    let ctx = args.ctx().clone();
+
+    let provider = match provider {
+        Some(p) => p.clone(),
+        None => {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.evm.readContract not available: no provider configured",
+            ));
+        }
+    };
+
+    // Extract fields. We accept abi as JSON-string OR JS array (D-05).
+    let address: rquickjs::Value = args.get("address")?;
+    let address: String = address
+        .as_string()
+        .ok_or_else(|| throw_js_error(&ctx, "address must be a string"))?
+        .to_string()?;
+
+    let abi_value: rquickjs::Value = args.get("abi")?;
+    let abi_json: String = if let Some(s) = abi_value.as_string() {
+        s.to_string()?
+    } else if abi_value.is_array() || abi_value.is_object() {
+        // JS array / object → JSON.stringify on the host side via our walker.
+        let json = qjs_value_to_json(&abi_value)
+            .map_err(|e| throw_js_error(&ctx, &format!("abi: {e}")))?;
+        serde_json::to_string(&json)
+            .map_err(|e| throw_js_error(&ctx, &format!("abi serialize: {e}")))?
+    } else {
+        return Err(throw_js_error(
+            &ctx,
+            "abi must be a JSON string or an array of fragments",
+        ));
+    };
+
+    let function_name: rquickjs::Value = args.get("function")?;
+    let function_name: String = function_name
+        .as_string()
+        .ok_or_else(|| throw_js_error(&ctx, "function must be a string"))?
+        .to_string()?;
+
+    let args_value: rquickjs::Value = args.get("args")?;
+    let json_args = qjs_value_to_json(&args_value)
+        .map_err(|e| throw_js_error(&ctx, &format!("args: {e}")))?;
+    let args_arr: Vec<serde_json::Value> = match json_args {
+        serde_json::Value::Array(v) => v,
+        // Missing args → empty list (helpful for niladic functions).
+        serde_json::Value::Null => Vec::new(),
+        other => {
+            return Err(throw_js_error(
+                &ctx,
+                &format!("args must be an array, got {}", json_value_kind(&other)),
+            ));
+        }
+    };
+
+    let block_tag = match args.get::<_, rquickjs::Value>("blockTag") {
+        Ok(v) if v.is_undefined() || v.is_null() => BlockTag::Latest,
+        Ok(v) => parse_block_tag(&v).map_err(|e| throw_js_error(&ctx, &e))?,
+        Err(_) => BlockTag::Latest,
+    };
+
+    let address_lower = address.to_lowercase();
+    let target = format!("{address_lower}:{function_name}");
+
+    let input = ReadContractInput {
+        address: address.clone(),
+        abi_json: abi_json.clone(),
+        function: function_name.clone(),
+        args: args_arr.clone(),
+        block_tag,
+    };
+
+    // Concurrency Plan: we are inside `Sandbox::execute`, which the caller
+    // wraps in `tokio::task::spawn_blocking`. The current thread therefore
+    // has a Tokio runtime handle available via `Handle::try_current()`.
+    // Acquire it WITHOUT holding any storage mutex (D-04 mutex discipline)
+    // and `block_on` the async read_contract. If no runtime handle is
+    // present (e.g. CtxStub-driven unit tests run from a synchronous
+    // `#[test]` outside any tokio context), fall back to a transient
+    // current-thread runtime.
+    let result: Result<serde_json::Value, executor_evm::EvmError> =
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => tokio::task::block_in_place(|| {
+                handle.block_on(executor_evm::read_contract(provider, cfg, input))
+            }),
+            Err(_) => {
+                // No ambient runtime: spin up a transient single-threaded
+                // runtime. This path is only reached from synchronous unit
+                // tests that don't go through the MCP `strategy_run` handler.
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        throw_js_error(
+                            &ctx,
+                            &format!("evm rpc error: runtime build failed: {e}"),
+                        )
+                    })?;
+                rt.block_on(executor_evm::read_contract(provider, cfg, input))
+            }
+        };
+
+    let json = match result {
+        Ok(v) => v,
+        Err(e) => {
+            // Wire-safe Display (D-12). Detail-for-log goes via tracing.
+            let stable = e.to_string();
+            tracing::warn!(
+                detail = %e.detail_for_log(),
+                kind = %e.data_kind(),
+                "ctx.evm.readContract failed"
+            );
+            return Err(throw_js_error(&ctx, &stable));
+        }
+    };
+
+    // Phase 4 D-13: journal the read (kind="evm_read").
+    let payload = serde_json::json!({
+        "helper": "readContract",
+        "args": args_arr,
+        "function": function_name,
+        "address": address,
+        "block_tag": block_tag_to_json(block_tag),
+    });
+    evm_reads
+        .borrow_mut()
+        .push(crate::runtime::EvmReadRecord {
+            target,
+            payload_json: payload,
+        });
+
+    json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+fn throw_js_error(ctx: &Ctx<'_>, msg: &str) -> rquickjs::Error {
+    rquickjs::Exception::from_message(ctx.clone(), msg)
+        .ok()
+        .map(|e| e.throw())
+        .unwrap_or(rquickjs::Error::Exception)
+}
+
+fn parse_block_tag(v: &rquickjs::Value<'_>) -> Result<executor_evm::read::BlockTag, String> {
+    use executor_evm::read::BlockTag;
+    if let Some(s) = v.as_string() {
+        let s: String = s.to_string().map_err(|e| e.to_string())?;
+        match s.as_str() {
+            "latest" => Ok(BlockTag::Latest),
+            "pending" => Ok(BlockTag::Pending),
+            other => Err(format!("blockTag string must be 'latest'|'pending', got {other:?}")),
+        }
+    } else if let Some(n) = v.as_int() {
+        if n < 0 {
+            return Err(format!("blockTag number must be non-negative, got {n}"));
+        }
+        Ok(BlockTag::Number(n as u64))
+    } else if let Some(n) = v.as_float() {
+        if n < 0.0 || !n.is_finite() {
+            return Err(format!("blockTag number must be finite non-negative, got {n}"));
+        }
+        Ok(BlockTag::Number(n as u64))
+    } else {
+        Err("blockTag must be 'latest'|'pending'|number".into())
+    }
+}
+
+fn block_tag_to_json(tag: executor_evm::read::BlockTag) -> serde_json::Value {
+    use executor_evm::read::BlockTag;
+    match tag {
+        BlockTag::Latest => serde_json::Value::String("latest".into()),
+        BlockTag::Pending => serde_json::Value::String("pending".into()),
+        BlockTag::Number(n) => serde_json::Value::from(n),
+    }
+}
+
+fn json_value_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Inverse of `qjs_value_to_json` for read-contract return values.
+fn json_to_qjs_value<'js>(
+    ctx: &Ctx<'js>,
+    v: &serde_json::Value,
+) -> Result<rquickjs::Value<'js>, String> {
+    match v {
+        serde_json::Value::Null => Ok(rquickjs::Value::new_null(ctx.clone())),
+        serde_json::Value::Bool(b) => Ok(rquickjs::Value::new_bool(ctx.clone(), *b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                    return Ok(rquickjs::Value::new_int(ctx.clone(), i as i32));
+                }
+                return Ok(rquickjs::Value::new_float(ctx.clone(), i as f64));
+            }
+            if let Some(f) = n.as_f64() {
+                return Ok(rquickjs::Value::new_float(ctx.clone(), f));
+            }
+            Err(format!("number not representable: {n}"))
+        }
+        serde_json::Value::String(s) => Ok(rquickjs::String::from_str(ctx.clone(), s)
+            .map_err(|e| format!("string create: {e}"))?
+            .into_value()),
+        serde_json::Value::Array(arr) => {
+            let out = rquickjs::Array::new(ctx.clone()).map_err(|e| e.to_string())?;
+            for (i, item) in arr.iter().enumerate() {
+                let v = json_to_qjs_value(ctx, item)?;
+                out.set(i, v).map_err(|e| e.to_string())?;
+            }
+            Ok(out.into_value())
+        }
+        serde_json::Value::Object(obj) => {
+            let out = Object::new(ctx.clone()).map_err(|e| e.to_string())?;
+            for (k, v) in obj {
+                let val = json_to_qjs_value(ctx, v)?;
+                out.set(k.as_str(), val).map_err(|e| e.to_string())?;
+            }
+            Ok(out.into_value())
+        }
+    }
 }
 
 /// Walk a `rquickjs::Value` and produce a `serde_json::Value`. Returns
