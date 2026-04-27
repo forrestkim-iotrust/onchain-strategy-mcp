@@ -15,6 +15,7 @@
 //! Wire code: **-32010** (unimplemented) verified against rmcp 1.5
 //! `model::ErrorCode(pub i32)` tuple struct — cf. RESEARCH.md RESOLVED #4.
 
+use executor_evm::EvmError;
 use executor_state::StateError;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 use serde_json::json;
@@ -115,7 +116,35 @@ pub fn map_runtime_error(e: RuntimeError, run_id: &str) -> McpError {
             strategy_runtime_error("exception", format!("engine init: {msg}"), run_id)
         }
         RuntimeError::InvalidOutput { detail } => strategy_invalid_output(detail, run_id),
+        // Phase 4 D-12: EVM errors get the extended data.kind taxonomy and
+        // wire-safe stable strings (HR/MR-01 carry-forward).
+        RuntimeError::Evm(evm_err) => map_evm_error(evm_err, run_id),
     }
+}
+
+/// Map an [`executor_evm::EvmError`] onto a `STRATEGY_RUNTIME_ERROR (-32017)`
+/// with the Phase 4 D-12 `data.kind` taxonomy
+/// (`evm_rpc_error` / `evm_decode_error` / `evm_revert`). Raw alloy /
+/// reqwest text NEVER reaches the wire — it goes to `tracing::warn!`
+/// (mirrors the Phase-3 `map_state_error` storage_error pattern at
+/// `errors.rs:170`; carries forward HR/MR-01).
+pub fn map_evm_error(e: EvmError, run_id: &str) -> McpError {
+    let kind = e.data_kind();
+    let detail_log = e.detail_for_log().to_string();
+    // EvmError::Display is wire-safe (Phase 4 D-12) — the typed taxonomy
+    // strings live in the per-variant Display impls.
+    let stable = e.to_string();
+    tracing::warn!(detail = %detail_log, kind = %kind, run_id = %run_id, "evm error");
+    McpError::new(
+        STRATEGY_RUNTIME_ERROR,
+        stable.clone(),
+        Some(json!({
+            "code": "strategy_runtime_error",
+            "kind": kind,
+            "detail": stable,
+            "run_id": run_id,
+        })),
+    )
 }
 
 /// Build an `unimplemented` error for `tool_name`, pointing agents at the
@@ -358,6 +387,71 @@ mod tests {
         assert_eq!(e.data.as_ref().unwrap()["code"], "strategy_invalid_output");
         assert_eq!(e.data.as_ref().unwrap()["detail"], "promise return");
         assert_eq!(e.data.as_ref().unwrap()["run_id"], "rid");
+    }
+
+    #[test]
+    fn map_runtime_error_classifies_evm_kinds() {
+        // Transport → evm_rpc_error
+        let e = map_runtime_error(
+            RuntimeError::Evm(EvmError::Transport {
+                detail_for_log: "Reqwest::Error(boom)".into(),
+            }),
+            "rid",
+        );
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        let data = e.data.as_ref().expect("data");
+        assert_eq!(data["kind"], "evm_rpc_error");
+        assert_eq!(data["detail"], "evm rpc error: transport");
+        // MR-01: NO raw alloy/transport text on the wire.
+        assert!(!e.message.contains("Reqwest"));
+        assert!(!data["detail"].as_str().unwrap().contains("Reqwest"));
+        assert!(!data["detail"].as_str().unwrap().contains("boom"));
+
+        // Decode → evm_decode_error
+        let e = map_runtime_error(
+            RuntimeError::Evm(EvmError::Decode {
+                category: "abi_decode_output",
+                detail_for_log: "alloy_dyn_abi::Error::TypeMismatch".into(),
+            }),
+            "rid",
+        );
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "evm_decode_error");
+        assert_eq!(
+            e.data.as_ref().unwrap()["detail"],
+            "evm decode error: abi_decode_output"
+        );
+        assert!(!e.message.contains("alloy_dyn_abi"));
+
+        // Revert → evm_revert (decoded reason on wire, raw bytes only in log)
+        let e = map_runtime_error(
+            RuntimeError::Evm(EvmError::Revert {
+                reason: "ERC20: insufficient balance".into(),
+                detail_for_log: "0x08c379a0...".into(),
+            }),
+            "rid",
+        );
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "evm_revert");
+        assert_eq!(
+            e.data.as_ref().unwrap()["detail"],
+            "evm revert: ERC20: insufficient balance"
+        );
+        assert!(!e.message.contains("0x08c379a0"));
+
+        // Timeout → evm_rpc_error
+        let e = map_runtime_error(RuntimeError::Evm(EvmError::Timeout), "rid");
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "evm_rpc_error");
+        assert_eq!(e.data.as_ref().unwrap()["detail"], "evm rpc error: timeout");
+
+        // Encode (not on the public taxonomy boundary, but flows through
+        // map_runtime_error too) → evm_decode_error
+        let e = map_runtime_error(
+            RuntimeError::Evm(EvmError::Encode {
+                category: "type_mismatch",
+                detail_for_log: "raw".into(),
+            }),
+            "rid",
+        );
+        assert_eq!(e.data.as_ref().unwrap()["kind"], "evm_decode_error");
     }
 
     #[test]

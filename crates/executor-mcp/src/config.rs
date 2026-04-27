@@ -20,6 +20,10 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub state: StateConfig,
+    /// Phase 4 D-04: `[evm]` section. Defaults preserve server boot when
+    /// absent — the provider is constructed lazily on first `ctx.evm.*` call.
+    #[serde(default)]
+    pub evm: EvmSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +61,44 @@ impl Default for StateConfig {
         Self {
             path: default_state_path(),
         }
+    }
+}
+
+/// Phase 4 D-04 `[evm]` section. The MCP boundary builds an
+/// [`executor_evm::EvmConfig`] from this via [`Config::evm_config`] when the
+/// first `ctx.evm.*` call fires (lazy provider).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvmSection {
+    #[serde(default = "default_evm_rpc_url")]
+    pub rpc_url: String,
+    #[serde(default = "default_evm_call_timeout_ms")]
+    pub call_timeout_ms: u64,
+}
+
+fn default_evm_rpc_url() -> String {
+    "http://127.0.0.1:8545".into()
+}
+
+fn default_evm_call_timeout_ms() -> u64 {
+    1_000
+}
+
+impl Default for EvmSection {
+    fn default() -> Self {
+        Self {
+            rpc_url: default_evm_rpc_url(),
+            call_timeout_ms: default_evm_call_timeout_ms(),
+        }
+    }
+}
+
+impl Config {
+    /// Build a typed [`executor_evm::EvmConfig`] from the parsed `[evm]`
+    /// section. Validation errors (bad URL, timeout out of range) surface
+    /// as [`executor_evm::EvmError::Config`].
+    pub fn evm_config(&self) -> Result<executor_evm::EvmConfig, executor_evm::EvmError> {
+        executor_evm::EvmConfig::from_raw(&self.evm.rpc_url, self.evm.call_timeout_ms)
     }
 }
 
@@ -176,5 +218,41 @@ mod tests {
     fn cli_arg_absent_returns_none() {
         let args = vec!["bin".into(), "--other".into()];
         assert!(parse_cli_config_path(&args).is_none());
+    }
+
+    // ─────────── Phase 4 D-04 [evm] section ───────────
+
+    #[test]
+    fn evm_section_uses_defaults_when_absent() {
+        let cfg: Config =
+            toml::from_str("[logging]\nlevel = \"info\"\n").unwrap();
+        assert_eq!(cfg.evm.rpc_url, "http://127.0.0.1:8545");
+        assert_eq!(cfg.evm.call_timeout_ms, 1_000);
+    }
+
+    #[test]
+    fn evm_section_overrides_defaults() {
+        let cfg: Config = toml::from_str(
+            "[evm]\nrpc_url = \"http://example:8545\"\ncall_timeout_ms = 500\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.evm.rpc_url, "http://example:8545");
+        assert_eq!(cfg.evm.call_timeout_ms, 500);
+    }
+
+    #[test]
+    fn evm_config_builds_typed_evm_config() {
+        let cfg = Config::default();
+        let evm = cfg.evm_config().expect("default builds");
+        assert_eq!(evm.rpc_url.as_str(), "http://127.0.0.1:8545/");
+    }
+
+    #[test]
+    fn evm_section_rejects_unknown_fields() {
+        let err = toml::from_str::<Config>(
+            "[evm]\nrpc_url = \"http://localhost:8545\"\nextra = true\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("extra"));
     }
 }

@@ -1634,6 +1634,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "executor-core",
+ "executor-evm",
  "executor-signer",
  "executor-state",
  "rmcp",
@@ -3859,6 +3860,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "executor-core",
+ "executor-evm",
  "executor-state",
  "rquickjs",
  "serde",

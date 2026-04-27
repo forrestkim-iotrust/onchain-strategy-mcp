@@ -17,6 +17,11 @@ executor-core = { path = "../executor-core" }
 # Plan 03-02 Task 3: RuntimeContext holds Arc<tokio::sync::Mutex<StateStore>>
 # and flushes buffered logs + source-read marker to the journal tables.
 executor-state = { path = "../executor-state" }
+# Phase 4 D-02 isolation: strategy-js does NOT depend on alloy directly; it
+# depends on executor-evm which encapsulates alloy. The host bindings for
+# ctx.evm.* live here, but their bodies delegate to executor-evm functions
+# and their EvmError types.
+executor-evm = { path = "../executor-evm" }
 rquickjs = { version = "0.11", default-features = false }
 # tokio::sync::Mutex (RuntimeContext state handle); per-crate pin — mirrors
 # executor-mcp's choice (Phase-2 D-03d) over std::sync::Mutex because the

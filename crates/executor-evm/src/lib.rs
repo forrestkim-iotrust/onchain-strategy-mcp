@@ -23,3 +23,8 @@ pub use config::EvmConfig;
 pub use error::EvmError;
 pub use provider::build_provider;
 pub use read::{BlockTag, ReadContractInput, read_contract};
+
+// Re-export the alloy `DynProvider` alias so downstream crates
+// (executor-mcp, strategy-js) can name `Arc<DynProvider>` without
+// taking a direct alloy dependency (Phase 4 D-02 isolation).
+pub use alloy::providers::DynProvider;

@@ -11,9 +11,13 @@ async fn main() -> Result<()> {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         state_path = cfg.state.path.as_str(),
+        evm_rpc = cfg.evm.rpc_url.as_str(),
+        evm_call_timeout_ms = cfg.evm.call_timeout_ms,
         "executor-mcp starting"
     );
-    let service = ExecutorServer::new(&cfg.state)?.serve(stdio()).await?;
+    // Phase 4: build with full Config so [evm] section is honored. Provider
+    // itself is lazy — first ctx.evm.* call constructs it.
+    let service = ExecutorServer::from_config(&cfg)?.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

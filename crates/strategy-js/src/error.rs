@@ -33,6 +33,13 @@ pub enum RuntimeError {
     /// out-of-memory at host level, distinct from sandbox OOM).
     #[error("strategy engine init failed: {0}")]
     EngineInit(String),
+
+    /// EVM-side failure surfaced from `executor-evm` (Phase 4 D-12).
+    /// Mapped to `-32017 STRATEGY_RUNTIME_ERROR` with extended
+    /// `data.kind ∈ {evm_rpc_error, evm_decode_error, evm_revert}` at the
+    /// MCP boundary. Display delegates to `EvmError`'s wire-safe form.
+    #[error(transparent)]
+    Evm(#[from] executor_evm::EvmError),
 }
 
 impl From<rquickjs::Error> for RuntimeError {

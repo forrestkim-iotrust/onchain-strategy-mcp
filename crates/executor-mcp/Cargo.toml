@@ -26,6 +26,9 @@ executor-core = { path = "../executor-core" }
 executor-state = { path = "../executor-state" }
 executor-signer = { path = "../executor-signer" }
 strategy-js = { path = "../strategy-js" }            # Plan 03-03: needed by tools.rs strategy_run handler.
+# Phase 4 D-04: executor-evm provides the lazy DynProvider + EvmConfig built
+# from the [evm] config section. alloy itself stays per-crate in executor-evm.
+executor-evm = { path = "../executor-evm" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal", "process", "io-util", "time"] }
