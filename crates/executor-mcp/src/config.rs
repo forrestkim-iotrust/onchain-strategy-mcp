@@ -1,13 +1,14 @@
 //! Config loader for `executor-mcp`.
 //!
-//! Priority (D-06b):
-//!   1. `--config <path>` CLI argument
+//! Priority:
+//!   1. `--config <path>` or `--config=<path>` CLI argument
 //!   2. `EXECUTOR_CONFIG` environment variable
 //!   3. `./config.toml` in the current working directory
-//!   4. Built-in default (`logging.level = "info"`)
+//!   4. Built-in default
 //!
-//! `#[serde(deny_unknown_fields)]` makes accidental typos or Phase 2+ field
-//! additions fail loudly instead of silently degrading (D-06).
+//! Phase 2 extends Phase 1's `[logging]`-only surface with a `[state]`
+//! section (D-03a, D-03e) pointing at the SQLite database file.
+//! `#[serde(deny_unknown_fields)]` keeps typos noisy.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -17,6 +18,8 @@ use serde::Deserialize;
 pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub state: StateConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,24 +41,50 @@ impl Default for LoggingConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateConfig {
+    #[serde(default = "default_state_path")]
+    pub path: String,
+}
+
+fn default_state_path() -> String {
+    "./state.db".into()
+}
+
+impl Default for StateConfig {
+    fn default() -> Self {
+        Self {
+            path: default_state_path(),
+        }
+    }
+}
+
+/// Parse `--config=PATH` or `--config PATH` from an arg vector. Testable
+/// helper extracted to fix REVIEW IN-01 (Phase 1 only recognised the
+/// space form, silently ignoring `--config=`).
+fn parse_cli_config_path(args: &[String]) -> Option<String> {
+    let mut i = 1;
+    while i < args.len() {
+        if let Some(rest) = args[i].strip_prefix("--config=") {
+            return Some(rest.to_string());
+        }
+        if args[i] == "--config" && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Load config honouring the priority order documented in the module docs.
 ///
 /// Missing file = return `Config::default()`. Any IO or parse error is wrapped
 /// with `anyhow::Context` so the error surface stays structured (never a raw
-/// panic that could bleed into stdout — cf. D-05).
+/// panic that could bleed into stdout).
 pub fn load() -> Result<Config> {
-    // --config <path> CLI arg.
     let args: Vec<String> = std::env::args().collect();
-    let mut path_from_cli: Option<String> = None;
-    let mut i = 1;
-    while i < args.len() {
-        if args[i] == "--config" && i + 1 < args.len() {
-            path_from_cli = Some(args[i + 1].clone());
-            break;
-        }
-        i += 1;
-    }
-
+    let path_from_cli = parse_cli_config_path(&args);
     let path_from_env = std::env::var("EXECUTOR_CONFIG").ok();
     let default_path = std::path::PathBuf::from("config.toml");
 
@@ -86,16 +115,35 @@ mod tests {
     }
 
     #[test]
+    fn state_section_defaults_to_dot_state_db() {
+        assert_eq!(Config::default().state.path, "./state.db");
+    }
+
+    #[test]
     fn parses_minimal_logging_section() {
         let cfg: Config = toml::from_str("[logging]\nlevel = \"debug\"\n").unwrap();
         assert_eq!(cfg.logging.level, "debug");
+        // absent [state] ⇒ default (D-03e)
+        assert_eq!(cfg.state.path, "./state.db");
+    }
+
+    #[test]
+    fn parses_state_section() {
+        let cfg: Config = toml::from_str("[state]\npath = \"/tmp/x.db\"\n").unwrap();
+        assert_eq!(cfg.state.path, "/tmp/x.db");
+    }
+
+    #[test]
+    fn absent_state_section_yields_default() {
+        let cfg: Config = toml::from_str("[logging]\nlevel = \"info\"\n").unwrap();
+        assert_eq!(cfg.state.path, "./state.db");
     }
 
     #[test]
     fn rejects_unknown_top_level_fields() {
-        let err = toml::from_str::<Config>("[state]\nsomething = 1\n").unwrap_err();
-        // deny_unknown_fields should surface a message mentioning the unknown key.
-        assert!(err.to_string().to_lowercase().contains("state"));
+        // [state] is no longer unknown as of Phase 2 — use a genuinely unknown section.
+        let err = toml::from_str::<Config>("[policy]\nsomething = 1\n").unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("policy"));
     }
 
     #[test]
@@ -103,5 +151,30 @@ mod tests {
         let err = toml::from_str::<Config>("[logging]\nlevel = \"info\"\nextra = true\n")
             .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("extra"));
+    }
+
+    #[test]
+    fn rejects_unknown_state_fields() {
+        let err =
+            toml::from_str::<Config>("[state]\npath = \".\"\nextra = true\n").unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("extra"));
+    }
+
+    #[test]
+    fn cli_arg_equals_form_parses() {
+        let args = vec!["bin".into(), "--config=/tmp/x.toml".into()];
+        assert_eq!(parse_cli_config_path(&args).as_deref(), Some("/tmp/x.toml"));
+    }
+
+    #[test]
+    fn cli_arg_space_form_parses() {
+        let args = vec!["bin".into(), "--config".into(), "/tmp/y.toml".into()];
+        assert_eq!(parse_cli_config_path(&args).as_deref(), Some("/tmp/y.toml"));
+    }
+
+    #[test]
+    fn cli_arg_absent_returns_none() {
+        let args = vec!["bin".into(), "--other".into()];
+        assert!(parse_cli_config_path(&args).is_none());
     }
 }

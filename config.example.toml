@@ -1,6 +1,13 @@
-# Phase 1 config surface. Phase 2+ will add [state], [evm], [policy], [signer]
-# sections — unknown keys fail `deny_unknown_fields` today, which is intentional:
-# silent drift is harder to debug than an explicit parse error.
+# Phase 1 + Phase 2 config surface. Future phases will add [evm] (Phase 4),
+# [policy] (Phase 5), [signer] (Phase 6) sections — unknown keys fail
+# `deny_unknown_fields` today, which is intentional: silent drift is harder
+# to debug than an explicit parse error.
 
 [logging]
 level = "info"   # trace | debug | info | warn | error
+
+[state]
+# Path to the SQLite database file. Use ":memory:" for ephemeral testing,
+# or an absolute path for fixed-location deployments. Relative paths are
+# resolved against the process current working directory (Phase 2 / D-03a).
+path = "./state.db"
