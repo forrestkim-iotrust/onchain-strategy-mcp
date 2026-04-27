@@ -14,7 +14,7 @@
 
 ### Strategy Runtime
 
-- [ ] **STR-01**: Agent can register a JavaScript strategy with name, source, and metadata.
+- [~] **STR-01**: Agent can register a JavaScript strategy with name, source, and metadata. *(Phase 2-01 lands the storage contract + response schema; MCP wiring in 02-02.)*
 - [ ] **STR-02**: Agent can list, inspect, and delete registered strategies.
 - [ ] **STR-03**: Runtime can execute a registered strategy with a sandboxed `ctx`.
 - [ ] **STR-04**: Strategy code cannot access private keys, filesystem, process APIs, arbitrary network, or direct RPC clients.
@@ -55,8 +55,8 @@
 
 ### State and Journal
 
-- [ ] **STJ-01**: Runtime persists strategies and strategy metadata locally.
-- [ ] **STJ-02**: Runtime persists each strategy run with run ID, strategy ID, started time, and status.
+- [~] **STJ-01**: Runtime persists strategies and strategy metadata locally. *(Phase 2-01: schema + repository contract complete; agent-facing path in 02-02.)*
+- [~] **STJ-02**: Runtime persists each strategy run with run ID, strategy ID, started time, and status. *(Phase 2-01: base CRUD + ULID + phase2_emittable gate; emission paths in 02-03/Phase 3.)*
 - [ ] **STJ-03**: Runtime records source reads performed during each run.
 - [ ] **STJ-04**: Runtime records returned actions and validation errors.
 - [ ] **STJ-05**: Runtime records simulation results and policy decisions.
@@ -103,7 +103,7 @@
 | MCP-02 | Phase 1 | Complete (01-02 ExecutorServer + 8 tool handlers + schema goldens) |
 | MCP-03 | Phase 1 | Complete (01-03 resources: 3 URI templates + -32002 not_found) |
 | MCP-04 | Phase 1 | Complete (01-03 prompts: 2 placeholder prompts with arg schemas) |
-| STR-01 | Phase 2 | Pending |
+| STR-01 | Phase 2 | In Progress (02-01 storage + schemas; 02-02 MCP wiring) |
 | STR-02 | Phase 2 | Pending |
 | STR-03 | Phase 3 | Pending |
 | STR-04 | Phase 3 | Pending |
@@ -132,8 +132,8 @@
 | POL-04 | Phase 5 | Pending |
 | POL-05 | Phase 5 | Pending |
 | POL-06 | Phase 5 | Pending |
-| STJ-01 | Phase 2 | Pending |
-| STJ-02 | Phase 2 | Pending |
+| STJ-01 | Phase 2 | In Progress (02-01 schema + repository; 02-02 MCP wiring) |
+| STJ-02 | Phase 2 | In Progress (02-01 base CRUD + ULID + status gate; emission in 02-03/Phase 3) |
 | STJ-03 | Phase 3 | Pending |
 | STJ-04 | Phase 3 | Pending |
 | STJ-05 | Phase 5 | Pending |

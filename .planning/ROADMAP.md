@@ -43,7 +43,7 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 02-01: SQLite schema and repository layer
+- [x] 02-01: SQLite schema and repository layer
 - [ ] 02-02: Strategy management tools
 - [ ] 02-03: Run and journal base model
 

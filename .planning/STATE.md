@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-stopped_at: Phase 2 context gathered
-last_updated: "2026-04-24T10:53:13.885Z"
-last_activity: 2026-04-24
+status: executing
+stopped_at: Plan 02-01 complete
+last_updated: "2026-04-27T03:17:03Z"
+last_activity: 2026-04-27 -- Plan 02-01 complete (executor-state + schemas + config)
 progress:
   total_phases: 7
   completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 100
+  total_plans: 6
+  completed_plans: 4
+  percent: 67
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-24)
 
 **Core value:** AI agent가 EVM 자동화 로직을 실제 온체인 실행으로 바꾸되, 모든 실행은 policy 검사를 거치고 기록으로 남아야 한다.  
-**Current focus:** Phase 01 — mcp-runtime-surface
+**Current focus:** Phase 02 — strategy-state-and-journal
 
 ## Current Position
 
-Phase: 2
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-04-24
+Phase: 02 (strategy-state-and-journal) — EXECUTING
+Plan: 2 of 3
+Status: Plan 02-01 complete; ready for 02-02 (MCP tool wiring)
+Last activity: 2026-04-27 -- Plan 02-01 complete (executor-state + schemas + config)
 
-Progress: ██████████ 100%
+Progress: █████████░ 67%
 
 ## Performance Metrics
 
@@ -45,11 +45,12 @@ Progress: ██████████ 100%
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 3 | - | - |
+| 02 | 1/3 | ~6.5 min | ~6.5 min |
 
 **Recent Trend:**
 
-- Last 5 plans: 01-01 (6 min, 3 tasks, 23 files created), 01-02 (6 min, 3 tasks, 13 created + 3 modified, 5 auto-fixed deviations), 01-03 (4 min, 2 tasks, 2 created + 3 modified, 4 auto-fixed deviations)
-- Trend: accelerating (third plan was smaller — handlers + tests on top of 01-02's surface; all deviations resolved inline, no checkpoints returned)
+- Last 5 plans: 01-01 (6 min, 3 tasks, 23 files created), 01-02 (6 min, 3 tasks, 13 created + 3 modified, 5 auto-fixed deviations), 01-03 (4 min, 2 tasks, 2 created + 3 modified, 4 auto-fixed deviations), 02-01 (~6.5 min, 3 tasks, 16 created + 9 modified, 0 deviations — plan executed exactly)
+- Trend: zero deviations on 02-01 (planning artifacts were dense enough to drive every decision); plan size grew slightly (storage layer + schemas + config in one wave) but velocity steady
 
 ## Accumulated Context
 
@@ -75,8 +76,9 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-- Phase 01 complete. Next: begin Phase 02 (Strategy State and Journal) — SQLite persistence for strategies, executions, journal entries. Consumes `executor_core::schema::strategy::*` types (stable).
-- Phase 02 first steps: add `[state]` config section (config loader already enforces `deny_unknown_fields`); implement `executor-state` repo traits (crate scaffolded in 01-01); replace `strategy_register` / `strategy_delete` / `strategy_get` / `strategy_list` placeholder bodies in `crates/executor-mcp/src/tools.rs` with real state-repo calls; populate `resources/list` + `resources/read` for `strategy://{strategy_id}` via `crates/executor-mcp/src/resources.rs`.
+- Plan 02-01 complete: `executor-state` storage layer + response schemas + `[state]` config section all landed. `cargo test --workspace` runs 52 tests, all green; clippy clean.
+- Next: Plan 02-02 — wire `strategy_register` / `strategy_list` / `strategy_get` / `strategy_delete` / `execution_get` MCP tool handlers to `StateStore`, add `Arc<tokio::sync::Mutex<StateStore>>` field to `ExecutorServer` with `spawn_blocking` + `blocking_lock` bridge, populate `resources/read` for `strategy://{id}`, add input validation (D-09 limits), and `map_state_error` (-32014/-32015/-32016).
+- Plan 02-03 — Run-status emission paths (queued→running→succeeded/failed) wired from MCP layer; reused tempdir test harness for `strategies_persist_across_restart`.
 
 ### Blockers/Concerns
 
@@ -94,8 +96,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: --stopped-at
-Stopped at: Phase 2 context gathered
-Resume file: --resume-file
+Last session: 2026-04-27T03:17:03Z
+Stopped at: Plan 02-01 complete
+Resume file: .planning/phases/02-strategy-state-and-journal/02-02-PLAN.md
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)
