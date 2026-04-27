@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 02-01 complete
-last_updated: "2026-04-27T03:17:03Z"
-last_activity: 2026-04-27 -- Plan 02-01 complete (executor-state + schemas + config)
+stopped_at: Plan 02-02 complete
+last_updated: "2026-04-27T03:31:43.805Z"
+last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 1
   total_plans: 6
-  completed_plans: 4
-  percent: 67
+  completed_plans: 5
+  percent: 83
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 ## Current Position
 
 Phase: 02 (strategy-state-and-journal) — EXECUTING
-Plan: 2 of 3
-Status: Plan 02-01 complete; ready for 02-02 (MCP tool wiring)
-Last activity: 2026-04-27 -- Plan 02-01 complete (executor-state + schemas + config)
+Plan: 3 of 3
+Status: Ready to execute
+Last activity: 2026-04-27
 
-Progress: █████████░ 67%
+Progress: [████████░░] 83%
 
 ## Performance Metrics
 
@@ -51,6 +51,8 @@ Progress: █████████░ 67%
 
 - Last 5 plans: 01-01 (6 min, 3 tasks, 23 files created), 01-02 (6 min, 3 tasks, 13 created + 3 modified, 5 auto-fixed deviations), 01-03 (4 min, 2 tasks, 2 created + 3 modified, 4 auto-fixed deviations), 02-01 (~6.5 min, 3 tasks, 16 created + 9 modified, 0 deviations — plan executed exactly)
 - Trend: zero deviations on 02-01 (planning artifacts were dense enough to drive every decision); plan size grew slightly (storage layer + schemas + config in one wave) but velocity steady
+
+| Phase 02 P02 | 480 | 3 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -73,6 +75,10 @@ Recent decisions affecting current work:
 - **`#[tool_handler(router = self.tool_router)]`** (not the default `Self::tool_router()`) keeps the stored router field hot and mirrors Plan 03's `#[prompt_handler(router = self.prompt_router)]`.
 - **`#[prompt_router(vis = "pub(crate)")]` + `#[prompt_handler(router = self.prompt_router)]`** applied symmetrically to tools in 01-03. Both handlers live on one `impl ServerHandler` block (Pitfall 6).
 - **ResourceTemplate construction via `Annotated::new(RawResourceTemplate::new(...).with_description(...).with_mime_type(...), None)`.** PLAN RESOLVED #5 Fallback 2. Neither rmcp 1.5 type derives Default; `ResourceTemplate = Annotated<RawResourceTemplate>`. Phase 2+ reuses the `make_template` helper in `resources.rs`.
+- Plan 02-02: Combined Tasks 1+2 into one commit per plan deviation note (server.rs state field forces tools/resources update in lockstep)
+- Plan 02-02: ReadResourceResult is #[non_exhaustive] in rmcp 1.5 → use ::new(vec![..]) constructor; struct literal fails E0639
+- Plan 02-02: Resource-boundary malformed strategy id surfaces as resource_not_found (-32002) with data.code=malformed_id, NOT as -32602 invalid_params (resources/read keeps its typed not_found contract)
+- Plan 02-02: Default for ExecutorServer + no-arg new() removed; new(&StateConfig) is fallible because SQLite open can fail
 
 ### Pending Todos
 
@@ -96,8 +102,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T03:17:03Z
-Stopped at: Plan 02-01 complete
-Resume file: .planning/phases/02-strategy-state-and-journal/02-02-PLAN.md
+Last session: 2026-04-27T03:31:33.723Z
+Stopped at: Plan 02-02 complete
+Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)

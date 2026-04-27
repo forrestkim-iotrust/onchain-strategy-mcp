@@ -15,7 +15,8 @@
 ### Strategy Runtime
 
 - [~] **STR-01**: Agent can register a JavaScript strategy with name, source, and metadata. *(Phase 2-01 lands the storage contract + response schema; MCP wiring in 02-02.)*
-- [ ] **STR-02**: Agent can list, inspect, and delete registered strategies.
+- [x] **STR-02
+**: Agent can list, inspect, and delete registered strategies.
 - [ ] **STR-03**: Runtime can execute a registered strategy with a sandboxed `ctx`.
 - [ ] **STR-04**: Strategy code cannot access private keys, filesystem, process APIs, arbitrary network, or direct RPC clients.
 - [ ] **STR-05**: Strategy returns `Action[]` or `noop`, and runtime rejects unsupported return shapes.

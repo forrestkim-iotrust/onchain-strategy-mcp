@@ -44,7 +44,7 @@ Plans:
 
 Plans:
 - [x] 02-01: SQLite schema and repository layer
-- [ ] 02-02: Strategy management tools
+- [x] 02-02: Strategy management tools
 - [ ] 02-03: Run and journal base model
 
 ### Phase 3: JavaScript Strategy Runner
