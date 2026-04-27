@@ -882,6 +882,177 @@ async fn execution_get_returns_not_found_when_empty() -> Result<()> {
     Ok(())
 }
 
+// ─────────── Plan 02-03: end-to-end run roundtrip + schema future-variants ───────────
+
+#[tokio::test]
+async fn run_roundtrip_insert_get_update_status() -> Result<()> {
+    use executor_core::schema::execution::RunStatus;
+    use executor_state::{RegisterOutcome, StateStore};
+
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+
+    // Step 1: seed strategy + run directly via executor-state (server is OFF).
+    let (strategy_id, run_id) = {
+        let mut store = StateStore::open(&db_path)?;
+        let outcome = store.register_strategy("seed", "// seed strategy\n", None, None)?;
+        let sid = match outcome {
+            RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+        };
+        let rid = store.insert_run(&sid, RunStatus::Queued)?;
+        (sid, rid)
+    };
+
+    // Step 2: spawn server, observe queued.
+    {
+        let mut proc = common::spawn_server_with_state(&db_path_str).await?;
+        let _ = initialize(&mut proc).await?;
+        let r = call_tool(
+            &mut proc,
+            2,
+            "execution_get",
+            json!({ "execution_id": run_id }),
+        )
+        .await?;
+        let body = extract_json_result(&r);
+        assert_eq!(body["run_id"].as_str(), Some(run_id.as_str()));
+        assert_eq!(body["strategy_id"].as_str(), Some(strategy_id.as_str()));
+        assert_eq!(body["status"].as_str(), Some("queued"));
+        assert!(
+            body["started_at"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "started_at must be a non-empty string: {body}"
+        );
+        assert!(
+            body.get("finished_at").is_none_or(|v| v.is_null()),
+            "finished_at must be absent or null when queued: {body}"
+        );
+        proc.child.kill().await?;
+    }
+
+    // Step 3: transition to Running out-of-band.
+    {
+        let mut store = StateStore::open(&db_path)?;
+        store.update_run_status(&run_id, RunStatus::Running)?;
+    }
+
+    // Step 4: observe running.
+    {
+        let mut proc = common::spawn_server_with_state(&db_path_str).await?;
+        let _ = initialize(&mut proc).await?;
+        let r = call_tool(
+            &mut proc,
+            2,
+            "execution_get",
+            json!({ "execution_id": run_id }),
+        )
+        .await?;
+        let body = extract_json_result(&r);
+        assert_eq!(body["status"].as_str(), Some("running"));
+        assert!(
+            body.get("finished_at").is_none_or(|v| v.is_null()),
+            "finished_at must remain null while running: {body}"
+        );
+        proc.child.kill().await?;
+    }
+
+    // Step 5: transition to Succeeded out-of-band.
+    {
+        let mut store = StateStore::open(&db_path)?;
+        store.update_run_status(&run_id, RunStatus::Succeeded)?;
+    }
+
+    // Step 6: observe succeeded + finished_at populated.
+    {
+        let mut proc = common::spawn_server_with_state(&db_path_str).await?;
+        let _ = initialize(&mut proc).await?;
+        let r = call_tool(
+            &mut proc,
+            2,
+            "execution_get",
+            json!({ "execution_id": run_id }),
+        )
+        .await?;
+        let body = extract_json_result(&r);
+        assert_eq!(body["status"].as_str(), Some("succeeded"));
+        assert!(
+            body["finished_at"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "finished_at must be populated on terminal status: {body}"
+        );
+        proc.child.kill().await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn run_status_schema_includes_future_variants() -> Result<()> {
+    // D-08a: prove the RunStatus JSON Schema golden carries all 7 snake_case
+    // variants — the 4 Phase 2 emits plus the 3 future-reserved ones
+    // (canceled, simulation_denied, policy_denied) so Phase 5/6 can rely on
+    // these wire names not drifting.
+    //
+    // The schemars 1.x emission for `RunStatus` uses a `oneOf` of an `enum`
+    // array (the 4 emittable variants) plus 3 `const`-string entries (the
+    // reserved variants). The walker below collects strings from both `enum`
+    // arrays AND `const` fields, then asserts the full 7-variant set is
+    // present.
+    let path = std::path::Path::new("../executor-core/tests/schemas/RunStatus.json");
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let v: Value = serde_json::from_str(&text)?;
+
+    fn collect_strings(v: &Value, out: &mut std::collections::BTreeSet<String>) {
+        match v {
+            Value::Object(m) => {
+                if let Some(arr) = m.get("enum").and_then(|x| x.as_array()) {
+                    for x in arr {
+                        if let Some(s) = x.as_str() {
+                            out.insert(s.to_string());
+                        }
+                    }
+                }
+                if let Some(s) = m.get("const").and_then(|x| x.as_str()) {
+                    out.insert(s.to_string());
+                }
+                for (_k, val) in m {
+                    collect_strings(val, out);
+                }
+            }
+            Value::Array(a) => {
+                for x in a {
+                    collect_strings(x, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = std::collections::BTreeSet::new();
+    collect_strings(&v, &mut found);
+
+    let expected = [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "canceled",
+        "simulation_denied",
+        "policy_denied",
+    ];
+    let missing: Vec<&&str> = expected.iter().filter(|e| !found.contains(**e)).collect();
+    assert!(
+        missing.is_empty(),
+        "RunStatus.json missing future-reserved variants {missing:?}; found {found:?}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn strategies_persist_across_restart() -> Result<()> {
     let dir = tempfile::tempdir()?;
