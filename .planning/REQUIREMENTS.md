@@ -31,7 +31,7 @@
 - [x] **CTX-06**: `ctx.actions.rawCall` can create explicit raw calldata actions.
 - [x] **CTX-07**: `ctx.actions.erc20Approve` and `ctx.actions.erc20Transfer` can create ERC20 actions.
 - [x] **CTX-08**: `ctx.actions.nativeTransfer` can create native transfer actions.
-- [ ] **CTX-09**: `ctx.units` and address helpers reduce common EVM value/address mistakes.
+- [x] **CTX-09**: `ctx.units` and address helpers reduce common EVM value/address mistakes. *(04-04 executor_evm::units::{parse_units, format_units} + executor_evm::address::{is_address, checksum, ZERO_ADDRESS} + ctx.units.{parseUnits, formatUnits} + ctx.address.{isAddress, checksum, zeroAddress} sandbox bindings; 22 ctx_units_address tests + 14 lib tests; HR-01 final regression green.)*
 
 ### Execution Pipeline
 
@@ -117,7 +117,7 @@
 | CTX-06 | Phase 4 | Closed |
 | CTX-07 | Phase 4 | Closed |
 | CTX-08 | Phase 4 | Closed |
-| CTX-09 | Phase 4 | Pending |
+| CTX-09 | Phase 4 | Closed |
 | EXE-01 | Phase 5 | Pending |
 | EXE-02 | Phase 5 | Pending |
 | EXE-03 | Phase 5 | Pending |

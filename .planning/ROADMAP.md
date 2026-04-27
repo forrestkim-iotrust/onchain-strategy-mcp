@@ -9,7 +9,7 @@ v1 builds a local MCP runtime that lets an AI agent write JavaScript EVM automat
 - [x] **Phase 1: MCP Runtime Surface** - Create the Rust workspace and stdio MCP server with stable tools/resources/prompts.
 - [x] **Phase 2: Strategy State and Journal** - Persist strategies, runs, and journal records locally.
 - [x] **Phase 3: JavaScript Strategy Runner** - Run sandboxed JavaScript strategies with a constrained `ctx`.
-- [ ] **Phase 4: EVM Context and Actions** - Implement generic EVM reads/writes plus ERC20/native helpers.
+- [x] **Phase 4: EVM Context and Actions** - Implement generic EVM reads/writes plus ERC20/native helpers.
 - [ ] **Phase 5: Simulation and Policy Gate** - Validate actions, simulate, and enforce policy before signing.
 - [ ] **Phase 6: Local Managed Execution** - Sign locally, broadcast transactions, wait receipts, and record execution reports.
 - [ ] **Phase 7: Examples, Tests, and Documentation** - Prove the runtime with local EVM examples and verification tests.
@@ -78,7 +78,7 @@ Plans:
 - [x] 04-01: Alloy provider and ABI read adapter
 - [x] 04-02: ERC20/native read helpers
 - [x] 04-03: Contract call, raw call, ERC20, and native action builders
-- [ ] 04-04: Units/address helpers and action validation fixtures
+- [x] 04-04: Units/address helpers and action validation fixtures
 
 ### Phase 5: Simulation and Policy Gate
 **Goal**: No transaction can reach the signer before simulation and policy approval.  

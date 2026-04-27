@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 04-03 complete; Phase 04 in progress (3/4 plans)
-last_updated: "2026-04-27T10:30:00.000Z"
+stopped_at: Phase 04 COMPLETE (4/4 plans); CTX-01..CTX-09 all closed
+last_updated: "2026-04-27T10:16:12Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 13
-  completed_plans: 12
-  percent: 92
+  completed_plans: 13
+  percent: 100
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 04 (evm-context-and-actions) — IN PROGRESS
-Plan: 3 of 4 complete
-Status: Plan 04-03 closed (5 Action variants + builders + validator widening + D-16 flip — CTX-05/06/07/08 wired); next is 04-04 (units/address + negative grid + schema goldens)
+Phase: 04 (evm-context-and-actions) — COMPLETE
+Plan: 4 of 4 complete
+Status: Plan 04-04 closed (ctx.units + ctx.address + 15-test negative grid + 6 schema goldens — CTX-09 wired); Phase 4 fully delivered. CTX-01..CTX-09 all green; 349 workspace tests; HR-01/MR-01/MR-03/MR-04 carry-forward verified.
 Last activity: 2026-04-27
 
-Progress: [████████▌░] ~85% across 13 planned plans (11/13)
+Progress: [██████████] ~100% Phase-4 plans complete (4/4); next milestone is Phase 5 (simulation/policy/encoding).
 
 ## Performance Metrics
 
@@ -118,9 +118,14 @@ Recent decisions affecting current work:
 ### Pending Todos
 
 - Phase 3 complete (3/3 plans). All 5 phase requirements (STR-03/04/05, STJ-03/04) closed.
-- Phase 4 — Plans 04-01 and 04-02 complete. CTX-01/02/03/04 all wired (readContract + ERC20 helpers + native helpers + flat aliases).
-- Workspace: 232 tests passing across 32 suites (was 213, +19 from 04-02); clippy `--workspace --all-targets -- -D warnings` clean; sandbox_host_globals (HR-01 regression) still green with Phase-4 surfaces installed.
-- Next: Plan 04-03 (action builders — ctx.actions.{contractCall, rawCall, erc20Approve, erc20Transfer, nativeTransfer} + Action enum widening + per-Action validator).
+- Phase 4 COMPLETE (4/4 plans). CTX-01..CTX-09 all wired:
+  - 04-01: executor-evm crate, Provider, ctx.evm.readContract (CTX-01)
+  - 04-02: ERC20 + native helpers + flat aliases (CTX-02/03/04)
+  - 04-03: 5 Action variants + builders + validator widening + D-16 flip (CTX-05/06/07/08)
+  - 04-04: ctx.units + ctx.address + 15-case negative grid + 6 schema goldens (CTX-09)
+- Workspace: 349 tests across 35 suites (was 275 after 04-03; +74 net for 04-04); clippy `--workspace --all-targets -- -D warnings` clean; sandbox_host_globals (HR-01 final regression) 8/8 green with the full Phase-4 ctx.* surface installed.
+- D-15 carry-forward (HR-01 / MR-01 / MR-03 / MR-04) all observably honoured across the four Phase-4 plans.
+- Next: Phase 5 (simulation / policy / canonical encoding).
 
 ### Blockers/Concerns
 
@@ -138,8 +143,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T09:33:07.000Z
-Stopped at: Plan 04-02 complete; Phase 04 in progress (2/4 plans). CTX-02/03/04 all closed. Workspace 232 tests / clippy clean.
+Last session: 2026-04-27T10:16:12Z
+Stopped at: Phase 04 COMPLETE (4/4 plans). CTX-01..CTX-09 all closed. Workspace 349 tests / clippy clean. Ready for Phase 5.
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)
