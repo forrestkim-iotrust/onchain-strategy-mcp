@@ -13,6 +13,7 @@
 //! for `ctx.evm.*` live in `strategy-js::sandbox`; their bodies delegate to
 //! functions in this crate. The Provider is NEVER exposed to JS as a value.
 
+pub mod action;
 pub mod config;
 pub mod dyn_abi;
 pub mod erc20;
@@ -21,6 +22,10 @@ pub mod native;
 pub mod provider;
 pub mod read;
 
+pub use action::{
+    dry_run_abi_encode, validate_abi_size, validate_address, validate_calldata,
+    validate_decimal_amount,
+};
 pub use config::EvmConfig;
 pub use erc20::{
     ERC20_ABI, erc20_allowance, erc20_balance_of, erc20_decimals, erc20_name, erc20_symbol,
