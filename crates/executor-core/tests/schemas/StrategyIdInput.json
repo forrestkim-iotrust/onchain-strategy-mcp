@@ -1,11 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StrategyIdInput",
-  "description": "Input referencing a registered strategy by id (Phase 2 fills behaviour).",
+  "description": "Input referencing a registered strategy by id (used by strategy_delete).",
   "type": "object",
   "properties": {
     "strategy_id": {
-      "description": "Strategy id returned from `strategy_register`.",
+      "description": "Strategy id returned from `strategy_register` (lower-case hex SHA-256, 64 chars).",
       "type": "string"
     }
   },

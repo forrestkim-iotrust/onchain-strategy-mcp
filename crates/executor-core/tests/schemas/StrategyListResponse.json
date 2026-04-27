@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyListResponse",
+  "description": "Response for strategy_list (D-07a).",
+  "type": "object",
+  "properties": {
+    "strategies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StrategyListItem"
+      }
+    }
+  },
+  "required": [
+    "strategies"
+  ],
+  "$defs": {
+    "StrategyListItem": {
+      "description": "List item — note: `source` is intentionally absent (D-07a).",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "deleted_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "strategy_id": {
+          "type": "string"
+        },
+        "tags": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "strategy_id",
+        "name",
+        "created_at"
+      ]
+    }
+  }
+}

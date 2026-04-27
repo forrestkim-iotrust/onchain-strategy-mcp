@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyRegisterResponse",
+  "description": "Response for strategy_register (D-07).",
+  "type": "object",
+  "properties": {
+    "already_exists": {
+      "type": "boolean"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "deleted_at": {
+      "description": "Surfaced when the existing row is soft-deleted (Pitfall 9).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "existing_description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "existing_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "existing_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "name": {
+      "type": "string"
+    },
+    "strategy_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "strategy_id",
+    "name",
+    "created_at",
+    "already_exists"
+  ]
+}

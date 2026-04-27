@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyGetInput",
+  "description": "XOR input for `strategy_get`: agent supplies either the content-addressed\n`strategy_id` or the human-friendly `name` (active strategies only).",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "strategy_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "strategy_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    }
+  ]
+}

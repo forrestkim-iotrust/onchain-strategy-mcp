@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunStatus",
+  "description": "All run lifecycle states (D-05). Phase 2 emits only the first four\n(`queued`/`running`/`succeeded`/`failed`); the remaining three are\n**future-reserved** for Phase 5 (`simulation_denied`, `policy_denied`)\nand Phase 6 (`canceled`). They are declared here at Phase 2 to lock the\nagent-facing schema golden once and avoid contract churn later.",
+  "oneOf": [
+    {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed"
+      ]
+    },
+    {
+      "description": "Phase 6 — cancellation pathway not yet wired.",
+      "type": "string",
+      "const": "canceled"
+    },
+    {
+      "description": "Phase 5 — simulation rejection.",
+      "type": "string",
+      "const": "simulation_denied"
+    },
+    {
+      "description": "Phase 5 — policy rejection.",
+      "type": "string",
+      "const": "policy_denied"
+    }
+  ]
+}

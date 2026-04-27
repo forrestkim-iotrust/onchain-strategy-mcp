@@ -1,24 +1,33 @@
-//! Strategy tool input schemas — placeholder shapes until Phase 2 persists strategies.
+//! Strategy tool input + response schemas.
+//!
+//! Phase 2 splits the previous `metadata: Option<Value>` into top-level
+//! `description: Option<String>` + `tags: Option<Vec<String>>` (D-07a /
+//! RESEARCH Open Q4 option B) and adds the response types the MCP layer
+//! serializes in Plan 02-02.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Register a JavaScript strategy (Phase 2 implements persistence).")]
+#[serde(deny_unknown_fields)]
+#[schemars(description = "Register a JavaScript strategy (content-addressed; idempotent on same source).")]
 pub struct StrategyRegisterInput {
-    #[schemars(description = "Human-readable strategy name; does not need to be unique globally.")]
+    #[schemars(description = "Human-readable name; UNIQUE among non-deleted strategies.")]
     pub name: String,
-    #[schemars(description = "JavaScript source — executed in a sandbox starting Phase 3.")]
+    #[schemars(description = "JavaScript source — executed in a sandbox starting Phase 3. Max 256 KiB.")]
     pub source: String,
-    #[schemars(description = "Optional metadata blob persisted alongside the strategy.")]
+    #[schemars(description = "Optional free-form description (max 4096 chars).")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
+    pub description: Option<String>,
+    #[schemars(description = "Optional tags (max 16 items, each max 64 chars).")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Input referencing a registered strategy by id (Phase 2 fills behaviour).")]
+#[schemars(description = "Input referencing a registered strategy by id (used by strategy_delete).")]
 pub struct StrategyIdInput {
-    #[schemars(description = "Strategy id returned from `strategy_register`.")]
+    #[schemars(description = "Strategy id returned from `strategy_register` (lower-case hex SHA-256, 64 chars).")]
     pub strategy_id: String,
 }
 
@@ -27,4 +36,73 @@ pub struct StrategyIdInput {
 pub struct StrategyRunOnceInput {
     #[schemars(description = "Strategy id to execute once.")]
     pub strategy_id: String,
+}
+
+/// XOR input for `strategy_get`: agent supplies either the content-addressed
+/// `strategy_id` or the human-friendly `name` (active strategies only).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum StrategyGetInput {
+    ById { strategy_id: String },
+    ByName { name: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Response for strategy_register (D-07).")]
+pub struct StrategyRegisterResponse {
+    pub strategy_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub already_exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_tags: Option<Vec<String>>,
+    /// Surfaced when the existing row is soft-deleted (Pitfall 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "List item — note: `source` is intentionally absent (D-07a).")]
+pub struct StrategyListItem {
+    pub strategy_id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Response for strategy_list (D-07a).")]
+pub struct StrategyListResponse {
+    pub strategies: Vec<StrategyListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Response for strategy_get (D-07b) — includes source.")]
+pub struct StrategyGetResponse {
+    pub strategy_id: String,
+    pub name: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "Response for strategy_delete (D-07c) — idempotent.")]
+pub struct StrategyDeleteResponse {
+    pub strategy_id: String,
+    pub deleted_at: String,
 }

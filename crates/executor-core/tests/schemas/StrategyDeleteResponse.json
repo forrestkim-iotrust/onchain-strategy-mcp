@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StrategyDeleteResponse",
+  "description": "Response for strategy_delete (D-07c) — idempotent.",
+  "type": "object",
+  "properties": {
+    "deleted_at": {
+      "type": "string"
+    },
+    "strategy_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "strategy_id",
+    "deleted_at"
+  ]
+}

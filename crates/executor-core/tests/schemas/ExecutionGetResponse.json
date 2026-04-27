@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionGetResponse",
+  "description": "Response for execution_get (Phase 2 base run model).",
+  "type": "object",
+  "properties": {
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "finished_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/RunStatus"
+    },
+    "strategy_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "strategy_id",
+    "status",
+    "started_at"
+  ],
+  "$defs": {
+    "RunStatus": {
+      "description": "All run lifecycle states (D-05). Phase 2 emits only the first four\n(`queued`/`running`/`succeeded`/`failed`); the remaining three are\n**future-reserved** for Phase 5 (`simulation_denied`, `policy_denied`)\nand Phase 6 (`canceled`). They are declared here at Phase 2 to lock the\nagent-facing schema golden once and avoid contract churn later.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed"
+          ]
+        },
+        {
+          "description": "Phase 6 — cancellation pathway not yet wired.",
+          "type": "string",
+          "const": "canceled"
+        },
+        {
+          "description": "Phase 5 — simulation rejection.",
+          "type": "string",
+          "const": "simulation_denied"
+        },
+        {
+          "description": "Phase 5 — policy rejection.",
+          "type": "string",
+          "const": "policy_denied"
+        }
+      ]
+    }
+  }
+}

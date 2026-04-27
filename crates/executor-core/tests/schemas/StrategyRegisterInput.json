@@ -1,21 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StrategyRegisterInput",
-  "description": "Register a JavaScript strategy (Phase 2 implements persistence).",
+  "description": "Register a JavaScript strategy (content-addressed; idempotent on same source).",
   "type": "object",
   "properties": {
-    "metadata": {
-      "description": "Optional metadata blob persisted alongside the strategy."
+    "description": {
+      "description": "Optional free-form description (max 4096 chars).",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "name": {
-      "description": "Human-readable strategy name; does not need to be unique globally.",
+      "description": "Human-readable name; UNIQUE among non-deleted strategies.",
       "type": "string"
     },
     "source": {
-      "description": "JavaScript source — executed in a sandbox starting Phase 3.",
+      "description": "JavaScript source — executed in a sandbox starting Phase 3. Max 256 KiB.",
       "type": "string"
+    },
+    "tags": {
+      "description": "Optional tags (max 16 items, each max 64 chars).",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
     }
   },
+  "additionalProperties": false,
   "required": [
     "name",
     "source"

@@ -1,7 +1,7 @@
-//! Golden JSON Schema snapshots for tool / prompt input structs.
+//! Golden JSON Schema snapshots for tool / prompt input + response structs.
 //!
 //! Each test generates the current `schemars::schema_for!` output for a public
-//! input struct and compares it against a committed golden file under
+//! type and compares it against a committed golden file under
 //! `tests/schemas/<Name>.json`. Run
 //!
 //! ```text
@@ -9,14 +9,18 @@
 //! ```
 //!
 //! to create or refresh the goldens after an intentional schema change.
-//! Accidental drift fails the test so Phase 2+ must consciously bump the
+//! Accidental drift fails the test so future phases must consciously bump the
 //! contract.
 
 use executor_core::schema::{
-    execution::ExecutionIdInput,
+    execution::{ExecutionGetResponse, ExecutionIdInput, RunStatus},
     policy::PolicyUpdateInput,
     prompt_args::{ReviewEvmStrategyArgs, WriteEvmStrategyArgs},
-    strategy::{StrategyIdInput, StrategyRegisterInput, StrategyRunOnceInput},
+    strategy::{
+        StrategyDeleteResponse, StrategyGetInput, StrategyGetResponse, StrategyIdInput,
+        StrategyListResponse, StrategyRegisterInput, StrategyRegisterResponse,
+        StrategyRunOnceInput,
+    },
 };
 use schemars::schema_for;
 
@@ -59,6 +63,11 @@ fn strategy_run_once_input_schema_stable() {
 }
 
 #[test]
+fn strategy_get_input_schema_stable() {
+    assert_schema_matches_golden("StrategyGetInput", schema_for!(StrategyGetInput));
+}
+
+#[test]
 fn execution_id_input_schema_stable() {
     assert_schema_matches_golden("ExecutionIdInput", schema_for!(ExecutionIdInput));
 }
@@ -76,4 +85,40 @@ fn write_evm_strategy_args_schema_stable() {
 #[test]
 fn review_evm_strategy_args_schema_stable() {
     assert_schema_matches_golden("ReviewEvmStrategyArgs", schema_for!(ReviewEvmStrategyArgs));
+}
+
+#[test]
+fn run_status_schema_stable() {
+    assert_schema_matches_golden("RunStatus", schema_for!(RunStatus));
+}
+
+#[test]
+fn strategy_register_response_schema_stable() {
+    assert_schema_matches_golden(
+        "StrategyRegisterResponse",
+        schema_for!(StrategyRegisterResponse),
+    );
+}
+
+#[test]
+fn strategy_list_response_schema_stable() {
+    assert_schema_matches_golden("StrategyListResponse", schema_for!(StrategyListResponse));
+}
+
+#[test]
+fn strategy_get_response_schema_stable() {
+    assert_schema_matches_golden("StrategyGetResponse", schema_for!(StrategyGetResponse));
+}
+
+#[test]
+fn strategy_delete_response_schema_stable() {
+    assert_schema_matches_golden(
+        "StrategyDeleteResponse",
+        schema_for!(StrategyDeleteResponse),
+    );
+}
+
+#[test]
+fn execution_get_response_schema_stable() {
+    assert_schema_matches_golden("ExecutionGetResponse", schema_for!(ExecutionGetResponse));
 }
