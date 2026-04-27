@@ -1,0 +1,25 @@
+[package]
+name = "strategy-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# New deps (rquickjs) are intentionally NOT promoted to workspace dependencies —
+# only `strategy-js` consumes them today, mirroring the Phase 1 `[logging]`-only
+# and Phase 2 `rusqlite`-only precedent of letting each Phase land its own
+# isolated stack before promotion to workspace scope is justified. (See
+# `crates/executor-state/Cargo.toml:10-13` for the original justification.)
+[dependencies]
+executor-core = { path = "../executor-core" }
+rquickjs = { version = "0.11", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Per-crate dev-dep mirroring Phase 2 (executor-state/Cargo.toml:26-27).
+tempfile = "3"
