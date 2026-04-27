@@ -1435,6 +1435,176 @@ async fn strategy_run_rejects_contract_call_with_bad_address() -> Result<()> {
     Ok(())
 }
 
+// ─── Plan 04-04 Task 2 — per-variant stdio rejection grid ──────────────────
+//
+// Five end-to-end rejection tests, one per Phase-4 action variant. Each
+// emits a free-form action JSON object (NOT via the ctx.actions.* builder)
+// so the failure mode flows through `validate_strategy_output` →
+// -32018 STRATEGY_INVALID_OUTPUT.
+//
+// The builder-time rejection grid lives in
+// `crates/strategy-js/tests/ctx_actions_negative_grid.rs` (15 tests).
+
+#[tokio::test]
+async fn strategy_run_rejects_contract_call_with_unknown_field() -> Result<()> {
+    // contract_call with an unknown field — `deny_unknown_fields` rejects.
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let source = r#"(ctx) => [{
+        kind: "contract_call",
+        address: "0x0000000000000000000000000000000000000001",
+        abi: "[]", function: "f", args: [],
+        unknown_extra_field: "boom"
+    }]"#;
+    let strategy_id = seed_strategy(&db_path, "cc_unknown", source)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        detail.contains("unknown field") || detail.contains("unknown_extra_field"),
+        "expected unknown-field detail, got: {detail}"
+    );
+    // MR-01 wire safety
+    for forbidden in ["transporterror", "reqwest", "alloy_dyn_abi"] {
+        assert!(
+            !detail.contains(forbidden),
+            "raw error text leaked ({forbidden}): {detail}"
+        );
+    }
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_raw_call_with_unknown_field() -> Result<()> {
+    // raw_call with unknown field — deny_unknown_fields path.
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let source = r#"(ctx) => [{
+        kind: "raw_call",
+        address: "0x0000000000000000000000000000000000000001",
+        data: "0xdeadbeef",
+        gas_limit: 21000
+    }]"#;
+    let strategy_id = seed_strategy(&db_path, "rc_unknown", source)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        detail.contains("unknown field") || detail.contains("gas_limit"),
+        "expected unknown-field detail, got: {detail}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_erc20_transfer_via_builder_with_bigint_amount() -> Result<()> {
+    // BigInt amount → builder throws → strategy raises a JS Error →
+    // RuntimeError::Exception → -32017 (NOT -32018) per Phase-3 mapping.
+    // We assert -32017 with stable detail (no raw text). This documents
+    // the Phase-4 boundary: BigInt amount surfaces as runtime_error, not
+    // invalid_output.
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let source = r#"(ctx) => [ctx.actions.erc20Transfer({
+        token: "0x0000000000000000000000000000000000000001",
+        to:    "0x0000000000000000000000000000000000000002",
+        amount: 100n
+    })]"#;
+    let strategy_id = seed_strategy(&db_path, "erc20t_bigint", source)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        detail.contains("bigint") || detail.contains("decimal string"),
+        "expected stable BigInt rejection detail, got: {detail}"
+    );
+    for forbidden in ["transporterror", "reqwest", "alloy_dyn_abi"] {
+        assert!(
+            !detail.contains(forbidden),
+            "raw error text leaked ({forbidden}): {detail}"
+        );
+    }
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_erc20_approve_with_unknown_field() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let source = r#"(ctx) => [{
+        kind: "erc20_approve",
+        token:   "0x0000000000000000000000000000000000000001",
+        spender: "0x0000000000000000000000000000000000000003",
+        amount:  "0",
+        deadline: 9999
+    }]"#;
+    let strategy_id = seed_strategy(&db_path, "erc20a_unknown", source)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        detail.contains("unknown field") || detail.contains("deadline"),
+        "expected unknown-field detail, got: {detail}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_rejects_native_transfer_via_builder_with_negative_value() -> Result<()> {
+    // Builder throws → -32017 runtime_error with stable taxonomy detail.
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let source = r#"(ctx) => [ctx.actions.nativeTransfer({
+        to: "0x0000000000000000000000000000000000000002",
+        value: "-1"
+    })]"#;
+    let strategy_id = seed_strategy(&db_path, "nt_negative", source)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
+    let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
+    assert!(
+        detail.contains("non-negative") || detail.contains("bad_decimal"),
+        "expected stable non-negative detail, got: {detail}"
+    );
+    for forbidden in ["transporterror", "reqwest", "alloy_dyn_abi"] {
+        assert!(
+            !detail.contains(forbidden),
+            "raw error text leaked ({forbidden}): {detail}"
+        );
+    }
+    proc.child.kill().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn strategy_run_rejects_unknown_action_kind() -> Result<()> {
     // Phase-3 spirit preserved (D-16): a kind NOT in the Phase-4 allowlist
