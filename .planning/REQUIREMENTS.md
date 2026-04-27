@@ -24,9 +24,9 @@
 ### Context API
 
 - [x] **CTX-01**: `ctx.evm.readContract` can perform ABI-based generic contract reads. *(04-01 executor-evm crate + read_contract eth_call lifecycle + ctx.evm.readContract host binding; demonstrable end-to-end via `cargo test -p executor-evm --features anvil-tests --test read_contract_anvil read_counter_number_returns_zero`.)*
-- [ ] **CTX-02**: `ctx.evm.erc20Balance` can read ERC20 balances.
-- [ ] **CTX-03**: `ctx.evm.erc20Allowance` can read ERC20 allowances.
-- [ ] **CTX-04**: `ctx.evm.nativeBalance` can read native token balance.
+- [x] **CTX-02**: `ctx.evm.erc20Balance` can read ERC20 balances. *(04-02 executor_evm::erc20::erc20_balance_of + ctx.evm.readErc20.balanceOf + flat alias ctx.evm.erc20Balance, anvil-gated end-to-end against MockERC20 fixture.)*
+- [x] **CTX-03**: `ctx.evm.erc20Allowance` can read ERC20 allowances. *(04-02 executor_evm::erc20::erc20_allowance + ctx.evm.readErc20.allowance + flat alias ctx.evm.erc20Allowance.)*
+- [x] **CTX-04**: `ctx.evm.nativeBalance` can read native token balance. *(04-02 executor_evm::native::native_balance + ctx.evm.readNative.balance + flat alias ctx.evm.nativeBalance, decimal-string per D-03.)*
 - [ ] **CTX-05**: `ctx.actions.contractCall` can create ABI-based contract call actions.
 - [ ] **CTX-06**: `ctx.actions.rawCall` can create explicit raw calldata actions.
 - [ ] **CTX-07**: `ctx.actions.erc20Approve` and `ctx.actions.erc20Transfer` can create ERC20 actions.
@@ -110,9 +110,9 @@
 | STR-04 | Phase 3 | Complete (03-01 strategy-js sandbox + D-11 regression suite) |
 | STR-05 | Phase 3 | Complete (03-03 validate_strategy_output + STRATEGY_INVALID_OUTPUT -32018) |
 | CTX-01 | Phase 4 | Complete (04-01 executor-evm crate + ctx.evm.readContract host binding) |
-| CTX-02 | Phase 4 | Pending |
-| CTX-03 | Phase 4 | Pending |
-| CTX-04 | Phase 4 | Pending |
+| CTX-02 | Phase 4 | Complete (04-02 erc20_balance_of + ctx.evm.readErc20.balanceOf + flat alias erc20Balance) |
+| CTX-03 | Phase 4 | Complete (04-02 erc20_allowance + ctx.evm.readErc20.allowance + flat alias erc20Allowance) |
+| CTX-04 | Phase 4 | Complete (04-02 native_balance + ctx.evm.readNative.balance + flat alias nativeBalance) |
 | CTX-05 | Phase 4 | Pending |
 | CTX-06 | Phase 4 | Pending |
 | CTX-07 | Phase 4 | Pending |

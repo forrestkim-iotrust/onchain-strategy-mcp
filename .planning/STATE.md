@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Plan 04-01 complete; Phase 04 in progress (1/4 plans)
-last_updated: "2026-04-27T10:30:00.000Z"
+stopped_at: Plan 04-02 complete; Phase 04 in progress (2/4 plans)
+last_updated: "2026-04-27T09:33:07.000Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 3
   total_plans: 13
-  completed_plans: 10
-  percent: 77
+  completed_plans: 11
+  percent: 85
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 ## Current Position
 
 Phase: 04 (evm-context-and-actions) — IN PROGRESS
-Plan: 1 of 4 complete
-Status: Plan 04-01 closed (executor-evm scaffold + readContract host binding); next is 04-02 (ERC20 + native helpers)
+Plan: 2 of 4 complete
+Status: Plan 04-02 closed (ERC20 + native helpers + flat aliases — CTX-02/03/04 wired); next is 04-03 (action builders)
 Last activity: 2026-04-27
 
-Progress: [████████░░] ~77% across 13 planned plans (10/13)
+Progress: [████████▌░] ~85% across 13 planned plans (11/13)
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Progress: [████████░░] ~77% across 13 planned plans (10/13)
 | Phase 03 P02 | 25 | 3 tasks | 16 files |
 | Phase 03 P03 | ~12 min | 3 tasks | 3 created + 9 modified + 1 deleted |
 | Phase 04 P01 | ~30 min | 3 tasks | 14 created + 14 modified |
+| Phase 04 P02 | ~10 min | 2 tasks | 6 created + 3 modified |
 
 ## Accumulated Context
 
@@ -106,13 +107,20 @@ Recent decisions affecting current work:
 - Plan 04-01: ctx.evm.readContract uses `Handle::try_current() + block_in_place + handle.block_on()` inside spawn_blocking; falls back to a transient current-thread runtime for sync unit tests with no ambient runtime.
 - Plan 04-01: `ctx_object_shape_matches_d04` Phase-3 test updated to include `"evm"` key — expected breaking change as Phase 4 adds the namespace.
 - Plan 04-01: executor-evm re-exports `alloy::providers::DynProvider` so executor-mcp / strategy-js can name `Arc<DynProvider>` without direct alloy deps (D-02 isolation).
+- Plan 04-02: ERC20 helpers are thin wrappers around `read_contract` with a bundled OZ-compatible `ERC20_ABI` static (selector-stable, balanceOf=0x70a08231 pinned by unit test) — strategies never supply their own ABI for ERC20 reads.
+- Plan 04-02: Native helpers bypass dyn-abi entirely — `Provider::get_balance` + `Provider::get_block_number` direct calls, with U256→decimal-string per D-03 (78-digit max never fits JS Number).
+- Plan 04-02: Flat aliases (`erc20Balance`, `erc20Allowance`, `nativeBalance`) and structured forms (`readErc20.*`, `readNative.*`) are SEPARATE JS Function objects but route to the SAME backing executor_evm fn — identical results AND identical journal payloads (T-04-02-01 mitigation).
+- Plan 04-02: Default blockTag = "latest" when arg missing OR `undefined` (NOTE-2 plan-checker — pinned by `flat_alias_default_blockTag_is_latest` test).
+- Plan 04-02: Helper positional shape is `(token, ...addresses, blockTag?)` — NOT options-object — to match REQUIREMENTS naming verbatim.
+- Plan 04-02: `BlockTag::to_block_id` made `pub` so `executor_evm::native` can translate the agent-facing tag enum into alloy `BlockId` for `get_balance.block_id(...)`.
+- Plan 04-02: Each helper records ONE `journal_source_reads` row with kind="evm_read", target="<lower_address>:<helper_function>", payload.helper = structured-form name (NOT alias name) — flat aliases produce identical journal target/payload for identical args.
 
 ### Pending Todos
 
 - Phase 3 complete (3/3 plans). All 5 phase requirements (STR-03/04/05, STJ-03/04) closed.
-- Phase 4 — Plan 04-01 complete (CTX-01 wired end-to-end via anvil-gated read_counter_number_returns_zero).
-- Workspace: 213 tests passing across 29 suites; clippy clean (`-D warnings`); no `println!`/`eprintln!`/`dbg!` in `src/` (one approved `eprintln!` in AnvilFixture skip path per D-14).
-- Next: Plan 04-02 (ERC20 read helpers + native read helpers + flat aliases).
+- Phase 4 — Plans 04-01 and 04-02 complete. CTX-01/02/03/04 all wired (readContract + ERC20 helpers + native helpers + flat aliases).
+- Workspace: 232 tests passing across 32 suites (was 213, +19 from 04-02); clippy `--workspace --all-targets -- -D warnings` clean; sandbox_host_globals (HR-01 regression) still green with Phase-4 surfaces installed.
+- Next: Plan 04-03 (action builders — ctx.actions.{contractCall, rawCall, erc20Approve, erc20Transfer, nativeTransfer} + Action enum widening + per-Action validator).
 
 ### Blockers/Concerns
 
@@ -130,8 +138,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T10:30:00.000Z
-Stopped at: Plan 04-01 complete; Phase 04 in progress (1/4 plans). CTX-01 demonstrable end-to-end. Workspace 213 tests / clippy clean.
+Last session: 2026-04-27T09:33:07.000Z
+Stopped at: Plan 04-02 complete; Phase 04 in progress (2/4 plans). CTX-02/03/04 all closed. Workspace 232 tests / clippy clean.
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)
