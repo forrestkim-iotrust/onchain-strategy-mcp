@@ -19,6 +19,13 @@ pub enum StateError {
 
     #[error("input validation failed: {0}")]
     InvalidInput(String),
+
+    /// Journal payload serialization failed before INSERT (MR-03).
+    /// Carries the failing context (e.g. `journal_actions.payload`) so the
+    /// raw serde error can go to tracing while the wire surfaces only a
+    /// stable taxonomy string.
+    #[error("serialization failed: {0}")]
+    SerializationError(String),
 }
 
 impl From<rusqlite::Error> for StateError {

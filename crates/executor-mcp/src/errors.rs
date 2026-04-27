@@ -163,6 +163,20 @@ pub fn map_state_error(e: StateError) -> McpError {
             })),
         ),
         StateError::InvalidInput(msg) => invalid_params(msg),
+        StateError::SerializationError(msg) => {
+            // MR-03: serde failure on a journal payload. Same wire-leak
+            // discipline as Storage — raw text to tracing, stable taxonomy
+            // string on the wire.
+            tracing::warn!(detail = %msg, "journal payload serialization failed");
+            McpError::new(
+                STORAGE_ERROR,
+                "journal payload serialization failed".to_string(),
+                Some(json!({
+                    "code": "storage_error",
+                    "detail": "journal payload serialization failed",
+                })),
+            )
+        }
         StateError::Storage(msg) => {
             // MR-01: Do NOT echo raw rusqlite text (constraint names, table
             // names, SQLite-internal phrasing) onto the wire — it leaks

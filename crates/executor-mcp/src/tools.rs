@@ -470,10 +470,20 @@ async fn record_action(
 ) -> Result<(), McpError> {
     let (journal_outcome, payload_json): (JournalActionOutcome, String) = match outcome {
         StrategyOutcome::Noop => (JournalActionOutcome::Noop, "\"noop\"".to_string()),
-        StrategyOutcome::Actions { actions } => (
-            JournalActionOutcome::Actions,
-            serde_json::to_string(actions).unwrap_or_else(|_| "[]".into()),
-        ),
+        StrategyOutcome::Actions { actions } => {
+            // MR-03: never silently fall back to "[]" on serde failure — the
+            // journal is the audit trail ("모든 실행은 기록으로 남는다") and a
+            // legitimate empty-array success run is indistinguishable from a
+            // swallowed error. Propagate as StateError::SerializationError so
+            // the wire emits storage_error and operator forensics get the raw
+            // serde detail via tracing.
+            let payload = serde_json::to_string(actions).map_err(|e| {
+                map_state_error(StateError::SerializationError(format!(
+                    "journal_actions.payload (Vec<Action>): {e}"
+                )))
+            })?;
+            (JournalActionOutcome::Actions, payload)
+        }
     };
     let state = state.clone();
     let rid = run_id.to_string();
