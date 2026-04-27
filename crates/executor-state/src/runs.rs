@@ -77,6 +77,31 @@ pub(crate) fn insert_run(
     Ok(id)
 }
 
+/// Test-only helper — insert a run with a caller-supplied `started_at`
+/// timestamp so integration tests can assert deterministic
+/// `list_runs_for_strategy` ordering without sleeping (Pitfall 6: same-second
+/// `now_rfc3339` granularity collides under tight inserts). Production code
+/// MUST use [`insert_run`].
+#[doc(hidden)]
+pub(crate) fn insert_run_with_started_at(
+    conn: &Connection,
+    strategy_id: &str,
+    status: RunStatus,
+    started_at: &str,
+) -> Result<String, StateError> {
+    if !status.phase2_emittable() {
+        return Err(StateError::InvalidInput(format!(
+            "status {status:?} is reserved for Phase 5/6 and cannot be emitted from Phase 2"
+        )));
+    }
+    let id = ulid::Ulid::new().to_string();
+    conn.execute(
+        "INSERT INTO runs(id, strategy_id, status, started_at) VALUES (?1, ?2, ?3, ?4)",
+        params![&id, strategy_id, status_to_wire(status), started_at],
+    )?;
+    Ok(id)
+}
+
 pub(crate) fn update_run_status(
     conn: &Connection,
     run_id: &str,
@@ -137,7 +162,7 @@ pub(crate) fn list_runs_for_strategy(
 ) -> Result<Vec<Run>, StateError> {
     let mut stmt = conn.prepare(
         "SELECT id, strategy_id, status, started_at, finished_at, error \
-         FROM runs WHERE strategy_id = ?1 ORDER BY started_at DESC",
+         FROM runs WHERE strategy_id = ?1 ORDER BY started_at ASC, id ASC",
     )?;
     let rows = stmt
         .query_map(params![strategy_id], |r| {

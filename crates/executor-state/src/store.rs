@@ -82,6 +82,21 @@ impl StateStore {
         runs::insert_run(&self.conn, strategy_id, status)
     }
 
+    /// **Test-only.** Insert a run with a caller-supplied `started_at` so
+    /// integration tests can assert deterministic ordering in
+    /// `list_runs_for_strategy` without `now_rfc3339`'s seconds granularity
+    /// causing same-timestamp collisions. Production code paths MUST use
+    /// [`StateStore::insert_run`].
+    #[doc(hidden)]
+    pub fn __test_insert_run_with_time(
+        &mut self,
+        strategy_id: &str,
+        status: RunStatus,
+        started_at: &str,
+    ) -> Result<String, StateError> {
+        runs::insert_run_with_started_at(&self.conn, strategy_id, status, started_at)
+    }
+
     pub fn update_run_status(
         &mut self,
         run_id: &str,
