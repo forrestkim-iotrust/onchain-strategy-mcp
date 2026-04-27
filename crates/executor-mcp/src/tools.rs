@@ -8,15 +8,19 @@
 //!     returns empty shape), policy_update (Phase 5, unimplemented_err).
 
 use executor_core::schema::{
-    execution::{ExecutionGetResponse, ExecutionIdInput},
+    action::Action,
+    execution::{
+        ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome, RunStatus, StrategyOutcome,
+        StrategyRunResponse,
+    },
     policy::PolicyUpdateInput,
     strategy::{
         StrategyDeleteResponse, StrategyGetInput, StrategyGetResponse, StrategyIdInput,
         StrategyListItem, StrategyListResponse, StrategyRegisterInput, StrategyRegisterResponse,
-        StrategyRunOnceInput,
+        StrategyRunInput,
     },
 };
-use executor_state::{RegisterOutcome, StateError, Strategy, StrategySummary};
+use executor_state::{RegisterOutcome, StateError, StateStore, Strategy, StrategySummary};
 use rmcp::{
     ErrorData as McpError,
     handler::server::wrapper::Parameters,
@@ -24,9 +28,15 @@ use rmcp::{
     tool, tool_router,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use strategy_js::{RuntimeContext, RuntimeError, Sandbox};
+use tokio::sync::Mutex;
 
 use crate::{
-    errors::{invalid_params, map_state_error, storage_error, unimplemented_err},
+    errors::{
+        invalid_params, map_runtime_error, map_state_error, storage_error, strategy_deleted,
+        strategy_invalid_output, unimplemented_err,
+    },
     server::ExecutorServer,
     validation::{validate_register, validate_strategy_id_format},
 };
@@ -178,7 +188,7 @@ impl ExecutorServer {
 
     #[tool(
         name = "execution_get",
-        description = "Get a run by id. Returns not_found until Phase 3 begins inserting runs via strategy_run_once."
+        description = "Get a run by id. Returns not_found until a `strategy_run` call has inserted runs."
     )]
     async fn execution_get(
         &self,
@@ -213,14 +223,131 @@ impl ExecutorServer {
     // ─────────── STILL-PLACEHOLDER TOOLS (Phase 5 / 6) ───────────
 
     #[tool(
-        name = "strategy_run_once",
-        description = "Execute a strategy once. NOT YET IMPLEMENTED — lands in Phase 6."
+        name = "strategy_run",
+        description = "Execute a registered JavaScript strategy once in a sandbox. \
+                       Returns the validated `Action[]` or `noop`. Runtime / validation \
+                       errors become structured MCP errors with a `run_id` reference \
+                       for journal lookup via `execution_get` and `journal://{run_id}`."
     )]
-    async fn strategy_run_once(
+    async fn strategy_run(
         &self,
-        Parameters(_input): Parameters<StrategyRunOnceInput>,
+        Parameters(input): Parameters<StrategyRunInput>,
     ) -> Result<CallToolResult, McpError> {
-        Err(unimplemented_err("strategy_run_once", 6))
+        // STEP 1: validate input format (D-09).
+        validate_strategy_id_format(&input.strategy_id).map_err(invalid_params)?;
+
+        // STEP 2: load strategy + check soft-delete.
+        let state = self.state.clone();
+        let sid_for_load = input.strategy_id.clone();
+        let strategy: Strategy = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.get_strategy_by_id(&sid_for_load)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?
+        .ok_or_else(|| {
+            map_state_error(StateError::NotFound(format!("strategy {}", input.strategy_id)))
+        })?;
+        if strategy.deleted_at.is_some() {
+            return Err(strategy_deleted(&strategy.id));
+        }
+
+        // STEP 3: insert run (Queued).
+        let state = self.state.clone();
+        let sid_for_run = strategy.id.clone();
+        let run_id: String = tokio::task::spawn_blocking(move || {
+            let mut store = state.blocking_lock();
+            store.insert_run(&sid_for_run, RunStatus::Queued)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        // STEP 4: Queued → Running (D-12).
+        transition(&self.state, &run_id, RunStatus::Queued, RunStatus::Running).await?;
+
+        // STEP 5: spawn_blocking { Sandbox::execute + RuntimeContext::flush }
+        let state_for_run = self.state.clone();
+        let source = strategy.source.clone();
+        let sid_for_ctx = strategy.id.clone();
+        let sname_for_ctx = strategy.name.clone();
+        let rid_for_ctx = run_id.clone();
+        let exec_result: Result<serde_json::Value, RuntimeError> = tokio::task::spawn_blocking(
+            move || -> Result<serde_json::Value, RuntimeError> {
+                let mut runtime_ctx = RuntimeContext::new(
+                    state_for_run,
+                    sid_for_ctx,
+                    sname_for_ctx,
+                    rid_for_ctx,
+                    RuntimeContext::default_clock(),
+                );
+                let r = Sandbox::execute(&source, &mut runtime_ctx);
+                if let Err(flush_err) = runtime_ctx.flush() {
+                    tracing::warn!(?flush_err, "RuntimeContext::flush failed after execute");
+                }
+                r
+            },
+        )
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?;
+
+        // STEP 6: validate output OR map runtime error.
+        let outcome = match exec_result {
+            Ok(json) => match validate_strategy_output(&json) {
+                Ok(out) => {
+                    record_action(&self.state, &run_id, &out).await?;
+                    out
+                }
+                Err(detail) => {
+                    record_validation_error(&self.state, &run_id, &detail, &json).await?;
+                    transition(&self.state, &run_id, RunStatus::Running, RunStatus::Failed)
+                        .await?;
+                    return Err(strategy_invalid_output(detail, &run_id));
+                }
+            },
+            Err(RuntimeError::InvalidOutput { detail }) => {
+                record_validation_error(
+                    &self.state,
+                    &run_id,
+                    &detail,
+                    &serde_json::Value::Null,
+                )
+                .await?;
+                transition(&self.state, &run_id, RunStatus::Running, RunStatus::Failed).await?;
+                return Err(strategy_invalid_output(detail, &run_id));
+            }
+            Err(other) => {
+                let detail = other.to_string();
+                record_runtime_error(&self.state, &run_id, &detail).await?;
+                transition(&self.state, &run_id, RunStatus::Running, RunStatus::Failed).await?;
+                return Err(map_runtime_error(other, &run_id));
+            }
+        };
+
+        // STEP 7: Running → Succeeded.
+        transition(&self.state, &run_id, RunStatus::Running, RunStatus::Succeeded).await?;
+
+        // STEP 8: re-read run row, build response.
+        let state = self.state.clone();
+        let rid_for_get = run_id.clone();
+        let run = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.get_run(&rid_for_get)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?
+        .ok_or_else(|| storage_error("run row vanished between insert and get"))?;
+
+        json_result(&StrategyRunResponse {
+            run_id: run.id,
+            strategy_id: run.strategy_id,
+            status: run.status,
+            started_at: run.started_at,
+            finished_at: run.finished_at.unwrap_or_default(),
+            outcome,
+        })
     }
 
     #[tool(
@@ -280,4 +407,128 @@ fn strategy_to_get_response(s: Strategy) -> StrategyGetResponse {
         created_at: s.created_at,
         deleted_at: s.deleted_at,
     }
+}
+
+// ─────────── strategy_run helpers ───────────
+
+/// Validate the strategy's return JSON against the Phase-3 contract:
+/// `"noop"` (string) | `Action[]` (deserializable). Returns `Err(detail)`
+/// if the shape is unsupported; the detail is agent-facing.
+fn validate_strategy_output(v: &serde_json::Value) -> Result<StrategyOutcome, String> {
+    match v {
+        serde_json::Value::String(s) if s == "noop" => Ok(StrategyOutcome::Noop),
+        serde_json::Value::Array(items) => {
+            let actions: Vec<Action> = items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    serde_json::from_value::<Action>(item.clone())
+                        .map_err(|e| format!("invalid action at index {i}: {e}"))
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(StrategyOutcome::Actions { actions })
+        }
+        other => Err(format!(
+            "expected `\"noop\"` or `Action[]`, got {}",
+            json_type_name(other)
+        )),
+    }
+}
+
+fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+async fn transition(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    from: RunStatus,
+    to: RunStatus,
+) -> Result<(), McpError> {
+    let state = state.clone();
+    let rid = run_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.update_run_status_with_transition(&rid, from, to)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)
+}
+
+async fn record_action(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    outcome: &StrategyOutcome,
+) -> Result<(), McpError> {
+    let (journal_outcome, payload_json): (JournalActionOutcome, String) = match outcome {
+        StrategyOutcome::Noop => (JournalActionOutcome::Noop, "\"noop\"".to_string()),
+        StrategyOutcome::Actions { actions } => (
+            JournalActionOutcome::Actions,
+            serde_json::to_string(actions).unwrap_or_else(|_| "[]".into()),
+        ),
+    };
+    let state = state.clone();
+    let rid = run_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_action_outcome(&rid, journal_outcome, &payload_json)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
+}
+
+async fn record_validation_error(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    detail: &str,
+    raw_json: &serde_json::Value,
+) -> Result<(), McpError> {
+    let payload = serde_json::json!({
+        "code": "strategy_invalid_output",
+        "detail": detail,
+        "raw": raw_json,
+    });
+    let payload_json = payload.to_string();
+    let state = state.clone();
+    let rid = run_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_action_outcome(&rid, JournalActionOutcome::ValidationError, &payload_json)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
+}
+
+async fn record_runtime_error(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    detail: &str,
+) -> Result<(), McpError> {
+    let payload = serde_json::json!({
+        "code": "strategy_runtime_error",
+        "detail": detail,
+    });
+    let payload_json = payload.to_string();
+    let state = state.clone();
+    let rid = run_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_action_outcome(&rid, JournalActionOutcome::RuntimeError, &payload_json)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
 }

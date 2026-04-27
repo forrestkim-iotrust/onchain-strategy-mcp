@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use executor_core::schema::strategy::StrategyGetResponse;
-use executor_state::StateStore;
+use executor_state::{StateError, StateStore};
 use rmcp::{
     ErrorData as McpError, RoleServer,
     model::{
@@ -79,9 +79,9 @@ pub(crate) async fn list_resource_templates_impl(
                 "application/json",
             ),
             make_template(
-                "journal://{execution_id}",
+                "journal://{run_id}",
                 "journal",
-                "Journal entries for an execution. Populated in Phase 3+.",
+                "Populated in Phase 3 (returns source_reads + actions + logs for the run).",
                 "application/json",
             ),
         ],
@@ -100,21 +100,19 @@ pub(crate) async fn read_resource_impl(
         let id_owned = id.to_string();
         return read_strategy(uri, id_owned, state).await;
     }
+    if let Some(rid) = uri.strip_prefix("journal://") {
+        let rid_owned = rid.to_string();
+        return read_journal(uri, rid_owned, state).await;
+    }
     if uri.starts_with("execution://") {
         return Err(McpError::resource_not_found(
-            format!("execution {uri} not found (Phase 6 wires runs)"),
+            format!("execution {uri} not found (Phase 6 wires receipts)"),
             Some(json!({ "uri": uri, "phase": 6 })),
-        ));
-    }
-    if uri.starts_with("journal://") {
-        return Err(McpError::resource_not_found(
-            format!("journal {uri} not found (Phase 3+ wires journal)"),
-            Some(json!({ "uri": uri, "phase": 3 })),
         ));
     }
     Err(McpError::resource_not_found(
         format!("unsupported resource URI: {uri}"),
-        Some(json!({ "uri": uri, "phase": 2 })),
+        Some(json!({ "uri": uri, "phase": 3 })),
     ))
 }
 
@@ -164,4 +162,82 @@ async fn read_strategy(
             ]))
         }
     }
+}
+
+async fn read_journal(
+    uri: String,
+    run_id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    // Boundary check: ULID is 26 chars, alphanumeric (Crockford). Permissive
+    // shape check matches the Phase-2 strategy:// posture.
+    if run_id.len() != 26 || !run_id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(McpError::resource_not_found(
+            format!("malformed run id in uri: {uri}"),
+            Some(json!({ "uri": uri, "code": "malformed_id" })),
+        ));
+    }
+
+    let rid_owned = run_id.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state.blocking_lock();
+        let exists = store.get_run(&rid_owned)?;
+        if exists.is_none() {
+            return Ok(None);
+        }
+        let s = store.list_source_reads_for_run(&rid_owned)?;
+        let a = store.list_actions_for_run(&rid_owned)?;
+        let l = store.list_logs_for_run(&rid_owned)?;
+        Ok(Some((s, a, l)))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let (sources, actions, logs) = match result {
+        Some(t) => t,
+        None => {
+            return Err(McpError::resource_not_found(
+                format!("run {uri} not found"),
+                Some(json!({ "uri": uri })),
+            ));
+        }
+    };
+
+    // Build action rows. Use serde_json::to_value for the outcome enum so
+    // we get the canonical snake_case wire string — NEVER format!("{:?}",..)
+    // (would yield "simulationfailure" instead of "simulation_failure").
+    let mut action_rows = Vec::with_capacity(actions.len());
+    for a in &actions {
+        let outcome_val = serde_json::to_value(a.outcome)
+            .map_err(|e| storage_error(format!("serialize outcome: {e}")))?;
+        action_rows.push(serde_json::json!({
+            "id": a.id,
+            "outcome": outcome_val,
+            "payload_json": a.payload_json,
+            "recorded_at": a.recorded_at,
+        }));
+    }
+
+    let body = serde_json::json!({
+        "run_id": run_id,
+        "source_reads": sources.iter().map(|s| serde_json::json!({
+            "id": s.id,
+            "kind": s.kind,
+            "target": s.target,
+            "payload_json": s.payload_json,
+            "recorded_at": s.recorded_at,
+        })).collect::<Vec<_>>(),
+        "actions": action_rows,
+        "logs": logs.iter().map(|l| serde_json::json!({
+            "id": l.id,
+            "message": l.message,
+            "recorded_at": l.recorded_at,
+        })).collect::<Vec<_>>(),
+    });
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize journal: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
 }

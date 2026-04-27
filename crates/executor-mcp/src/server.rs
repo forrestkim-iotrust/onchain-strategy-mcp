@@ -74,15 +74,20 @@ impl ServerHandler for ExecutorServer {
             .enable_resources()
             .build();
         ServerInfo::new(caps).with_instructions(
-            "Onchain Strategy MCP — Phase 2 runtime surface. \
+            "Onchain Strategy MCP — Phase 3 runtime surface. \
              Strategy tools (strategy_register/list/get/delete) persist to a local \
-             SQLite database. Write-capable tools pending future phases \
-             (strategy_run_once → Phase 6, policy_update → Phase 5) still return \
-             the structured `unimplemented` error envelope (code -32010, data.phase=<N>). \
-             Storage errors use codes -32014 (not_found), -32015 (name_conflict), \
+             SQLite database. `strategy_run` executes a registered strategy in a \
+             sandboxed JS runtime (Action[] | \"noop\" return) with full journaling \
+             (journal_source_reads / journal_actions / journal_logs). \
+             Sandbox failures surface as -32011 (strategy_deleted), -32017 \
+             (strategy_runtime_error with data.kind ∈ timeout|oom|stack_overflow|exception), \
+             or -32018 (strategy_invalid_output). \
+             Storage errors use -32014 (not_found), -32015 (name_conflict), \
              -32016 (storage_error); validation failures use -32602 (invalid_params). \
-             Resource template `strategy://{strategy_id}` now returns real objects; \
-             `execution://` / `journal://` remain phase-gated.",
+             Resource templates: `strategy://{strategy_id}` and `journal://{run_id}` \
+             return real JSON; `execution://{id}` remains phase-gated (Phase 6). \
+             Only `policy_update` still returns the structured `unimplemented` envelope \
+             (code -32010, data.phase=5).",
         )
     }
 
