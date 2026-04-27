@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Plan 02-02 complete
-last_updated: "2026-04-27T03:31:43.805Z"
+status: verifying
+stopped_at: Plan 02-03 complete; Phase 02 closed
+last_updated: "2026-04-27T03:37:45.378Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
-  percent: 83
+  completed_plans: 6
+  percent: 100
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 Phase: 02 (strategy-state-and-journal) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-27
 
-Progress: [████████░░] 83%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -53,6 +53,7 @@ Progress: [████████░░] 83%
 - Trend: zero deviations on 02-01 (planning artifacts were dense enough to drive every decision); plan size grew slightly (storage layer + schemas + config in one wave) but velocity steady
 
 | Phase 02 P02 | 480 | 3 tasks | 11 files |
+| Phase 02 P03 | 5 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,10 @@ Recent decisions affecting current work:
 - Plan 02-02: ReadResourceResult is #[non_exhaustive] in rmcp 1.5 → use ::new(vec![..]) constructor; struct literal fails E0639
 - Plan 02-02: Resource-boundary malformed strategy id surfaces as resource_not_found (-32002) with data.code=malformed_id, NOT as -32602 invalid_params (resources/read keeps its typed not_found contract)
 - Plan 02-02: Default for ExecutorServer + no-arg new() removed; new(&StateConfig) is fallible because SQLite open can fail
+- Plan 02-03: Adopted Option A test-only StateStore::__test_insert_run_with_time helper for deterministic ordering tests; Option B sleep-based was rejected (≥2s flake-prone)
+- Plan 02-03: list_runs_for_strategy ORDER BY changed from DESC (Plan 02-01 vestigial) to ASC, id ASC per D-04b — id tie-breaker handles same-second now_rfc3339 collisions
+- Plan 02-03: RunStatus future-variants walker collects BOTH enum[] strings and const strings — schemars 1.x emits oneOf:[{enum:[4]},const,const,const] not flat enum[7]
+- Phase 02 complete: STJ-02 closed; STR-01/STR-02/STJ-01 still tracked (planning artifact lifecycle vs runtime emission distinction)
 
 ### Pending Todos
 
@@ -102,8 +107,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T03:31:33.723Z
-Stopped at: Plan 02-02 complete
+Last session: 2026-04-27T03:37:33.318Z
+Stopped at: Plan 02-03 complete; Phase 02 closed
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)

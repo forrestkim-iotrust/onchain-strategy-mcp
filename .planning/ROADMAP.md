@@ -6,8 +6,8 @@ v1 builds a local MCP runtime that lets an AI agent write JavaScript EVM automat
 
 ## Phases
 
-- [ ] **Phase 1: MCP Runtime Surface** - Create the Rust workspace and stdio MCP server with stable tools/resources/prompts.
-- [ ] **Phase 2: Strategy State and Journal** - Persist strategies, runs, and journal records locally.
+- [x] **Phase 1: MCP Runtime Surface** - Create the Rust workspace and stdio MCP server with stable tools/resources/prompts.
+- [x] **Phase 2: Strategy State and Journal** - Persist strategies, runs, and journal records locally.
 - [ ] **Phase 3: JavaScript Strategy Runner** - Run sandboxed JavaScript strategies with a constrained `ctx`.
 - [ ] **Phase 4: EVM Context and Actions** - Implement generic EVM reads/writes plus ERC20/native helpers.
 - [ ] **Phase 5: Simulation and Policy Gate** - Validate actions, simulate, and enforce policy before signing.
@@ -45,7 +45,7 @@ Plans:
 Plans:
 - [x] 02-01: SQLite schema and repository layer
 - [x] 02-02: Strategy management tools
-- [ ] 02-03: Run and journal base model
+- [x] 02-03: Run and journal base model
 
 ### Phase 3: JavaScript Strategy Runner
 **Goal**: Runtime executes sandboxed JavaScript strategies and accepts only valid `Action[]`/`noop` outputs.  
