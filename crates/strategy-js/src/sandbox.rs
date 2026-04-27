@@ -426,6 +426,50 @@ impl Sandbox {
                 .set("evm", evm_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
+            // Phase 4 D-10 / D-11 / CTX-09: ctx.units + ctx.address surfaces
+            // (Plan 04-04). Pure host-side helpers — no provider, no journal,
+            // no async. Built BEFORE FORBIDDEN_GLOBALS_SCRUB at the SAME site
+            // as the other ctx.* sub-objects (HR-01 carry-forward — the scrub
+            // still runs BEFORE `c.globals().set("__ctx", ...)`).
+            let units_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let parse_units_fn = Function::new(c.clone(), make_parse_units_closure())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            units_obj
+                .set("parseUnits", parse_units_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let format_units_fn = Function::new(c.clone(), make_format_units_closure())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            units_obj
+                .set("formatUnits", format_units_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("units", units_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            let address_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let is_address_fn = Function::new(c.clone(), make_is_address_closure())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            address_obj
+                .set("isAddress", is_address_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let checksum_fn = Function::new(c.clone(), make_address_checksum_closure())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            address_obj
+                .set("checksum", checksum_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            // ZERO_ADDRESS is a STRING constant — not a function. Reassigning
+            // `ctx.address.zeroAddress` in strategy code only affects the
+            // strategy's local view; host-side reads always go through the
+            // Rust constant `executor_evm::ZERO_ADDRESS` (T-04-04-02).
+            address_obj
+                .set("zeroAddress", executor_evm::ZERO_ADDRESS)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("address", address_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
             // 4a-prime. D-11 scrub MUST run BEFORE host bindings are installed.
             // The Promise intrinsic ships `queueMicrotask` on globalThis; remove
             // it so the forbidden-globals regression suite holds. The list below
@@ -1601,6 +1645,197 @@ fn build_native_transfer_action(
         "to": to,
         "value": value,
     }))
+}
+
+// ─── Phase 4 D-10 / D-11 (Plan 04-04): ctx.units + ctx.address closures ───
+
+/// `ctx.units.parseUnits(amount: string, decimals: number) -> string`.
+///
+/// BigInt amount input is REJECTED at the JS boundary with a stable D-03
+/// message (consistent with the action-builder BigInt rejection). decimals
+/// must be a non-negative integer that fits a `u8`; values > 77 are rejected
+/// by `executor_evm::units::parse_units`.
+fn make_parse_units_closure()
+-> impl for<'js> Fn(rquickjs::Value<'js>, rquickjs::Value<'js>) -> rquickjs::Result<rquickjs::Value<'js>>
++ 'static {
+    move |amount: rquickjs::Value<'_>, decimals: rquickjs::Value<'_>| {
+        let ctx = amount.ctx().clone();
+        // BigInt rejected upfront with stable D-03 message (Pitfall 2).
+        if matches!(amount.type_of(), rquickjs::Type::BigInt) {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.units.parseUnits: 'amount' must be a decimal string, got BigInt — pass a literal string",
+            ));
+        }
+        let amount_str = match amount.as_string() {
+            Some(s) => s.to_string().map_err(|e| {
+                throw_js_error(
+                    &ctx,
+                    &format!("ctx.units.parseUnits: 'amount' utf8 error: {e}"),
+                )
+            })?,
+            None => {
+                return Err(throw_js_error(
+                    &ctx,
+                    "ctx.units.parseUnits: 'amount' must be a decimal string",
+                ));
+            }
+        };
+        let dec_u8 = parse_decimals_arg(&ctx, &decimals, "ctx.units.parseUnits")?;
+        match executor_evm::units::parse_units(&amount_str, dec_u8) {
+            Ok(u) => {
+                let s = u.to_string();
+                Ok(rquickjs::String::from_str(ctx.clone(), &s)
+                    .map_err(|e| throw_js_error(&ctx, &format!("string alloc: {e}")))?
+                    .into_value())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    helper = "parseUnits",
+                    kind = %e.data_kind(),
+                    detail = %e.detail_for_log(),
+                    "ctx.units.parseUnits rejected input"
+                );
+                Err(throw_js_error(
+                    &ctx,
+                    &format!("ctx.units.parseUnits: {e}"),
+                ))
+            }
+        }
+    }
+}
+
+/// `ctx.units.formatUnits(value: string, decimals: number) -> string`.
+///
+/// `value` MUST be a decimal string (BigInt rejected — D-03). `decimals`
+/// is `0..=77`; trailing zeros in the fractional part are trimmed.
+fn make_format_units_closure()
+-> impl for<'js> Fn(rquickjs::Value<'js>, rquickjs::Value<'js>) -> rquickjs::Result<rquickjs::Value<'js>>
++ 'static {
+    move |value: rquickjs::Value<'_>, decimals: rquickjs::Value<'_>| {
+        let ctx = value.ctx().clone();
+        if matches!(value.type_of(), rquickjs::Type::BigInt) {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.units.formatUnits: 'value' must be a decimal string, got BigInt — pass a literal string",
+            ));
+        }
+        let value_str = match value.as_string() {
+            Some(s) => s.to_string().map_err(|e| {
+                throw_js_error(
+                    &ctx,
+                    &format!("ctx.units.formatUnits: 'value' utf8 error: {e}"),
+                )
+            })?,
+            None => {
+                return Err(throw_js_error(
+                    &ctx,
+                    "ctx.units.formatUnits: 'value' must be a decimal string",
+                ));
+            }
+        };
+        let dec_u8 = parse_decimals_arg(&ctx, &decimals, "ctx.units.formatUnits")?;
+        match executor_evm::units::format_units_from_str(&value_str, dec_u8) {
+            Ok(s) => Ok(rquickjs::String::from_str(ctx.clone(), &s)
+                .map_err(|e| throw_js_error(&ctx, &format!("string alloc: {e}")))?
+                .into_value()),
+            Err(e) => {
+                tracing::warn!(
+                    helper = "formatUnits",
+                    kind = %e.data_kind(),
+                    detail = %e.detail_for_log(),
+                    "ctx.units.formatUnits rejected input"
+                );
+                Err(throw_js_error(
+                    &ctx,
+                    &format!("ctx.units.formatUnits: {e}"),
+                ))
+            }
+        }
+    }
+}
+
+/// Helper: parse a JS decimals arg as `u8`. Rejects negatives, non-finite,
+/// non-integer, and values > 255 (the inner module further caps at 77).
+fn parse_decimals_arg(
+    ctx: &rquickjs::Ctx<'_>,
+    v: &rquickjs::Value<'_>,
+    helper: &str,
+) -> rquickjs::Result<u8> {
+    let n: f64 = if let Some(i) = v.as_int() {
+        i as f64
+    } else if let Some(f) = v.as_float() {
+        f
+    } else {
+        return Err(throw_js_error(
+            ctx,
+            &format!("{helper}: 'decimals' must be a number"),
+        ));
+    };
+    if !n.is_finite() || n < 0.0 || n.fract() != 0.0 || n > 255.0 {
+        return Err(throw_js_error(
+            ctx,
+            &format!("{helper}: 'decimals' must be a non-negative integer ≤ 255"),
+        ));
+    }
+    Ok(n as u8)
+}
+
+/// `ctx.address.isAddress(s: any) -> boolean`. Total — never throws.
+/// Non-strings return `false`.
+fn make_is_address_closure()
+-> impl for<'js> Fn(rquickjs::Ctx<'js>, rquickjs::Value<'js>) -> rquickjs::Result<rquickjs::Value<'js>>
++ 'static {
+    move |ctx: rquickjs::Ctx<'_>, v: rquickjs::Value<'_>| {
+        let result = match v.as_string() {
+            Some(js) => match js.to_string() {
+                Ok(s) => executor_evm::address::is_address(&s),
+                Err(_) => false,
+            },
+            None => false,
+        };
+        Ok(rquickjs::Value::new_bool(ctx, result))
+    }
+}
+
+/// `ctx.address.checksum(s: string) -> string`. Throws on invalid input.
+fn make_address_checksum_closure()
+-> impl for<'js> Fn(rquickjs::Value<'js>) -> rquickjs::Result<rquickjs::Value<'js>>
++ 'static {
+    move |v: rquickjs::Value<'_>| {
+        let ctx = v.ctx().clone();
+        let s = match v.as_string() {
+            Some(js) => js.to_string().map_err(|e| {
+                throw_js_error(
+                    &ctx,
+                    &format!("ctx.address.checksum: utf8 error: {e}"),
+                )
+            })?,
+            None => {
+                return Err(throw_js_error(
+                    &ctx,
+                    "ctx.address.checksum: argument must be a string",
+                ));
+            }
+        };
+        match executor_evm::address::checksum(&s) {
+            Ok(out) => Ok(rquickjs::String::from_str(ctx.clone(), &out)
+                .map_err(|e| throw_js_error(&ctx, &format!("string alloc: {e}")))?
+                .into_value()),
+            Err(e) => {
+                tracing::warn!(
+                    helper = "checksum",
+                    kind = %e.data_kind(),
+                    detail = %e.detail_for_log(),
+                    "ctx.address.checksum rejected input"
+                );
+                Err(throw_js_error(
+                    &ctx,
+                    &format!("ctx.address.checksum: {e}"),
+                ))
+            }
+        }
+    }
 }
 
 /// Walk a `rquickjs::Value` and produce a `serde_json::Value`. Returns

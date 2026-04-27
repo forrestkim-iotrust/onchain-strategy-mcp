@@ -118,11 +118,13 @@ fn ctx_object_shape_matches_d04() {
     actual.sort();
     let mut expected = vec![
         "actions".to_string(),
-        "evm".to_string(), // Phase 4 D-04: ctx.evm.* sub-namespace.
+        "address".to_string(), // Phase 4 D-11: ctx.address.* sub-namespace (04-04).
+        "evm".to_string(),     // Phase 4 D-04: ctx.evm.* sub-namespace.
         "log".to_string(),
         "now".to_string(),
         "run".to_string(),
         "strategy".to_string(),
+        "units".to_string(),   // Phase 4 D-10: ctx.units.* sub-namespace (04-04).
     ];
     expected.sort();
     assert_eq!(actual, expected);
