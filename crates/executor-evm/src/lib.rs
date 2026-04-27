@@ -15,12 +15,19 @@
 
 pub mod config;
 pub mod dyn_abi;
+pub mod erc20;
 pub mod error;
+pub mod native;
 pub mod provider;
 pub mod read;
 
 pub use config::EvmConfig;
+pub use erc20::{
+    ERC20_ABI, erc20_allowance, erc20_balance_of, erc20_decimals, erc20_name, erc20_symbol,
+    erc20_total_supply,
+};
 pub use error::EvmError;
+pub use native::{native_balance, native_block_number};
 pub use provider::build_provider;
 pub use read::{BlockTag, ReadContractInput, read_contract};
 

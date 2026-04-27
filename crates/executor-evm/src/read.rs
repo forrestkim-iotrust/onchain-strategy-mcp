@@ -56,7 +56,10 @@ pub enum BlockTag {
 }
 
 impl BlockTag {
-    fn to_block_id(self) -> BlockId {
+    /// Public so `executor_evm::native` (and any future helper module) can
+    /// translate the agent-facing tag enum into the alloy [`BlockId`] used by
+    /// `provider.call`/`provider.get_balance` etc. Phase-4 D-07.
+    pub fn to_block_id(self) -> BlockId {
         match self {
             BlockTag::Latest => BlockId::latest(),
             BlockTag::Pending => BlockId::pending(),

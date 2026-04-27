@@ -1,0 +1,55 @@
+// SPDX-License-Identifier: MIT
+// Source for `erc20.hex` — committed for audit / reproducibility.
+//
+// Compile contract:
+//   solc --optimize --optimize-runs=200 --bin-runtime erc20.sol
+// then prepend `0x` to the runtime bytecode + commit to `erc20.hex`.
+// (For deployment bytecode include initcode; we use the deploy-and-call-back
+// pattern in tests/erc20_helpers_anvil.rs which uses `with_deploy_code`
+// against the FULL initcode, NOT the runtime-only bytecode.)
+//
+// The expected initialSupply passed at deploy time is `1_000_000 * 10**18`
+// (1M tokens with 18 decimals), encoded as the constructor argument suffix
+// in the deploy helper (NOT in the .hex file itself).
+//
+// Compiler: solc 0.8.20
+// Optimizer: enabled, runs=200
+// Constructor selector / arity: takes one `uint256 initialSupply`
+//
+// Public surface used by tests:
+//   - balanceOf(address)        view returns (uint256)
+//   - allowance(address,address) view returns (uint256)
+//   - decimals()                view returns (uint8)
+//   - symbol()                  view returns (string)
+//   - name()                    view returns (string)
+//   - totalSupply()             view returns (uint256)
+//   - transfer(address,uint256) returns (bool)
+//   - approve(address,uint256)  returns (bool)
+
+pragma solidity ^0.8.20;
+
+contract MockERC20 {
+    string  public name = "MockToken";
+    string  public symbol = "MOCK";
+    uint8   public decimals = 18;
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    constructor(uint256 initialSupply) {
+        totalSupply = initialSupply;
+        balanceOf[msg.sender] = initialSupply;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "insufficient");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+}
