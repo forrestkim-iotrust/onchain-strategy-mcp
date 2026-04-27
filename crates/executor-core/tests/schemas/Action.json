@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Action",
+  "description": "Phase-4 action wire schema. The discriminator field is `kind`\n(snake_case), and every Phase-4 variant struct rejects unknown fields.",
+  "oneOf": [
+    {
+      "description": "Phase-3 sentinel — strategy returned `[]`-equivalent intent.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "noop"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "description": "CTX-05: ABI-driven contract call.",
+      "type": "object",
+      "properties": {
+        "abi": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": true
+        },
+        "function": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "contract_call"
+        },
+        "value": {
+          "description": "Native-coin attached to the call (decimal-string wei). Defaults to\n`\"0\"`. Phase 5 owns transaction-level fields beyond this.",
+          "type": "string",
+          "default": "0"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "address",
+        "abi",
+        "function",
+        "args"
+      ]
+    },
+    {
+      "description": "CTX-06: pre-encoded raw calldata call.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "raw_call"
+        },
+        "value": {
+          "type": "string",
+          "default": "0"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "address",
+        "data"
+      ]
+    },
+    {
+      "description": "CTX-07a: ERC20 `transfer(to, amount)`.",
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "erc20_transfer"
+        },
+        "to": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "token",
+        "to",
+        "amount"
+      ]
+    },
+    {
+      "description": "CTX-07b: ERC20 `approve(spender, amount)`.",
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "const": "erc20_approve"
+        },
+        "spender": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "token",
+        "spender",
+        "amount"
+      ]
+    },
+    {
+      "description": "CTX-08: native-coin transfer.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "native_transfer"
+        },
+        "to": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "to",
+        "value"
+      ]
+    }
+  ]
+}

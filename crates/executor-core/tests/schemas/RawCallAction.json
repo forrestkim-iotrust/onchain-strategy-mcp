@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RawCallAction",
+  "description": "CTX-06 — explicit pre-encoded calldata call.\n\n`data` is `0x`-prefixed even-length hex. The validator checks shape only;\nPhase 5 re-validates against the resolved selector before broadcast.",
+  "type": "object",
+  "properties": {
+    "address": {
+      "type": "string"
+    },
+    "data": {
+      "type": "string"
+    },
+    "value": {
+      "type": "string",
+      "default": "0"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "address",
+    "data"
+  ]
+}

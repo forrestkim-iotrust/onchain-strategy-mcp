@@ -13,6 +13,10 @@
 //! contract.
 
 use executor_core::schema::{
+    action::{
+        Action, ContractCallAction, Erc20ApproveAction, Erc20TransferAction,
+        NativeTransferAction, RawCallAction,
+    },
     execution::{
         ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome, RunStatus, StrategyOutcome,
         StrategyRunResponse,
@@ -143,6 +147,127 @@ fn journal_action_outcome_schema_stable() {
         "JournalActionOutcome",
         schema_for!(JournalActionOutcome),
     );
+}
+
+// ─── Phase 4 04-04 D-08 — Action enum + per-variant goldens ────────────────
+
+#[test]
+fn action_schema_stable() {
+    assert_schema_matches_golden("Action", schema_for!(Action));
+}
+
+#[test]
+fn contract_call_action_schema_stable() {
+    assert_schema_matches_golden("ContractCallAction", schema_for!(ContractCallAction));
+}
+
+#[test]
+fn raw_call_action_schema_stable() {
+    assert_schema_matches_golden("RawCallAction", schema_for!(RawCallAction));
+}
+
+#[test]
+fn erc20_transfer_action_schema_stable() {
+    assert_schema_matches_golden(
+        "Erc20TransferAction",
+        schema_for!(Erc20TransferAction),
+    );
+}
+
+#[test]
+fn erc20_approve_action_schema_stable() {
+    assert_schema_matches_golden(
+        "Erc20ApproveAction",
+        schema_for!(Erc20ApproveAction),
+    );
+}
+
+#[test]
+fn native_transfer_action_schema_stable() {
+    assert_schema_matches_golden(
+        "NativeTransferAction",
+        schema_for!(NativeTransferAction),
+    );
+}
+
+/// D-08 future-lock: golden must enumerate all 6 wire kinds (Phase-3 Noop
+/// plus the five Phase-4 write actions). Walks both `enum[]` and `const`
+/// forms (mirrors 02-03 SUMMARY:39 walker pattern; matches the Phase-3
+/// `journal_action_outcome_includes_future_variants` test below).
+#[test]
+fn action_schema_includes_all_six_kinds() {
+    let raw = std::fs::read_to_string("tests/schemas/Action.json")
+        .expect("read Action.json");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse golden");
+
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    fn walk(v: &serde_json::Value, found: &mut BTreeSet<String>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::Array(arr)) = map.get("enum") {
+                    for item in arr {
+                        if let Some(s) = item.as_str() {
+                            found.insert(s.to_string());
+                        }
+                    }
+                }
+                if let Some(serde_json::Value::String(s)) = map.get("const") {
+                    found.insert(s.clone());
+                }
+                for (_k, child) in map {
+                    walk(child, found);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for child in arr {
+                    walk(child, found);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(&v, &mut found);
+
+    let expected: BTreeSet<String> = [
+        "noop",
+        "contract_call",
+        "raw_call",
+        "erc20_transfer",
+        "erc20_approve",
+        "native_transfer",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // The walker may pick up other strings (e.g. property names that share
+    // names with kind discriminators); assert the expected set is a SUBSET
+    // of `found`.
+    for k in &expected {
+        assert!(
+            found.contains(k),
+            "Action golden missing kind {k:?}; found: {found:?}"
+        );
+    }
+}
+
+/// D-08 deny_unknown_fields fingerprint: every Phase-4 variant struct must
+/// have `additionalProperties: false` in its golden.
+#[test]
+fn phase4_variant_goldens_deny_unknown_fields() {
+    for name in [
+        "ContractCallAction",
+        "RawCallAction",
+        "Erc20TransferAction",
+        "Erc20ApproveAction",
+        "NativeTransferAction",
+    ] {
+        let path = format!("tests/schemas/{name}.json");
+        let raw = std::fs::read_to_string(&path).expect("read golden");
+        assert!(
+            raw.contains("\"additionalProperties\": false"),
+            "{name} golden missing additionalProperties:false (deny_unknown_fields)"
+        );
+    }
 }
 
 /// D-06 future-lock: golden must enumerate all 6 wire names so Phase 5

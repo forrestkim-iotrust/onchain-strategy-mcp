@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Erc20TransferAction",
+  "description": "CTX-07a — ERC20 `transfer(to, amount)`.",
+  "type": "object",
+  "properties": {
+    "amount": {
+      "type": "string"
+    },
+    "to": {
+      "type": "string"
+    },
+    "token": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "token",
+    "to",
+    "amount"
+  ]
+}

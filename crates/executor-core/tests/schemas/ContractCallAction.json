@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ContractCallAction",
+  "description": "CTX-05 — ABI-driven contract call.\n\n`abi` is a JSON-string of the contract ABI (size ≤ [`MAX_ABI_BYTES`]).\nPhase 5 normalization re-parses it into canonical calldata; Phase 4 only\ndry-run-encodes during builder validation and discards the bytes.",
+  "type": "object",
+  "properties": {
+    "abi": {
+      "type": "string"
+    },
+    "address": {
+      "type": "string"
+    },
+    "args": {
+      "type": "array",
+      "items": true
+    },
+    "function": {
+      "type": "string"
+    },
+    "value": {
+      "description": "Native-coin attached to the call (decimal-string wei). Defaults to\n`\"0\"`. Phase 5 owns transaction-level fields beyond this.",
+      "type": "string",
+      "default": "0"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "address",
+    "abi",
+    "function",
+    "args"
+  ]
+}
