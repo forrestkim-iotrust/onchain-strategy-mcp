@@ -209,21 +209,29 @@ impl Sandbox {
                 .set("actions", actions_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
-            c.globals()
-                .set("__ctx", ctx_obj)
-                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
-
-            // 4a-prime. D-11 scrub. The Promise intrinsic ships
-            // `queueMicrotask` on globalThis; remove it so the forbidden-
-            // globals regression suite holds. The list below mirrors D-11
-            // and is defensive against future intrinsic additions:
+            // 4a-prime. D-11 scrub MUST run BEFORE host bindings are installed.
+            // The Promise intrinsic ships `queueMicrotask` on globalThis; remove
+            // it so the forbidden-globals regression suite holds. The list below
+            // mirrors D-11 and is defensive against future intrinsic additions:
             // we delete each name unconditionally — a `delete` of an
             // already-absent property is a no-op.
+            //
+            // Ordering rationale (HR-01): if a future intrinsic surfaced a name
+            // that overlapped a host binding (e.g. a hypothetical `__ctx`
+            // intrinsic), running the scrub AFTER `c.globals().set("__ctx", …)`
+            // would silently delete the host binding. By scrubbing FIRST and
+            // installing host bindings AFTER, the contract is robust against
+            // rquickjs upgrades that add new intrinsics.
             c.eval::<(), _>(
                 FORBIDDEN_GLOBALS_SCRUB.as_bytes().to_vec(),
             )
             .catch(&c)
             .map_err(|caught| caught_to_runtime_error(caught, &timed_out))?;
+
+            // Host binding install — AFTER the D-11 scrub.
+            c.globals()
+                .set("__ctx", ctx_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
             // 4b. D-05 Shape B: source MUST evaluate to a function. We wrap
             //     in an IIFE that returns either the call result or the
