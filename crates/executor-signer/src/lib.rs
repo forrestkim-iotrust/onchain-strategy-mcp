@@ -7,7 +7,7 @@ pub mod local;
 
 pub use config::LocalSignerConfig;
 pub use error::SignerError;
-pub use local::LocalSignerHandle;
+pub use local::{LocalExecutionReceipt, LocalPendingExecution, LocalReceiptStatus, LocalSignerHandle};
 
 use executor_core::schema::execution::SignedTransaction;
 
