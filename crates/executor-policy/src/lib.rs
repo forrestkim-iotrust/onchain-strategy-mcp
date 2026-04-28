@@ -16,9 +16,12 @@
 
 pub mod decision;
 pub mod error;
+pub mod eval;
 pub mod load;
 pub mod model;
 pub mod selector;
+
+pub use eval::evaluate;
 
 pub use decision::{Decision, DecisionVerdict, NormalizedActionKindCopy};
 pub use error::PolicyError;
