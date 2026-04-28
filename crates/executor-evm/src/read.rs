@@ -198,6 +198,10 @@ fn classify_provider_error(e: &dyn std::error::Error) -> EvmError {
         // Best-effort decode: scan for an embedded `0x08c379a0...` hex blob
         // and decode the abi-encoded `Error(string)`.
         let reason = try_extract_revert_reason(&raw).unwrap_or_else(|| "unknown".to_string());
+        // WR-04: revert reason is contract-controlled (attacker can craft any
+        // UTF-8 — newlines, ANSI escapes, fake taxonomy prefixes, multi-KiB).
+        // Strip control chars and cap length before letting it reach the wire.
+        let reason = sanitize_revert_reason(&reason);
         return EvmError::Revert {
             reason,
             detail_for_log: raw,
@@ -242,6 +246,34 @@ fn try_extract_revert_reason(raw: &str) -> Option<String> {
     String::from_utf8(data.to_vec()).ok()
 }
 
+/// WR-04: sanitize an attacker-controlled revert reason before embedding it in
+/// `EvmError::Revert.reason` (which reaches the wire via `Display`). Strips
+/// control characters (`\n`, `\r`, `\t`, ANSI ESC `\x1b`, plus any other
+/// C0/DEL byte) and caps length at 256 bytes (truncating with an ellipsis).
+/// Revert reasons are NOT trusted input — a malicious contract can revert
+/// with arbitrary UTF-8 including newlines and fake taxonomy prefixes.
+pub(crate) fn sanitize_revert_reason(s: &str) -> String {
+    const CAP: usize = 256;
+    let mut out = String::with_capacity(s.len().min(CAP));
+    for c in s.chars() {
+        // Reject ASCII control (\x00-\x1F including \n, \r, \t, ESC) and DEL.
+        if (c as u32) < 0x20 || c == '\x7f' {
+            continue;
+        }
+        out.push(c);
+    }
+    if out.len() > CAP {
+        // Truncate at a UTF-8 char boundary close to CAP.
+        let mut end = CAP;
+        while end > 0 && !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push('…');
+    }
+    out
+}
+
 fn hex_decode_loose(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -263,6 +295,36 @@ mod tests {
         {"type":"function","name":"number","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"},
         {"type":"function","name":"increment","inputs":[],"outputs":[],"stateMutability":"nonpayable"}
     ]"#;
+
+    #[test]
+    fn sanitize_revert_reason_strips_control_chars_and_caps_length() {
+        // Newlines, tabs, ANSI ESC are removed.
+        let dirty = "ERC20:\n insufficient\tbalance\x1b[31m red";
+        let clean = sanitize_revert_reason(dirty);
+        assert_eq!(clean, "ERC20: insufficientbalance[31m red");
+        assert!(!clean.contains('\n'));
+        assert!(!clean.contains('\r'));
+        assert!(!clean.contains('\t'));
+        assert!(!clean.contains('\x1b'));
+
+        // Long inputs get truncated with an ellipsis.
+        let long = "a".repeat(1000);
+        let clean = sanitize_revert_reason(&long);
+        assert!(clean.len() <= 256 + 4); // 256 bytes + 3-byte ellipsis
+        assert!(clean.ends_with('…'));
+
+        // Inputs ≤ 256 are not ellipsized.
+        let ok = "a".repeat(200);
+        let clean = sanitize_revert_reason(&ok);
+        assert_eq!(clean, ok);
+        assert!(!clean.ends_with('…'));
+
+        // Fake-taxonomy prefix is NOT stripped (it's still attacker-controlled
+        // text — the wire prefix `evm revert: ` distinguishes it from RPC
+        // errors). This is documented WR-04 behaviour.
+        let spoof = "transport";
+        assert_eq!(sanitize_revert_reason(spoof), "transport");
+    }
 
     #[test]
     fn read_contract_decode_error_when_abi_function_not_found() {
