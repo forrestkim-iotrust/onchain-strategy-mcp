@@ -464,6 +464,27 @@ fn validate_strategy_output(v: &serde_json::Value) -> Result<StrategyOutcome, St
                         .map_err(|e| format!("invalid action at index {i}: {e}"))
                 })
                 .collect::<Result<_, _>>()?;
+            // BR-02: D-08 mandates the 64 KiB ABI cap is enforced at BOTH
+            // builder time AND serde-deserialization (validate-strategy-output)
+            // time. The builder path runs `dry_run_abi_encode` inside
+            // `ctx.actions.contractCall`, but a strategy that hand-builds
+            // `{kind:"contract_call", abi:"...1 MiB..."}` bypasses the
+            // builder. Re-run `dry_run_abi_encode` here so the cap is
+            // enforced regardless of the construction path. Per MR-01
+            // carry-forward: the wire detail is the stable EvmError Display
+            // (e.g. `"evm encode error: abi_oversize"`) — never raw alloy /
+            // serde text.
+            for (i, action) in actions.iter().enumerate() {
+                if let Action::ContractCall(cc) = action {
+                    if let Err(e) = executor_evm::action::dry_run_abi_encode(
+                        &cc.abi,
+                        &cc.function,
+                        &cc.args,
+                    ) {
+                        return Err(format!("action[{i}] (contract_call): {e}"));
+                    }
+                }
+            }
             Ok(StrategyOutcome::Actions { actions })
         }
         other => Err(format!(

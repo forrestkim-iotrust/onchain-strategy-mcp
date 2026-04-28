@@ -1843,3 +1843,38 @@ async fn strategy_run_unknown_strategy_id_returns_not_found() -> Result<()> {
     proc.child.kill().await?;
     Ok(())
 }
+
+/// BR-02 regression: a strategy that hand-builds a `contract_call` action
+/// with an oversize `abi` string (1 MiB) MUST be rejected at the JSON-output
+/// gate (validate_strategy_output → dry_run_abi_encode), not just at builder
+/// time. Wire mapping: -32018 strategy_invalid_output with stable detail
+/// containing `abi_oversize` (the EvmError encode-category).
+#[tokio::test]
+async fn strategy_run_rejects_hand_built_oversize_abi() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    // Build an "abi" that is a JSON-string of a giant array. Hand-built —
+    // does NOT go through ctx.actions.contractCall (which would catch the
+    // cap at builder time). 1 MiB easily exceeds the 64 KiB cap.
+    let src = "(ctx) => {\n\
+              const big = '[' + new Array(70000).fill('null').join(',') + ']';\n\
+              return [{ kind: 'contract_call', \
+                        address: '0x0000000000000000000000000000000000000001', \
+                        abi: big, function: 'f', args: [], value: '0' }];\n\
+              }";
+    let strategy_id = seed_strategy(&db_path, "oversize", src)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("abi_oversize") || detail.contains("evm encode error"),
+        "expected stable abi_oversize detail, got: {detail}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
