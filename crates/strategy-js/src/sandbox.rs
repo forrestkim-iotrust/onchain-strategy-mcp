@@ -723,6 +723,26 @@ fn read_contract_host_binding<'js>(
         .to_string()?;
 
     let args_value: rquickjs::Value = args.get("args")?;
+    // WR-07: pre-walk args[] to detect BigInt at args[i] before
+    // `qjs_value_to_json` reaches it. The walker emits a generic "BigInt not
+    // supported in strategy RETURNS" message that's wrong for an INPUT path
+    // and lacks the D-03 builder-style hint about ctx.units.parseUnits(...).
+    if let Some(arr) = args_value.as_array() {
+        for i in 0..arr.len() {
+            let item: rquickjs::Value = arr
+                .get::<rquickjs::Value>(i)
+                .map_err(|e| throw_js_error(&ctx, &format!("args[{i}]: {e}")))?;
+            if matches!(item.type_of(), rquickjs::Type::BigInt) {
+                return Err(throw_js_error(
+                    &ctx,
+                    &format!(
+                        "args[{i}] must be a decimal string, got BigInt — use \
+                         ctx.units.parseUnits(...) to produce one"
+                    ),
+                ));
+            }
+        }
+    }
     let json_args = qjs_value_to_json(&args_value)
         .map_err(|e| throw_js_error(&ctx, &format!("args: {e}")))?;
     let args_arr: Vec<serde_json::Value> = match json_args {
