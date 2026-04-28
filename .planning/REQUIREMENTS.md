@@ -118,8 +118,8 @@
 | CTX-07 | Phase 4 | Closed |
 | CTX-08 | Phase 4 | Closed |
 | CTX-09 | Phase 4 | Closed |
-| EXE-01 | Phase 5 | Pending |
-| EXE-02 | Phase 5 | Pending |
+| EXE-01 | Phase 5 | In progress (05-01 added MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output; full sim/sign-gate wiring lands in 05-04) |
+| EXE-02 | Phase 5 | Closed (05-01 normalize_action per D-02 + shared encode_call_input + ERC20_WRITE_ABI; cargo test -p executor-evm --test normalize 11/11) |
 | EXE-03 | Phase 5 | Pending |
 | EXE-04 | Phase 5 | Pending |
 | EXE-05 | Phase 5 | Pending |

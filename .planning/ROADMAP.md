@@ -93,7 +93,7 @@ Plans:
 **Plans**: 4 plans
 
 Plans:
-- [ ] 05-01: Action-to-transaction normalization
+- [x] 05-01: Action-to-transaction normalization
 - [ ] 05-02: Simulation adapter and failure handling
 - [ ] 05-03: Policy model and deny-by-default evaluator
 - [ ] 05-04: Journaled decisions and MCP error reporting
@@ -138,7 +138,7 @@ Plans:
 | 1. MCP Runtime Surface | 3/3 | Complete | 2026-04-24 |
 | 2. Strategy State and Journal | 3/3 | Complete | 2026-04-26 |
 | 3. JavaScript Strategy Runner | 3/3 | Complete | 2026-04-27 |
-| 4. EVM Context and Actions | 0/4 | Not started | - |
-| 5. Simulation and Policy Gate | 0/4 | Not started | - |
+| 4. EVM Context and Actions | 4/4 | Complete | 2026-04-27 |
+| 5. Simulation and Policy Gate | 1/4 | In progress | - |
 | 6. Local Managed Execution | 0/3 | Not started | - |
 | 7. Examples, Tests, and Documentation | 0/3 | Not started | - |

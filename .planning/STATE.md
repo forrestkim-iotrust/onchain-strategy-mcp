@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 04 COMPLETE (4/4 plans); CTX-01..CTX-09 all closed
-last_updated: "2026-04-27T10:16:12Z"
+stopped_at: Phase 05 Plan 01 COMPLETE (executor-policy crate scaffolded alloy-free; encode_call_input + ERC20_WRITE_ABI extracted; normalize per D-02; MAX_ACTIONS_PER_RUN=32 cap)
+last_updated: "2026-04-27T11:00:00Z"
 last_activity: 2026-04-27
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 13
-  completed_plans: 13
+  total_plans: 14
+  completed_plans: 14
   percent: 100
 ---
 
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 04 (evm-context-and-actions) — COMPLETE
-Plan: 4 of 4 complete
-Status: Plan 04-04 closed (ctx.units + ctx.address + 15-test negative grid + 6 schema goldens — CTX-09 wired); Phase 4 fully delivered. CTX-01..CTX-09 all green; 349 workspace tests; HR-01/MR-01/MR-03/MR-04 carry-forward verified.
+Phase: 05 (simulation-and-policy-gate) — IN PROGRESS
+Plan: 1 of 4 complete
+Status: Plan 05-01 closed (executor-policy crate scaffolded alloy-FREE per D-20; encode_call_input shared between dry_run_abi_encode and normalize per D-03; ERC20_WRITE_ABI sibling per D-04; Action -> NormalizedAction normalize layer per D-02 table; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02 carry-forward). 388 workspace tests (was 349; +39 net); clippy strict clean; HR-01 sandbox regression green.
 Last activity: 2026-04-27
 
-Progress: [██████████] ~100% Phase-4 plans complete (4/4); next milestone is Phase 5 (simulation/policy/encoding).
+Progress: [██░░░░░░░░] 25% Phase-5 plans complete (1/4); next: 05-02 simulation adapter.
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [██████████] ~100% Phase-4 plans complete (4/4); n
 | Phase 03 P03 | ~12 min | 3 tasks | 3 created + 9 modified + 1 deleted |
 | Phase 04 P01 | ~30 min | 3 tasks | 14 created + 14 modified |
 | Phase 04 P02 | ~10 min | 2 tasks | 6 created + 3 modified |
+| Phase 05 P01 | ~25 min | 3 tasks | 9 created + 9 modified |
 
 ## Accumulated Context
 
@@ -114,6 +115,13 @@ Recent decisions affecting current work:
 - Plan 04-02: Helper positional shape is `(token, ...addresses, blockTag?)` — NOT options-object — to match REQUIREMENTS naming verbatim.
 - Plan 04-02: `BlockTag::to_block_id` made `pub` so `executor_evm::native` can translate the agent-facing tag enum into alloy `BlockId` for `get_balance.block_id(...)`.
 - Plan 04-02: Each helper records ONE `journal_source_reads` row with kind="evm_read", target="<lower_address>:<helper_function>", payload.helper = structured-form name (NOT alias name) — flat aliases produce identical journal target/payload for identical args.
+- Plan 05-01: executor-policy crate is alloy-FREE per D-20 (only `alloy-primitives` transitive via executor-core). Verified by `cargo tree -p executor-policy --depth 1 | grep -E '^alloy '` → 0 lines. Reverse dep (executor-evm → executor-policy) is also forbidden by Cargo.toml comment.
+- Plan 05-01: `encode_call_input(abi, function, args) -> Bytes` in dyn_abi.rs is the shared encoder; `dry_run_abi_encode` is a 1-line delegate that discards bytes (D-03). `validate_abi_size` lives INSIDE encode_call_input (refines plan literal interpretation; preserves abi_oversize taxonomy through both paths). Phase-4 negative-grid byte-for-byte preserved.
+- Plan 05-01: ERC20_WRITE_ABI is a SEPARATE sibling of ERC20_ABI (read-only). D-04 sibling-constants invariant: never extend one into the other. Selectors locked: transfer 0xa9059cbb, approve 0x095ea7b3.
+- Plan 05-01: `normalize_action(&Action) -> Result<Option<NormalizedAction>, EvmError>` returns `Ok(None)` for Noop. `tx.gas`/`nonce`/`chain_id` NOT set in Phase 5 (Phase 6 owns signer-side completion). `tx.from` NOT set (Plan 05-02 simulator owns).
+- Plan 05-01: normalize::parse_address_field re-wraps EvmError::Encode { category: bad_address } as bad_address_to so wire detail names the failing field at the normalize layer (vs the inner walker).
+- Plan 05-01: Erc20Transfer/Approve calldata uses original input strings (et.to / ea.spender) directly — js_value_to_dyn_sol accepts lowercase + EIP-55, so no lossy Address::Display round-trip needed (refines plan note in Sub-task 2.2).
+- Plan 05-01: MAX_ACTIONS_PER_RUN=32 enforced at validate_strategy_output BEFORE the per-element kind walk so a 1000-element noop array fails O(1) instead of O(n) (D-12 / D-18 / BR-02 carry-forward — cap at gate, not at builder).
 
 ### Pending Todos
 
@@ -123,9 +131,11 @@ Recent decisions affecting current work:
   - 04-02: ERC20 + native helpers + flat aliases (CTX-02/03/04)
   - 04-03: 5 Action variants + builders + validator widening + D-16 flip (CTX-05/06/07/08)
   - 04-04: ctx.units + ctx.address + 15-case negative grid + 6 schema goldens (CTX-09)
-- Workspace: 349 tests across 35 suites (was 275 after 04-03; +74 net for 04-04); clippy `--workspace --all-targets -- -D warnings` clean; sandbox_host_globals (HR-01 final regression) 8/8 green with the full Phase-4 ctx.* surface installed.
-- D-15 carry-forward (HR-01 / MR-01 / MR-03 / MR-04) all observably honoured across the four Phase-4 plans.
-- Next: Phase 5 (simulation / policy / canonical encoding).
+- Phase 5 IN PROGRESS (1/4 plans):
+  - 05-01: executor-policy crate scaffold (alloy-FREE) + Action -> NormalizedAction (D-02) + shared encode_call_input (D-03) + ERC20_WRITE_ABI (D-04) + MAX_ACTIONS_PER_RUN=32 cap (D-12 / BR-02 carry-forward). EXE-01 + EXE-02 demonstrable.
+- Workspace: 388 tests across 38 suites (was 349 after Phase 4; +39 net for 05-01: 13 executor-policy + 8 executor-evm lib + 11 normalize + 1 validation + ≥6 stdio); clippy `--workspace --all-targets -- -D warnings` clean; sandbox_host_globals (HR-01 regression) still green (no new ctx.* surface).
+- D-13 carry-forward (HR-01 / MR-01 / MR-03 / MR-04 / BR-01 / BR-02 / WR-01 / WR-04) observably honoured across Plan 05-01.
+- Next: Plan 05-02 (simulation adapter — executor-evm::simulate + sanitize_revert_reason promotion to pub per D-19).
 
 ### Blockers/Concerns
 
@@ -143,8 +153,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T10:16:12Z
-Stopped at: Phase 04 COMPLETE (4/4 plans). CTX-01..CTX-09 all closed. Workspace 349 tests / clippy clean. Ready for Phase 5.
+Last session: 2026-04-27T11:00:00Z
+Stopped at: Phase 05 Plan 01 COMPLETE. executor-policy crate scaffolded (alloy-FREE per D-20); Action -> NormalizedAction normalize layer per D-02; encode_call_input shared encoder per D-03; ERC20_WRITE_ABI sibling per D-04; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02. Workspace 388 tests / clippy clean. Ready for Plan 05-02.
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)
