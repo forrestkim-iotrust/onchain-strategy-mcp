@@ -11,8 +11,8 @@ use alloy_primitives::{Address, U256};
 use executor_core::schema::{
     action::Action,
     execution::{
-        ActionDecision, ExecutionGetResponse, ExecutionIdInput, GateVerdict, JournalActionOutcome,
-        RunStatus, StrategyOutcome, StrategyRunResponse,
+        ActionDecision, ExecutionActionReport, ExecutionGetResponse, ExecutionIdInput,
+        GateVerdict, JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
     },
     policy::PolicyUpdateInput,
     strategy::{
@@ -31,7 +31,7 @@ use executor_policy::{
 use executor_signer::{LocalSignerConfig, LocalSignerHandle};
 use executor_state::{
     DecisionGate, DecisionVerdict as JournalDecisionVerdict, RegisterOutcome, StateError,
-    StateStore, Strategy, StrategySummary,
+    ExecutionActionEntry, StateStore, Strategy, StrategySummary,
 };
 use rmcp::{
     ErrorData as McpError,
@@ -210,30 +210,9 @@ impl ExecutorServer {
         &self,
         Parameters(input): Parameters<ExecutionIdInput>,
     ) -> Result<CallToolResult, McpError> {
-        let run_id = input.execution_id.clone();
-        let state = self.state.clone();
-        let row = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.get_run(&run_id)
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-
-        match row {
-            None => Err(map_state_error(StateError::NotFound(format!(
-                "run {}",
-                input.execution_id
-            )))),
-            Some(r) => json_result(&ExecutionGetResponse {
-                run_id: r.id,
-                strategy_id: r.strategy_id,
-                status: r.status,
-                started_at: r.started_at,
-                finished_at: r.finished_at,
-                error: r.error,
-            }),
-        }
+        build_execution_report(self.state.clone(), input.execution_id)
+            .await
+            .and_then(|report| json_result(&report))
     }
 
     // ─────────── STILL-PLACEHOLDER TOOLS (Phase 5 / 6) ───────────
@@ -714,6 +693,67 @@ fn strategy_to_get_response(s: Strategy) -> StrategyGetResponse {
         created_at: s.created_at,
         deleted_at: s.deleted_at,
     }
+}
+
+pub(crate) async fn build_execution_report(
+    state: Arc<Mutex<StateStore>>,
+    run_id: String,
+) -> Result<ExecutionGetResponse, McpError> {
+    let lookup_run_id = run_id.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state.blocking_lock();
+        let run = store.get_run(&lookup_run_id)?;
+        let Some(run) = run else {
+            return Ok(None);
+        };
+        let executions = store.list_executions_for_run(&lookup_run_id)?;
+        Ok(Some((run, executions)))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let Some((run, execution_rows)) = result else {
+        return Err(map_state_error(StateError::NotFound(format!("run {run_id}"))));
+    };
+
+    let actions: Vec<ExecutionActionReport> = execution_rows
+        .into_iter()
+        .map(execution_action_to_report)
+        .collect::<Result<_, _>>()?;
+    Ok(ExecutionGetResponse {
+        run_id: run.id,
+        strategy_id: run.strategy_id,
+        status: run.status,
+        started_at: run.started_at,
+        finished_at: run.finished_at,
+        error: run.error,
+        signer_address: actions.first().map(|a| a.signer_address.clone()),
+        actions,
+    })
+}
+
+fn execution_action_to_report(
+    row: ExecutionActionEntry,
+) -> Result<ExecutionActionReport, McpError> {
+    let action_index = u32::try_from(row.action_index).map_err(|_| {
+        storage_error(format!(
+            "execution action index out of range for run {}: {}",
+            row.run_id, row.action_index
+        ))
+    })?;
+    Ok(ExecutionActionReport {
+        action_index,
+        signer_address: row.signer_address,
+        tx_hash: row.tx_hash,
+        status: row.status,
+        receipt_status: row.receipt_status,
+        gas_used: row.gas_used,
+        error_kind: row.error_kind,
+        error_detail: row.error_detail,
+        recorded_at: row.recorded_at,
+        updated_at: row.updated_at,
+    })
 }
 
 // ─────────── strategy_run helpers ───────────
