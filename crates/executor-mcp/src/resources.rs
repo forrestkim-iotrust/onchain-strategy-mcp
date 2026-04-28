@@ -31,7 +31,10 @@ use rmcp::{
 };
 use serde_json::json;
 
-use crate::errors::{map_state_error, storage_error};
+use crate::{
+    errors::{map_state_error, storage_error},
+    tools::build_execution_report,
+};
 
 fn make_template(
     uri_template: &str,
@@ -73,9 +76,9 @@ pub(crate) async fn list_resource_templates_impl(
                 "application/json",
             ),
             make_template(
-                "execution://{execution_id}",
+                "execution://{run_id}",
                 "execution",
-                "Execution report with status and receipt. Populated in Phase 6.",
+                "Receipt-backed execution report for the run ID returned by strategy_run.",
                 "application/json",
             ),
             make_template(
@@ -104,11 +107,9 @@ pub(crate) async fn read_resource_impl(
         let rid_owned = rid.to_string();
         return read_journal(uri, rid_owned, state).await;
     }
-    if uri.starts_with("execution://") {
-        return Err(McpError::resource_not_found(
-            format!("execution {uri} not found (Phase 6 wires receipts)"),
-            Some(json!({ "uri": uri, "phase": 6 })),
-        ));
+    if let Some(run_id) = uri.strip_prefix("execution://") {
+        let run_id = run_id.to_string();
+        return read_execution(uri, run_id, state).await;
     }
     Err(McpError::resource_not_found(
         format!("unsupported resource URI: {uri}"),
@@ -164,11 +165,27 @@ async fn read_strategy(
     }
 }
 
-async fn read_journal(
+async fn read_execution(
     uri: String,
     run_id: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
+    validate_run_resource_id(&uri, &run_id)?;
+    let report = build_execution_report(state, run_id).await.map_err(|err| {
+        if err.code.0 == -32014 {
+            McpError::resource_not_found(format!("run {uri} not found"), Some(json!({ "uri": uri })))
+        } else {
+            err
+        }
+    })?;
+    let body = serde_json::to_string(&report)
+        .map_err(|e| storage_error(format!("serialize execution: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body, uri).with_mime_type("application/json"),
+    ]))
+}
+
+fn validate_run_resource_id(uri: &str, run_id: &str) -> Result<(), McpError> {
     // Boundary check: ULID is 26 chars, alphanumeric (Crockford). Permissive
     // shape check matches the Phase-2 strategy:// posture.
     if run_id.len() != 26 || !run_id.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -177,6 +194,15 @@ async fn read_journal(
             Some(json!({ "uri": uri, "code": "malformed_id" })),
         ));
     }
+    Ok(())
+}
+
+async fn read_journal(
+    uri: String,
+    run_id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    validate_run_resource_id(&uri, &run_id)?;
 
     let rid_owned = run_id.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<_, StateError> {

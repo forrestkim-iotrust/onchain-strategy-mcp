@@ -221,7 +221,7 @@ async fn resources_surface_matches_contract() -> Result<()> {
         "missing strategy template; got {template_uris:?}"
     );
     assert!(
-        template_uris.contains(&"execution://{execution_id}"),
+        template_uris.contains(&"execution://{run_id}"),
         "missing execution template; got {template_uris:?}"
     );
     assert!(
