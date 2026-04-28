@@ -130,7 +130,7 @@ Note on naming: REQUIREMENTS uses `ctx.evm.erc20Balance` / `ctx.evm.erc20Allowan
   - **Version verification step (Plan 04-01 acceptance):** `cargo add alloy@2.0 --dry-run` then `cargo tree -p executor-evm | grep -E '^alloy v'` must show `2.0.x` (NOT 1.x). If a `2.0.2+` patch exists at planning time, take it (semver-compatible).
 
 - **D-02: New workspace member `crates/executor-evm/`.**
-  - **Why:** AGENTS.md line 36 lists `executor-evm/` as the target crate boundary. Strategy-js stays alloy-free (Phase 3 D-02 isolation rationale carries forward) — only host bindings live there, bodies delegate to executor-evm.
+  - **Why:** AGENTS.md line 36 lists `executor-evm/` as the target crate boundary. **Strategy-js source does not name `alloy` directly** (no `use alloy::*` in any strategy-js file) — Phase 3 D-02 isolation rationale carries forward. The dep graph DOES include alloy transitively via `executor-evm`, which re-exports `DynProvider`/`EvmError` for use in host-binding signatures; that re-export is zero-cost and is what D-02 actually means by "alloy stays out of strategy-js". Host bindings live in strategy-js but their bodies delegate every alloy interaction to executor-evm. (WR-02 review fix: prior wording "stays alloy-free" misread `cargo tree` as the contract; the contract is the source-level boundary.)
   - **Workspace `members` update:** root `Cargo.toml` adds `crates/executor-evm` to the existing list `["crates/executor-mcp", "crates/executor-core", "crates/executor-state", "crates/executor-signer", "crates/strategy-js"]`.
   - **Module layout** (Plan 04-01 lands the skeleton; later plans flesh out):
     ```
