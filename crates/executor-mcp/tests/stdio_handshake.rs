@@ -922,6 +922,14 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
         assert_eq!(body["strategy_id"].as_str(), Some(strategy_id.as_str()));
         assert_eq!(body["status"].as_str(), Some("queued"));
         assert!(
+            body["actions"].as_array().is_some_and(|a| a.is_empty()),
+            "runs without execution rows must return actions: []: {body}"
+        );
+        assert!(
+            body.get("signer_address").is_none_or(|v| v.is_null()),
+            "runs without execution rows must omit/null signer_address: {body}"
+        );
+        assert!(
             body["started_at"].as_str().is_some_and(|s| !s.is_empty()),
             "started_at must be a non-empty string: {body}"
         );
