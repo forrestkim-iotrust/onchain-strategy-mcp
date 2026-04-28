@@ -12,6 +12,7 @@
 
 use anyhow::{Context, Result};
 use executor_policy::{LoadedPolicy, PolicyError};
+use executor_signer::{LocalSignerConfig, SignerError};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -32,6 +33,32 @@ pub struct Config {
     /// loaded by `executor_policy::load_policy_from_path` at boot.
     #[serde(default)]
     pub policy: PolicyFileSection,
+    /// Phase 6 Plan 06-01: `[signer]` stores only the env-var name used later
+    /// at the signing boundary; config parsing never reads private-key values.
+    #[serde(default)]
+    pub signer: SignerSection,
+}
+
+/// `[signer]` section — stores a non-secret environment-variable reference.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SignerSection {
+    pub private_key_env: Option<String>,
+    #[serde(default = "default_receipt_timeout_ms")]
+    pub receipt_timeout_ms: u64,
+}
+
+fn default_receipt_timeout_ms() -> u64 {
+    120_000
+}
+
+impl Default for SignerSection {
+    fn default() -> Self {
+        Self {
+            private_key_env: None,
+            receipt_timeout_ms: default_receipt_timeout_ms(),
+        }
+    }
 }
 
 /// `[policy]` section — points at a TOML file consumed by
@@ -132,6 +159,14 @@ impl Config {
             self.evm.call_timeout_ms,
             &self.evm.simulation_from,
         )
+    }
+
+    /// Build a non-secret local signer config from `[signer]`, if configured.
+    pub fn signer_config(&self) -> Result<Option<LocalSignerConfig>, SignerError> {
+        let Some(env) = self.signer.private_key_env.as_deref() else {
+            return Ok(None);
+        };
+        LocalSignerConfig::new(env.to_string(), self.signer.receipt_timeout_ms).map(Some)
     }
 
     /// Plan 05-03 / D-15: load + parse + validate the policy file at
@@ -419,5 +454,59 @@ mod tests {
             toml::from_str::<Config>("[policy]\npath = \"/tmp/p.toml\"\nextra = true\n")
                 .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("extra"));
+    }
+
+    // ─────────── Phase 6 Plan 06-01 [signer] ───────────
+
+    #[test]
+    fn signer_section_absent_has_no_private_key_env() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.signer.private_key_env.is_none());
+        assert_eq!(cfg.signer.receipt_timeout_ms, 120_000);
+        assert!(matches!(cfg.signer_config(), Ok(None)));
+    }
+
+    #[test]
+    fn signer_section_path_propagates_env_name() {
+        let cfg: Config = toml::from_str(
+            "[signer]\nprivate_key_env = \"EXECUTOR_PRIVATE_KEY\"\nreceipt_timeout_ms = 42\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.signer.private_key_env.as_deref(),
+            Some("EXECUTOR_PRIVATE_KEY")
+        );
+        let signer = cfg.signer_config().unwrap().unwrap();
+        assert_eq!(signer.private_key_env, "EXECUTOR_PRIVATE_KEY");
+        assert_eq!(signer.receipt_timeout_ms, 42);
+    }
+
+    #[test]
+    fn signer_section_rejects_unknown_field() {
+        let err = toml::from_str::<Config>(
+            "[signer]\nprivate_key_env = \"EXECUTOR_PRIVATE_KEY\"\nextra = true\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("extra"));
+    }
+
+    #[test]
+    fn signer_config_does_not_default_to_anvil_key() {
+        let cfg = Config::default();
+        assert!(cfg.signer.private_key_env.is_none());
+        assert!(matches!(cfg.signer_config(), Ok(None)));
+    }
+
+    #[test]
+    fn signer_config_does_not_read_private_key_env_value() {
+        let cfg: Config = toml::from_str(
+            "[signer]\nprivate_key_env = \"EXECUTOR_PRIVATE_KEY\"\nreceipt_timeout_ms = 120000\n",
+        )
+        .unwrap();
+        let signer = cfg.signer_config().expect("does not read secret");
+        assert_eq!(
+            signer.unwrap().private_key_env,
+            "EXECUTOR_PRIVATE_KEY".to_string()
+        );
     }
 }
