@@ -119,7 +119,10 @@ async fn unimplemented_tools_return_phase_hint() -> Result<()> {
             "tool {tool}: expected code {EXPECTED_UNIMPL_CODE}, got {}",
             err["code"]
         );
-        assert_eq!(err["data"]["code"], "unimplemented", "tool {tool}: data.code");
+        assert_eq!(
+            err["data"]["code"], "unimplemented",
+            "tool {tool}: data.code"
+        );
         assert_eq!(
             err["data"]["phase"], expected_phase,
             "tool {tool}: expected phase {expected_phase}, got {}",
@@ -295,9 +298,7 @@ async fn prompts_surface_matches_contract() -> Result<()> {
     )
     .await?;
     let r = recv(&mut proc).await?;
-    let messages = r["result"]["messages"]
-        .as_array()
-        .expect("messages array");
+    let messages = r["result"]["messages"].as_array().expect("messages array");
     assert!(
         !messages.is_empty(),
         "write_evm_strategy returned no messages"
@@ -318,9 +319,7 @@ async fn prompts_surface_matches_contract() -> Result<()> {
     )
     .await?;
     let r = recv(&mut proc).await?;
-    let messages = r["result"]["messages"]
-        .as_array()
-        .expect("messages array");
+    let messages = r["result"]["messages"].as_array().expect("messages array");
     assert!(
         !messages.is_empty(),
         "review_evm_strategy returned no messages"
@@ -360,10 +359,7 @@ async fn stdout_is_strict_jsonrpc() -> Result<()> {
         )
         .await?;
         let r = recv(&mut proc).await?;
-        assert_eq!(
-            r["jsonrpc"], "2.0",
-            "method {method}: missing jsonrpc:2.0"
-        );
+        assert_eq!(r["jsonrpc"], "2.0", "method {method}: missing jsonrpc:2.0");
         assert_eq!(r["id"], id, "method {method}: id mismatch");
     }
 
@@ -434,9 +430,9 @@ async fn schema_contract_round_trip() -> Result<()> {
 
 // ─────────── Plan 02-02: Phase 2 strategy behaviours (D-08a) ───────────
 
-use common::{call_tool, extract_json_result, spawn_server_with_state};
 #[cfg(feature = "anvil-tests")]
 use common::spawn_server_with_config_text;
+use common::{call_tool, extract_json_result, spawn_server_with_state};
 
 #[tokio::test]
 async fn strategy_register_creates_row() -> Result<()> {
@@ -687,13 +683,7 @@ async fn strategy_get_by_id_returns_source() -> Result<()> {
         .unwrap()
         .to_string();
 
-    let g = call_tool(
-        &mut proc,
-        3,
-        "strategy_get",
-        json!({ "strategy_id": id }),
-    )
-    .await?;
+    let g = call_tool(&mut proc, 3, "strategy_get", json!({ "strategy_id": id })).await?;
     let body = extract_json_result(&g);
     assert_eq!(body["source"], src);
 
@@ -775,13 +765,7 @@ async fn strategy_delete_is_soft_and_idempotent() -> Result<()> {
     assert_eq!(d2["deleted_at"].as_str().unwrap(), deleted_at_1);
 
     // get_by_id still returns the row, with deleted_at populated.
-    let g = call_tool(
-        &mut proc,
-        5,
-        "strategy_get",
-        json!({ "strategy_id": id }),
-    )
-    .await?;
+    let g = call_tool(&mut proc, 5, "strategy_get", json!({ "strategy_id": id })).await?;
     let body = extract_json_result(&g);
     assert_eq!(body["deleted_at"].as_str().unwrap(), deleted_at_1);
 
@@ -929,9 +913,7 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
         assert_eq!(body["strategy_id"].as_str(), Some(strategy_id.as_str()));
         assert_eq!(body["status"].as_str(), Some("queued"));
         assert!(
-            body["started_at"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty()),
+            body["started_at"].as_str().is_some_and(|s| !s.is_empty()),
             "started_at must be a non-empty string: {body}"
         );
         assert!(
@@ -992,9 +974,7 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
         let body = extract_json_result(&r);
         assert_eq!(body["status"].as_str(), Some("succeeded"));
         assert!(
-            body["finished_at"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty()),
+            body["finished_at"].as_str().is_some_and(|s| !s.is_empty()),
             "finished_at must be populated on terminal status: {body}"
         );
         proc.child.kill().await?;
@@ -1016,8 +996,7 @@ async fn run_status_schema_includes_future_variants() -> Result<()> {
     // arrays AND `const` fields, then asserts the full 7-variant set is
     // present.
     let path = std::path::Path::new("../executor-core/tests/schemas/RunStatus.json");
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
     let v: Value = serde_json::from_str(&text)?;
 
     fn collect_strings(v: &Value, out: &mut std::collections::BTreeSet<String>) {
@@ -1090,9 +1069,8 @@ async fn strategies_persist_across_restart() -> Result<()> {
     {
         let mut proc2 = spawn_server_with_state(&db_path_str).await?;
         let _ = initialize(&mut proc2).await?;
-        let body = extract_json_result(
-            &call_tool(&mut proc2, 2, "strategy_list", json!({})).await?,
-        );
+        let body =
+            extract_json_result(&call_tool(&mut proc2, 2, "strategy_list", json!({})).await?);
         let items = body["strategies"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "persist");
@@ -1133,11 +1111,7 @@ fn write_permissive_policy(contracts: &[&str]) -> Result<tempfile::NamedTempFile
         .join("\n");
     let selector_entries = contracts
         .iter()
-        .map(|addr| {
-            format!(
-                "[selectors.\"31337:{addr}\"]\nallow = [\"any\"]\n"
-            )
-        })
+        .map(|addr| format!("[selectors.\"31337:{addr}\"]\nallow = [\"any\"]\n"))
         .collect::<Vec<_>>()
         .join("\n");
     let raw_allow = contracts
@@ -1204,7 +1178,13 @@ async fn strategy_run_returns_noop_for_minimal_strategy() -> Result<()> {
 
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     assert_eq!(body["status"].as_str(), Some("succeeded"));
     assert_eq!(body["outcome"]["kind"].as_str(), Some("noop"));
@@ -1235,10 +1215,18 @@ async fn strategy_run_returns_actions_for_action_array_strategy() -> Result<()> 
 
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
-    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    let actions = body["outcome"]["actions"]
+        .as_array()
+        .expect("actions array");
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0]["kind"].as_str(), Some("noop"));
     proc.child.kill().await?;
@@ -1254,7 +1242,13 @@ async fn strategy_run_returns_actions_for_empty_array() -> Result<()> {
 
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
     assert_eq!(body["outcome"]["actions"].as_array().unwrap().len(), 0);
@@ -1270,12 +1264,29 @@ async fn strategy_run_rejects_number_return() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "num", "(ctx) => 42")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope present");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
-    assert!(err["data"]["detail"].as_str().is_some_and(|s| s.contains("number")));
-    assert!(err["data"]["run_id"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
+    assert!(
+        err["data"]["detail"]
+            .as_str()
+            .is_some_and(|s| s.contains("number"))
+    );
+    assert!(
+        err["data"]["run_id"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty())
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1288,10 +1299,19 @@ async fn strategy_run_rejects_object_return() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "obj", "(ctx) => ({foo: 1})")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1304,10 +1324,19 @@ async fn strategy_run_rejects_null_return() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "n", "(ctx) => null")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1320,12 +1349,24 @@ async fn strategy_run_rejects_promise_return() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "p", "(ctx) => Promise.resolve(\"noop\")")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
-    assert!(detail.contains("promise"), "detail missing 'promise': {detail}");
+    assert!(
+        detail.contains("promise"),
+        "detail missing 'promise': {detail}"
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1339,10 +1380,19 @@ async fn strategy_run_rejects_non_function_source() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "nonfn", "\"noop\"")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
     assert!(
         detail.contains("function") || detail.contains("(ctx)"),
@@ -1379,11 +1429,19 @@ async fn strategy_run_accepts_contract_call() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "cc_accept", &source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     assert_eq!(body["status"].as_str(), Some("succeeded"));
     assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
-    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    let actions = body["outcome"]["actions"]
+        .as_array()
+        .expect("actions array");
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0]["kind"].as_str(), Some("contract_call"));
     proc.child.kill().await?;
@@ -1403,10 +1461,18 @@ async fn strategy_run_accepts_raw_call() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "rc_accept", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
-    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    let actions = body["outcome"]["actions"]
+        .as_array()
+        .expect("actions array");
     assert_eq!(actions[0]["kind"].as_str(), Some("raw_call"));
     assert_eq!(actions[0]["data"].as_str(), Some("0xdeadbeef"));
     proc.child.kill().await?;
@@ -1427,9 +1493,17 @@ async fn strategy_run_accepts_erc20_transfer() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "erc20t_accept", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
-    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    let actions = body["outcome"]["actions"]
+        .as_array()
+        .expect("actions array");
     assert_eq!(actions[0]["kind"].as_str(), Some("erc20_transfer"));
     assert_eq!(actions[0]["amount"].as_str(), Some("1000"));
     proc.child.kill().await?;
@@ -1450,11 +1524,22 @@ async fn strategy_run_accepts_erc20_approve() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "erc20a_accept", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
-    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    let actions = body["outcome"]["actions"]
+        .as_array()
+        .expect("actions array");
     assert_eq!(actions[0]["kind"].as_str(), Some("erc20_approve"));
-    assert_eq!(actions[0]["spender"].as_str(), Some("0x0000000000000000000000000000000000000003"));
+    assert_eq!(
+        actions[0]["spender"].as_str(),
+        Some("0x0000000000000000000000000000000000000003")
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1472,21 +1557,22 @@ async fn strategy_run_accepts_native_transfer() -> Result<()> {
     let _ = db_path_str;
     let strategy_id = seed_strategy(&db_path, "nt_accept", source)?;
     let policy = write_permissive_policy(&["0x0000000000000000000000000000000000000002"])?;
-    let mut proc = spawn_server_with_policy_and_rpc(
-        &db_path,
-        policy.path(),
-        "http://127.0.0.1:8545",
+    let mut proc =
+        spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
     )
     .await?;
-    let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
     let body = extract_json_result(&r);
-    let actions = body["outcome"]["actions"].as_array().expect("actions array");
+    let actions = body["outcome"]["actions"]
+        .as_array()
+        .expect("actions array");
     assert_eq!(actions[0]["kind"].as_str(), Some("native_transfer"));
-    assert_eq!(
-        actions[0]["value"].as_str(),
-        Some("1000000000000000000")
-    );
+    assert_eq!(actions[0]["value"].as_str(), Some("1000000000000000000"));
     proc.child.kill().await?;
     Ok(())
 }
@@ -1514,10 +1600,19 @@ async fn strategy_run_rejects_contract_call_with_bad_address() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "cc_reject", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
     assert!(
         detail.contains("unknown field") || detail.contains("gas"),
@@ -1552,10 +1647,19 @@ async fn strategy_run_rejects_contract_call_with_unknown_field() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "cc_unknown", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
     assert!(
         detail.contains("unknown field") || detail.contains("unknown_extra_field"),
@@ -1587,10 +1691,19 @@ async fn strategy_run_rejects_raw_call_with_unknown_field() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "rc_unknown", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
     assert!(
         detail.contains("unknown field") || detail.contains("gas_limit"),
@@ -1618,7 +1731,13 @@ async fn strategy_run_rejects_erc20_transfer_via_builder_with_bigint_amount() ->
     let strategy_id = seed_strategy(&db_path, "erc20t_bigint", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32017));
     assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
@@ -1652,10 +1771,19 @@ async fn strategy_run_rejects_erc20_approve_with_unknown_field() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "erc20a_unknown", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
     assert!(
         detail.contains("unknown field") || detail.contains("deadline"),
@@ -1678,7 +1806,13 @@ async fn strategy_run_rejects_native_transfer_via_builder_with_negative_value() 
     let strategy_id = seed_strategy(&db_path, "nt_negative", source)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32017));
     assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
@@ -1704,14 +1838,22 @@ async fn strategy_run_rejects_unknown_action_kind() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("state.db");
     let db_path_str = db_path.to_string_lossy().to_string();
-    let strategy_id =
-        seed_strategy(&db_path, "p5", "(ctx) => [{kind:\"multi_call\"}]")?;
+    let strategy_id = seed_strategy(&db_path, "p5", "(ctx) => [{kind:\"multi_call\"}]")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or("").to_lowercase();
     assert!(
         detail.contains("multi_call") || detail.contains("not allowed in phase 4"),
@@ -1721,21 +1863,136 @@ async fn strategy_run_rejects_unknown_action_kind() -> Result<()> {
     Ok(())
 }
 
+async fn assert_no_policy_rejects_action(name: &str, source: &str) -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let strategy_id = seed_strategy(&db_path, name, source)?;
+
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
+    assert_eq!(err["data"]["kind"].as_str(), Some("policy_not_loaded"));
+    let run_id = err["data"]["run_id"].as_str().expect("run_id present");
+    proc.child.kill().await?;
+
+    let store = executor_state::StateStore::open(&db_path)?;
+    let run = store.get_run(run_id)?.expect("run row exists");
+    assert_eq!(
+        run.status,
+        executor_core::schema::execution::RunStatus::PolicyDenied
+    );
+    assert!(
+        run.finished_at.is_some(),
+        "PolicyDenied no-policy rejection must populate finished_at"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_no_policy_rejects_raw_call() -> Result<()> {
+    assert_no_policy_rejects_action(
+        "no_policy_raw",
+        r#"(ctx) => [{
+            kind: "raw_call",
+            address: "0x0000000000000000000000000000000000000001",
+            data: "0xdeadbeef",
+            value: "0"
+        }]"#,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_no_policy_rejects_contract_call() -> Result<()> {
+    assert_no_policy_rejects_action(
+        "no_policy_contract",
+        r#"(ctx) => [{
+            kind: "contract_call",
+            address: "0x0000000000000000000000000000000000000001",
+            abi: "[{\"type\":\"function\",\"name\":\"f\",\"inputs\":[],\"outputs\":[],\"stateMutability\":\"nonpayable\"}]",
+            function: "f",
+            args: [],
+            value: "0"
+        }]"#,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_no_policy_rejects_erc20_transfer() -> Result<()> {
+    assert_no_policy_rejects_action(
+        "no_policy_transfer",
+        r#"(ctx) => [{
+            kind: "erc20_transfer",
+            token: "0x0000000000000000000000000000000000000001",
+            to: "0x0000000000000000000000000000000000000002",
+            amount: "1000"
+        }]"#,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_no_policy_rejects_erc20_approve() -> Result<()> {
+    assert_no_policy_rejects_action(
+        "no_policy_approve",
+        r#"(ctx) => [{
+            kind: "erc20_approve",
+            token: "0x0000000000000000000000000000000000000001",
+            spender: "0x0000000000000000000000000000000000000003",
+            amount: "0"
+        }]"#,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_no_policy_rejects_native_transfer() -> Result<()> {
+    assert_no_policy_rejects_action(
+        "no_policy_native",
+        r#"(ctx) => [{
+            kind: "native_transfer",
+            to: "0x0000000000000000000000000000000000000002",
+            value: "1"
+        }]"#,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn strategy_run_runtime_error_on_throw() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("state.db");
     let db_path_str = db_path.to_string_lossy().to_string();
-    let strategy_id =
-        seed_strategy(&db_path, "throw", "(ctx) => { throw new Error(\"nope\"); }")?;
+    let strategy_id = seed_strategy(&db_path, "throw", "(ctx) => { throw new Error(\"nope\"); }")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32017));
     assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
     assert_eq!(err["data"]["kind"].as_str(), Some("exception"));
-    assert!(err["data"]["detail"].as_str().is_some_and(|s| s.contains("nope")));
+    assert!(
+        err["data"]["detail"]
+            .as_str()
+            .is_some_and(|s| s.contains("nope"))
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1751,7 +2008,12 @@ async fn strategy_run_runtime_error_on_infinite_loop() -> Result<()> {
     // Wall-clock budget is 2s; allow ~5s for spawn + JSON-RPC overhead.
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(8),
-        call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })),
+        call_tool(
+            &mut proc,
+            2,
+            "strategy_run",
+            json!({ "strategy_id": strategy_id }),
+        ),
     )
     .await??;
     let err = r.get("error").expect("error envelope");
@@ -1772,7 +2034,12 @@ async fn strategy_run_runtime_error_on_oom() -> Result<()> {
     let _ = initialize(&mut proc).await?;
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(8),
-        call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })),
+        call_tool(
+            &mut proc,
+            2,
+            "strategy_run",
+            json!({ "strategy_id": strategy_id }),
+        ),
     )
     .await??;
     let err = r.get("error").expect("error envelope");
@@ -1793,11 +2060,16 @@ async fn strategy_run_runtime_error_on_stack_overflow() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("state.db");
     let db_path_str = db_path.to_string_lossy().to_string();
-    let strategy_id =
-        seed_strategy(&db_path, "stack", "(ctx) => { function f(){f();} f(); }")?;
+    let strategy_id = seed_strategy(&db_path, "stack", "(ctx) => { function f(){f();} f(); }")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32017));
     let kind = err["data"]["kind"].as_str().unwrap_or("");
@@ -1828,7 +2100,13 @@ async fn strategy_run_rejects_deleted_strategy() -> Result<()> {
     };
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32011));
     assert_eq!(err["data"]["code"].as_str(), Some("strategy_deleted"));
@@ -1844,7 +2122,13 @@ async fn strategy_run_records_source_read_journal_row() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "src", "(ctx) => \"noop\"")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     let run_id = body["run_id"].as_str().unwrap().to_string();
     proc.child.kill().await?;
@@ -1866,7 +2150,13 @@ async fn strategy_run_records_log_messages() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "logs", src)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let body = extract_json_result(&r);
     let run_id = body["run_id"].as_str().unwrap().to_string();
     proc.child.kill().await?;
@@ -1879,8 +2169,14 @@ async fn strategy_run_records_log_messages() -> Result<()> {
     // guaranteed by `Ulid::new()`, so assert membership rather than order.
     let messages: std::collections::HashSet<String> =
         logs.iter().map(|l| l.message.clone()).collect();
-    assert!(messages.contains("hello 42"), "missing 'hello 42'; got {messages:?}");
-    assert!(messages.contains("world"), "missing 'world'; got {messages:?}");
+    assert!(
+        messages.contains("hello 42"),
+        "missing 'hello 42'; got {messages:?}"
+    );
+    assert!(
+        messages.contains("world"),
+        "missing 'world'; got {messages:?}"
+    );
     Ok(())
 }
 
@@ -1889,19 +2185,30 @@ async fn strategy_run_run_row_status_transitions_to_failed_on_error() -> Result<
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("state.db");
     let db_path_str = db_path.to_string_lossy().to_string();
-    let strategy_id =
-        seed_strategy(&db_path, "fail", "(ctx) => { throw new Error(\"bad\"); }")?;
+    let strategy_id = seed_strategy(&db_path, "fail", "(ctx) => { throw new Error(\"bad\"); }")?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     let run_id = err["data"]["run_id"].as_str().unwrap().to_string();
     proc.child.kill().await?;
 
     let store = executor_state::StateStore::open(&db_path)?;
     let run = store.get_run(&run_id)?.expect("run row exists");
-    assert_eq!(run.status, executor_core::schema::execution::RunStatus::Failed);
-    assert!(run.finished_at.is_some(), "finished_at must be populated on failed runs");
+    assert_eq!(
+        run.status,
+        executor_core::schema::execution::RunStatus::Failed
+    );
+    assert!(
+        run.finished_at.is_some(),
+        "finished_at must be populated on failed runs"
+    );
     Ok(())
 }
 
@@ -1912,7 +2219,13 @@ async fn strategy_run_invalid_strategy_id_format_returns_invalid_params() -> Res
     let db_path_str = db_path.to_string_lossy().to_string();
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": "ZZZ" })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": "ZZZ" }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32602));
     assert_eq!(err["data"]["code"].as_str(), Some("invalid_params"));
@@ -1928,7 +2241,13 @@ async fn strategy_run_unknown_strategy_id_returns_not_found() -> Result<()> {
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
     let strategy_id = "a".repeat(64);
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32014));
     assert_eq!(err["data"]["code"].as_str(), Some("not_found"));
@@ -1943,6 +2262,53 @@ async fn strategy_run_unknown_strategy_id_returns_not_found() -> Result<()> {
 /// constructed in production — every EVM error became `RuntimeError::Exception`
 /// and the taxonomy upgrade was decorative. Fix: `classify_message` now
 /// re-classifies stable EvmError prefixes back into `RuntimeError::Evm(_)`.
+#[cfg(feature = "anvil-tests")]
+#[tokio::test]
+async fn strategy_run_normalization_failure_after_running_is_terminal() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let policy = write_permissive_policy(&["0x0000000000000000000000000000000000000001"])?;
+    let src = r#"(ctx) => [{
+        kind: "raw_call",
+        address: "not-an-address",
+        data: "0xdeadbeef",
+        value: "0"
+    }]"#;
+    let strategy_id = seed_strategy(&db_path, "bad_normalize", src)?;
+    let mut proc =
+        spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    let run_id = err["data"]["run_id"]
+        .as_str()
+        .expect("run_id present")
+        .to_string();
+    proc.child.kill().await?;
+
+    let store = executor_state::StateStore::open(&db_path)?;
+    let run = store.get_run(&run_id)?.expect("run row exists");
+    assert_eq!(
+        run.status,
+        executor_core::schema::execution::RunStatus::Failed,
+        "normalization failure after Running must not leave the run running"
+    );
+    assert!(
+        run.finished_at.is_some(),
+        "terminal failure must set finished_at"
+    );
+    let actions = store.list_actions_for_run(&run_id)?;
+    assert_eq!(actions.len(), 1, "normalization error must be journaled");
+    Ok(())
+}
+
 #[tokio::test]
 async fn strategy_run_evm_error_surfaces_typed_data_kind() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1960,7 +2326,13 @@ async fn strategy_run_evm_error_surfaces_typed_data_kind() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "evm_typed", src)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     // -32017 = STRATEGY_RUNTIME_ERROR; data.kind must be a typed evm_*
     // value, NOT "exception".
@@ -1970,7 +2342,10 @@ async fn strategy_run_evm_error_surfaces_typed_data_kind() -> Result<()> {
         matches!(kind, "evm_decode_error" | "evm_rpc_error" | "evm_revert"),
         "expected typed evm_* data.kind, got: {kind}"
     );
-    assert_ne!(kind, "exception", "BR-01 regressed: data.kind is generic 'exception'");
+    assert_ne!(
+        kind, "exception",
+        "BR-01 regressed: data.kind is generic 'exception'"
+    );
     proc.child.kill().await?;
     Ok(())
 }
@@ -1997,10 +2372,19 @@ async fn strategy_run_rejects_hand_built_oversize_abi() -> Result<()> {
     let strategy_id = seed_strategy(&db_path, "oversize", src)?;
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("abi_oversize") || detail.contains("evm encode error"),
@@ -2037,7 +2421,10 @@ async fn strategy_run_caps_action_array_length_at_32() -> Result<()> {
     .await?;
     let err = r.get("error").expect("error envelope");
     assert_eq!(err["code"].as_i64(), Some(-32018));
-    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    assert_eq!(
+        err["data"]["code"].as_str(),
+        Some("strategy_invalid_output")
+    );
     let detail = err["data"]["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("MAX_ACTIONS_PER_RUN 32"),
