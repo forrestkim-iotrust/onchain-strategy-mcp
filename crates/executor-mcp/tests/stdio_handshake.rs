@@ -17,6 +17,14 @@
 mod common;
 
 use anyhow::Result;
+#[cfg(feature = "anvil-tests")]
+use alloy::network::TransactionBuilder;
+#[cfg(feature = "anvil-tests")]
+use alloy::providers::Provider;
+#[cfg(feature = "anvil-tests")]
+use alloy::rpc::types::TransactionRequest;
+#[cfg(feature = "anvil-tests")]
+use alloy_primitives::Address;
 use serde_json::{Value, json};
 
 use common::{initialize, recv, send, spawn_server};
@@ -1101,6 +1109,12 @@ fn seed_strategy(db_path: &std::path::Path, name: &str, source: &str) -> Result<
     Ok(id)
 }
 
+fn write_policy(toml: &str) -> Result<tempfile::NamedTempFile> {
+    let policy = tempfile::NamedTempFile::new()?;
+    std::fs::write(policy.path(), toml)?;
+    Ok(policy)
+}
+
 #[cfg(feature = "anvil-tests")]
 fn write_permissive_policy(contracts: &[&str]) -> Result<tempfile::NamedTempFile> {
     let policy = tempfile::NamedTempFile::new()?;
@@ -1145,7 +1159,6 @@ allow = [
     Ok(policy)
 }
 
-#[cfg(feature = "anvil-tests")]
 async fn spawn_server_with_policy_and_rpc(
     db_path: &std::path::Path,
     policy_path: &std::path::Path,
@@ -2467,49 +2480,115 @@ async fn strategy_run_accepts_action_array_length_32() -> Result<()> {
     Ok(())
 }
 
-// ─────────── Phase 5 Plan 05-02 / D-08 / EXE-04 ───────────
+// ─────────── Phase 5 Plan 05-05: gap closure ───────────
 
-/// Phase 5 D-08 / EXE-04 — registered in Plan 05-02; **enabled in Plan 05-04**
-/// once `tools::strategy_run` wires the simulation gate. The orchestration
-/// plumbing does not exist yet (Plan 05-02 only ships the adapter +
-/// `map_simulation_error` factory), so this test is `#[ignore]` until 05-04
-/// lands. Plan 05-04 will:
-///   1. Remove the `#[ignore]`.
-///   2. Replace this stub body with a real anvil-gated end-to-end assertion
-///      (deploy `revert_counter.hex`, register a strategy returning a single
-///      `contract_call` to it, expect `-32017` + `data.kind == "simulation_failure"`
-///      + `data.action_index == 0` + sanitized `data.decoded_revert`).
-///
-/// The reason for landing the registered stub here (not in Plan 05-04 only):
-/// keeps the cross-plan test inventory visible at `cargo test -- --list` so
-/// the gate test is never silently forgotten.
 #[cfg(feature = "anvil-tests")]
-#[ignore = "enabled by Plan 05-04 — needs tools::strategy_run sim wiring"]
+const REVERT_BYTECODE: &str = include_str!("../../executor-evm/tests/fixtures/revert_counter.hex");
+
+#[cfg(feature = "anvil-tests")]
+async fn deploy_bytecode_for_stdio(
+    provider: &std::sync::Arc<executor_evm::DynProvider>,
+    deployer: Address,
+    bytecode_hex: &str,
+) -> Address {
+    let stripped = bytecode_hex
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| bytecode_hex.trim().strip_prefix("0X"))
+        .unwrap_or(bytecode_hex.trim());
+    let padded;
+    let stripped = if stripped.len() % 2 == 0 {
+        stripped
+    } else {
+        padded = format!("0{stripped}");
+        padded.as_str()
+    };
+    let bytecode = hex::decode(stripped).expect("hex bytecode");
+    let tx = TransactionRequest::default()
+        .with_from(deployer)
+        .with_deploy_code(bytecode);
+    let pending = provider.send_transaction(tx).await.expect("send deploy tx");
+    let receipt = pending.get_receipt().await.expect("deploy receipt");
+    receipt
+        .contract_address
+        .expect("deploy receipt has contract_address")
+}
+
+fn assert_policy_violation(err: &Value, rule: &str) {
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
+    assert_eq!(err["data"]["kind"].as_str(), Some("policy_violation"));
+    assert_eq!(err["data"]["rule"].as_str(), Some(rule));
+}
+
+async fn read_journal_resource(proc: &mut common::ServerProc, id: u64, run_id: &str) -> Result<Value> {
+    send(
+        proc,
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "resources/read",
+            "params": { "uri": format!("journal://{run_id}") }
+        }),
+    )
+    .await?;
+    let resp = recv(proc).await?;
+    let text = resp["result"]["contents"][0]["text"]
+        .as_str()
+        .expect("journal contents text");
+    Ok(serde_json::from_str(text)?)
+}
+
+#[cfg(feature = "anvil-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn strategy_run_returns_simulation_failed_when_revert() -> Result<()> {
-    // Setup (Plan 05-04 fills this in):
-    //   - spawn anvil
-    //   - deploy revert_counter.hex via anvil[0]
-    //   - register a strategy that returns
-    //     [{ kind: "contract_call",
-    //        address: <revert_counter>,
-    //        abi: REVERT_ABI,
-    //        function: "anything",
-    //        args: [],
-    //        value: "0" }]
-    //   - configure policy.toml as permissive (allows the chain, contract,
-    //     selector — POL-* gates pass so the simulation gate is the one
-    //     producing the denial).
-    //
-    // Expected wire (Plan 05-04 wires the path that produces this):
-    //   error.code = -32017 STRATEGY_RUNTIME_ERROR
-    //   error.data.kind = "simulation_failure"   (NOT "exception" — BR-01)
-    //   error.data.fail_reason = "revert"
-    //   error.data.action_index = 0
-    //   error.data.decoded_revert = (sanitized string OR null)
-    //
-    // The assertion code path is exercised by the Plan 05-02 lib tests
-    // `errors::sim_factory_tests::map_simulation_error_for_revert_emits_simulation_failure_kind`;
-    // this stdio test proves the wire path end-to-end once 05-04 wires it.
-    panic!("test body filled in by Plan 05-04 — currently #[ignore]'d");
+    let Some(fixture) = alloy::node_bindings::Anvil::new()
+        .chain_id(31337)
+        .try_spawn()
+        .ok()
+    else {
+        return Ok(());
+    };
+    let funded_accounts = fixture.addresses().to_vec();
+    if funded_accounts.is_empty() {
+        return Ok(());
+    }
+    let rpc_url = fixture.endpoint_url();
+    let cfg = executor_evm::EvmConfig {
+        rpc_url: rpc_url.clone(),
+        ..executor_evm::EvmConfig::default()
+    };
+    let provider = executor_evm::build_provider(&cfg)?;
+    let revert_addr = deploy_bytecode_for_stdio(&provider, funded_accounts[0], REVERT_BYTECODE).await;
+    let revert_addr_s = revert_addr.to_string();
+
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let policy = write_permissive_policy(&[revert_addr_s.as_str()])?;
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "raw_call",
+            address: "{revert_addr_s}",
+            data: "0x00000000",
+            value: "0"
+        }}]"#
+    );
+    let strategy_id = seed_strategy(&db_path, "sim_revert_stdio", &source)?;
+    let mut proc = spawn_server_with_policy_and_rpc(&db_path, policy.path(), rpc_url.as_str()).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope present");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_runtime_error"));
+    assert_eq!(err["data"]["kind"].as_str(), Some("simulation_failure"));
+    assert_eq!(err["data"]["action_index"].as_i64(), Some(0));
+    assert_eq!(err["data"]["fail_reason"].as_str(), Some("revert"));
+    assert_ne!(err["data"]["kind"].as_str(), Some("exception"));
+    assert_ne!(err["data"]["kind"].as_str(), Some("policy_violation"));
+    proc.child.kill().await?;
+    Ok(())
 }

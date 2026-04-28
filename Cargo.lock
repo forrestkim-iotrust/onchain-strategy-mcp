@@ -1632,6 +1632,7 @@ dependencies = [
 name = "executor-mcp"
 version = "0.1.0"
 dependencies = [
+ "alloy",
  "alloy-primitives",
  "anyhow",
  "executor-core",
