@@ -76,6 +76,28 @@ CREATE TABLE IF NOT EXISTS journal_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_journal_logs_run_id
     ON journal_logs(run_id);
+
+-- Phase 5 D-09: per-action policy/simulation gate verdicts. One row per
+-- (action, gate) pair. `seq` is per-run monotonic (MR-04 carry-forward) so
+-- list_decisions_for_run produces stable insertion order even when same-ms
+-- inserts collide on `recorded_at`. `gate` ∈ {policy, simulation};
+-- `verdict` ∈ {pass, fail, skipped}. `rule` and `detail` are NULL when
+-- verdict=pass; `payload_json` is the serialized Decision/SimulationOutcome.
+CREATE TABLE IF NOT EXISTS journal_decisions (
+    id           TEXT PRIMARY KEY,
+    run_id       TEXT NOT NULL REFERENCES runs(id),
+    action_index INTEGER NOT NULL,
+    gate         TEXT NOT NULL,
+    verdict      TEXT NOT NULL,
+    rule         TEXT,
+    detail       TEXT,
+    payload_json TEXT,
+    recorded_at  TEXT NOT NULL,
+    seq          INTEGER NOT NULL,
+    UNIQUE (run_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_journal_decisions_run_id
+    ON journal_decisions(run_id);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {

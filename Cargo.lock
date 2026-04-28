@@ -1632,12 +1632,14 @@ dependencies = [
 name = "executor-mcp"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
  "anyhow",
  "executor-core",
  "executor-evm",
  "executor-policy",
  "executor-signer",
  "executor-state",
+ "hex",
  "rmcp",
  "schemars 1.2.1",
  "serde",

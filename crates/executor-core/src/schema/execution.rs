@@ -37,15 +37,20 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
-    /// Only these four variants may be emitted by Phase 2 code paths (D-05c).
-    /// `runs::insert_run` and `runs::update_run_status` reject the others
-    /// with [`crate::error::StateError::InvalidInput`] (defined in
-    /// `executor-state`, not here — this method is the gate consulted at
-    /// the boundary).
-    pub fn phase2_emittable(self) -> bool {
+    /// Phase 5 D-10 widening: variants emittable from Phase-2..Phase-5 code
+    /// paths. `Canceled` stays reserved for Phase 6. The Phase-2 method name
+    /// `phase2_emittable` is renamed to `phase5_emittable` here; callers in
+    /// `runs::insert_run` / `update_run_status_with_transition` are updated
+    /// in lockstep.
+    pub fn phase5_emittable(self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Running | Self::Succeeded | Self::Failed
+            Self::Queued
+                | Self::Running
+                | Self::Succeeded
+                | Self::Failed
+                | Self::SimulationDenied
+                | Self::PolicyDenied
         )
     }
 }
@@ -69,27 +74,59 @@ pub enum JournalActionOutcome {
 }
 
 impl JournalActionOutcome {
-    /// Phase-3 production code paths must only emit the first four (D-06
-    /// future-lock). `executor-state::journal::record_action_outcome`
-    /// consults this gate before INSERT and rejects reserved variants
-    /// with `StateError::InvalidInput`.
-    pub fn phase3_emittable(self) -> bool {
+    /// Phase 5 D-10 widening: all six variants are emittable. The previous
+    /// name `phase3_emittable` (which excluded `SimulationFailure` /
+    /// `PolicyDenied`) is renamed to `phase5_emittable`. Reserved-variant
+    /// gating is no longer needed at this layer — Phase 5 gate orchestration
+    /// (executor-mcp::tools::strategy_run) directly emits all six.
+    pub fn phase5_emittable(self) -> bool {
         matches!(
             self,
-            Self::Noop | Self::Actions | Self::ValidationError | Self::RuntimeError
+            Self::Noop
+                | Self::Actions
+                | Self::ValidationError
+                | Self::RuntimeError
+                | Self::SimulationFailure
+                | Self::PolicyDenied
         )
     }
 }
 
+/// Per-action gate verdict (D-11). Pairs the policy and simulation gate
+/// outcomes for a single normalized action. Carried in
+/// [`StrategyOutcome::Actions::decisions`] on success-path responses; failure
+/// paths surface the same data via the `journal://{run_id}` resource only.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ActionDecision {
+    pub action_index: u32,
+    pub policy: GateVerdict,
+    pub simulation: GateVerdict,
+}
+
+/// Outcome of one gate (policy or simulation) for one action. `Skipped`
+/// occurs when an earlier gate denied so this gate never ran (research Q-12).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GateVerdict {
+    Pass,
+    Skipped,
+    Fail { rule: String, detail: String },
+}
+
 /// Strategy outcome — the success-shape part of [`StrategyRunResponse`].
 /// Validation errors and runtime errors are surfaced as MCP errors, NOT as
-/// `StrategyOutcome` variants (D-08).
+/// `StrategyOutcome` variants (D-08). Phase 5 D-11 widens `Actions` with a
+/// `decisions` field carrying per-action gate verdicts.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-#[schemars(description = "Outcome of a successful strategy run (D-08).")]
+#[schemars(description = "Outcome of a successful strategy run (D-08, Phase 5 D-11).")]
 pub enum StrategyOutcome {
     Noop,
-    Actions { actions: Vec<crate::schema::action::Action> },
+    Actions {
+        actions: Vec<crate::schema::action::Action>,
+        #[serde(default)]
+        decisions: Vec<ActionDecision>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -7,11 +7,12 @@
 //!   - Still placeholders: strategy_run_once (Phase 6), policy_get (Phase 5,
 //!     returns empty shape), policy_update (Phase 5, unimplemented_err).
 
+use alloy_primitives::{Address, U256};
 use executor_core::schema::{
     action::Action,
     execution::{
-        ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome, RunStatus, StrategyOutcome,
-        StrategyRunResponse,
+        ActionDecision, ExecutionGetResponse, ExecutionIdInput, GateVerdict,
+        JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
     },
     policy::PolicyUpdateInput,
     strategy::{
@@ -20,7 +21,18 @@ use executor_core::schema::{
         StrategyRunInput,
     },
 };
-use executor_state::{RegisterOutcome, StateError, StateStore, Strategy, StrategySummary};
+use executor_evm::{
+    NormalizedAction, NormalizedActionKind, SimulationFailReason, SimulationOutcome,
+    normalize_action, simulate_one_latest,
+};
+use executor_policy::{
+    Decision, DecisionVerdict, LoadedPolicy, NormalizedActionKindCopy, evaluate,
+};
+use executor_state::{
+    DecisionGate, DecisionVerdict as JournalDecisionVerdict, RegisterOutcome, StateError,
+    StateStore, Strategy, StrategySummary,
+};
+use std::collections::HashMap;
 use rmcp::{
     ErrorData as McpError,
     handler::server::wrapper::Parameters,
@@ -34,8 +46,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     errors::{
-        invalid_params, map_evm_error, map_runtime_error, map_state_error, storage_error,
-        strategy_deleted, strategy_invalid_output, unimplemented_err,
+        invalid_params, map_evm_error, map_policy_error, map_runtime_error, map_simulation_error,
+        map_state_error, policy_not_loaded, storage_error, strategy_deleted,
+        strategy_invalid_output, unimplemented_err,
     },
     server::ExecutorServer,
     validation::{validate_action_kind_allowlisted, validate_register, validate_strategy_id_format},
@@ -236,6 +249,12 @@ impl ExecutorServer {
         // STEP 1: validate input format (D-09).
         validate_strategy_id_format(&input.strategy_id).map_err(invalid_params)?;
 
+        // STEP B (early — D-15 fail-closed): snapshot the policy. Cloning here
+        // keeps the RwLock guard out of the spawn_blocking / .await boundary
+        // (D-15d mutex hygiene). Defer the `None → policy_not_loaded` decision
+        // until after STEP 3 so the error envelope can carry `run_id`.
+        let policy_snapshot: Option<LoadedPolicy> = self.policy.read().await.clone();
+
         // STEP 2: load strategy + check soft-delete.
         let state = self.state.clone();
         let sid_for_load = input.strategy_id.clone();
@@ -316,7 +335,6 @@ impl ExecutorServer {
         let outcome = match exec_result {
             Ok(json) => match validate_strategy_output(&json) {
                 Ok(out) => {
-                    record_action(&self.state, &run_id, &out).await?;
                     out
                 }
                 Err(detail) => {
@@ -345,10 +363,221 @@ impl ExecutorServer {
             }
         };
 
-        // STEP 7: Running → Succeeded.
+        // STEP 7: Phase 5 gate pipeline (D-07): policy → simulation.
+        let outcome = match outcome {
+            StrategyOutcome::Noop => StrategyOutcome::Noop,
+            StrategyOutcome::Actions { actions, .. } => {
+                let gate_enabled = policy_snapshot.is_some();
+                if !gate_enabled {
+                    let has_native_value = actions.iter().any(|action| match action {
+                        Action::ContractCall(cc) => cc.value != "0",
+                        Action::RawCall(rc) => rc.value != "0",
+                        Action::NativeTransfer(nt) => nt.value != "0",
+                        Action::Noop | Action::Erc20Transfer(_) | Action::Erc20Approve(_) => false,
+                    });
+                    if has_native_value {
+                        record_runtime_error(
+                            &self.state,
+                            &run_id,
+                            "policy violation: policy file not loaded — set [policy].path in config",
+                        )
+                        .await?;
+                        transition(&self.state, &run_id, RunStatus::Running, RunStatus::PolicyDenied)
+                            .await?;
+                        return Err(policy_not_loaded(&run_id));
+                    }
+                }
+
+                let mut normalized = Vec::with_capacity(actions.len());
+                if gate_enabled {
+                    for action in &actions {
+                        normalized.push(normalize_action(action).map_err(|e| map_evm_error(e, &run_id))?);
+                    }
+                }
+
+                // Noop actions normalize to None and do not enter the gate pipeline
+                // (Phase 5 research Q-1). Preserve existing Phase-4 validation-only
+                // regressions when no policy is configured and actions carry no
+                // native value.
+                if !gate_enabled || normalized.iter().all(Option::is_none) {
+                    StrategyOutcome::Actions {
+                        actions,
+                        decisions: Vec::new(),
+                    }
+                } else {
+
+                let policy = match policy_snapshot {
+                    Some(p) => p,
+                    None => {
+                        record_runtime_error(
+                            &self.state,
+                            &run_id,
+                            "policy violation: policy file not loaded — set [policy].path in config",
+                        )
+                        .await?;
+                        transition(&self.state, &run_id, RunStatus::Running, RunStatus::PolicyDenied)
+                            .await?;
+                        return Err(policy_not_loaded(&run_id));
+                    }
+                };
+
+                let provider = self
+                    .evm_provider()
+                    .await
+                    .map_err(|e| map_evm_error(e, &run_id))?;
+                let chain_id = self
+                    .chain_id()
+                    .await
+                    .map_err(|e| map_evm_error(e, &run_id))?;
+
+                let mut erc20_tally: HashMap<(u64, Address), U256> = HashMap::new();
+                let mut decisions = Vec::new();
+                for (idx, normalized_action) in normalized.iter().enumerate() {
+                    let Some(na) = normalized_action else {
+                        continue;
+                    };
+                    let decision = decision_from_normalized(chain_id, idx as u32, na).map_err(|e| {
+                        storage_error(format!("normalized action missing tx.to: {e}"))
+                    })?;
+                    let verdict = evaluate(&policy, &decision, &mut erc20_tally);
+                    match &verdict {
+                        DecisionVerdict::Allow => {
+                            record_decision_row(
+                                &self.state,
+                                &run_id,
+                                idx as i64,
+                                DecisionGate::Policy,
+                                JournalDecisionVerdict::Pass,
+                                None,
+                                None,
+                                Some(policy_payload(&decision)),
+                            )
+                            .await?;
+                            decisions.push(ActionDecision {
+                                action_index: idx as u32,
+                                policy: GateVerdict::Pass,
+                                simulation: GateVerdict::Skipped,
+                            });
+                        }
+                        DecisionVerdict::Deny { rule, detail } => {
+                            record_decision_row(
+                                &self.state,
+                                &run_id,
+                                idx as i64,
+                                DecisionGate::Policy,
+                                JournalDecisionVerdict::Fail,
+                                Some(rule.as_ref()),
+                                Some(detail.as_str()),
+                                Some(policy_payload(&decision)),
+                            )
+                            .await?;
+                            record_gate_action_outcome(
+                                &self.state,
+                                &run_id,
+                                JournalActionOutcome::PolicyDenied,
+                                serde_json::json!({
+                                    "code": "strategy_runtime_error",
+                                    "kind": "policy_violation",
+                                    "action_index": idx,
+                                    "rule": rule.as_ref(),
+                                    "detail": detail,
+                                }),
+                            )
+                            .await?;
+                            transition(&self.state, &run_id, RunStatus::Running, RunStatus::PolicyDenied)
+                                .await?;
+                            return Err(map_policy_error(&verdict, idx as u32, &run_id));
+                        }
+                    }
+                }
+
+                let mut decision_pos = 0usize;
+                for (idx, normalized_action) in normalized.iter().enumerate() {
+                    let Some(na) = normalized_action else {
+                        continue;
+                    };
+                    let sim = simulate_one_latest(
+                        provider.clone(),
+                        &self.evm_config,
+                        &na.tx,
+                        Some(self.evm_config.simulation_from),
+                    )
+                    .await;
+                    match sim {
+                        SimulationOutcome::Pass {
+                            return_bytes,
+                            gas_estimate,
+                        } => {
+                            record_decision_row(
+                                &self.state,
+                                &run_id,
+                                idx as i64,
+                                DecisionGate::Simulation,
+                                JournalDecisionVerdict::Pass,
+                                None,
+                                None,
+                                Some(simulation_pass_payload(&return_bytes, gas_estimate)),
+                            )
+                            .await?;
+                            if let Some(d) = decisions.get_mut(decision_pos) {
+                                d.simulation = GateVerdict::Pass;
+                            }
+                        }
+                        SimulationOutcome::Fail {
+                            reason,
+                            raw_for_log,
+                        } => {
+                            tracing::warn!(action_index = idx, raw = %raw_for_log, "simulation gate failed");
+                            let rule = simulation_rule(&reason);
+                            let detail = simulation_detail(&reason);
+                            record_decision_row(
+                                &self.state,
+                                &run_id,
+                                idx as i64,
+                                DecisionGate::Simulation,
+                                JournalDecisionVerdict::Fail,
+                                Some(rule),
+                                Some(detail.as_str()),
+                                Some(simulation_fail_payload(&reason)),
+                            )
+                            .await?;
+                            record_gate_action_outcome(
+                                &self.state,
+                                &run_id,
+                                JournalActionOutcome::SimulationFailure,
+                                serde_json::json!({
+                                    "code": "strategy_runtime_error",
+                                    "kind": "simulation_failure",
+                                    "action_index": idx,
+                                    "rule": rule,
+                                    "detail": detail,
+                                }),
+                            )
+                            .await?;
+                            transition(
+                                &self.state,
+                                &run_id,
+                                RunStatus::Running,
+                                RunStatus::SimulationDenied,
+                            )
+                            .await?;
+                            return Err(map_simulation_error(&reason, idx as u32, &run_id));
+                        }
+                    }
+                    decision_pos += 1;
+                }
+
+                    StrategyOutcome::Actions { actions, decisions }
+                }
+            }
+        };
+
+        record_action(&self.state, &run_id, &outcome).await?;
+
+        // STEP 8: Running → Succeeded.
         transition(&self.state, &run_id, RunStatus::Running, RunStatus::Succeeded).await?;
 
-        // STEP 8: re-read run row, build response.
+        // STEP 9: re-read run row, build response.
         let state = self.state.clone();
         let rid_for_get = run_id.clone();
         let run = tokio::task::spawn_blocking(move || {
@@ -615,15 +844,159 @@ async fn record_runtime_error(
         "code": "strategy_runtime_error",
         "detail": detail,
     });
+    record_gate_action_outcome(state, run_id, JournalActionOutcome::RuntimeError, payload).await
+}
+
+async fn record_gate_action_outcome(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    outcome: JournalActionOutcome,
+    payload: serde_json::Value,
+) -> Result<(), McpError> {
     let payload_json = payload.to_string();
     let state = state.clone();
     let rid = run_id.to_string();
     tokio::task::spawn_blocking(move || {
         let mut store = state.blocking_lock();
-        store.record_action_outcome(&rid, JournalActionOutcome::RuntimeError, &payload_json)
+        store.record_action_outcome(&rid, outcome, &payload_json)
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn record_decision_row(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    action_index: i64,
+    gate: DecisionGate,
+    verdict: JournalDecisionVerdict,
+    rule: Option<&str>,
+    detail: Option<&str>,
+    payload: Option<serde_json::Value>,
+) -> Result<(), McpError> {
+    let state = state.clone();
+    let rid = run_id.to_string();
+    let rule = rule.map(str::to_string);
+    let detail = detail.map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_decision(
+            &rid,
+            action_index,
+            gate,
+            verdict,
+            rule.as_deref(),
+            detail.as_deref(),
+            payload.as_ref(),
+        )
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
+}
+
+fn decision_from_normalized(
+    chain_id: u64,
+    action_index: u32,
+    na: &NormalizedAction,
+) -> Result<Decision, &'static str> {
+    let to = na
+        .tx
+        .to
+        .and_then(|kind| kind.into_to())
+        .ok_or("missing to")?;
+    Ok(Decision {
+        chain_id,
+        action_index,
+        action_kind: na_kind_to_copy(na.source),
+        to,
+        selector: na.selector,
+        native_value: na.native_value,
+        erc20_amount: na.erc20_amount,
+    })
+}
+
+fn na_kind_to_copy(k: NormalizedActionKind) -> NormalizedActionKindCopy {
+    match k {
+        NormalizedActionKind::ContractCall => NormalizedActionKindCopy::ContractCall,
+        NormalizedActionKind::RawCall => NormalizedActionKindCopy::RawCall,
+        NormalizedActionKind::Erc20Transfer => NormalizedActionKindCopy::Erc20Transfer,
+        NormalizedActionKind::Erc20Approve => NormalizedActionKindCopy::Erc20Approve,
+        NormalizedActionKind::NativeTransfer => NormalizedActionKindCopy::NativeTransfer,
+    }
+}
+
+fn action_kind_name(k: NormalizedActionKindCopy) -> &'static str {
+    match k {
+        NormalizedActionKindCopy::ContractCall => "contract_call",
+        NormalizedActionKindCopy::RawCall => "raw_call",
+        NormalizedActionKindCopy::Erc20Transfer => "erc20_transfer",
+        NormalizedActionKindCopy::Erc20Approve => "erc20_approve",
+        NormalizedActionKindCopy::NativeTransfer => "native_transfer",
+    }
+}
+
+fn selector_hex(selector: Option<[u8; 4]>) -> Option<String> {
+    selector.map(|s| format!("0x{}", hex::encode(s)))
+}
+
+fn policy_payload(decision: &Decision) -> serde_json::Value {
+    serde_json::json!({
+        "chain_id": decision.chain_id,
+        "action_index": decision.action_index,
+        "action_kind": action_kind_name(decision.action_kind),
+        "to": decision.to.to_string(),
+        "selector": selector_hex(decision.selector),
+        "native_value": decision.native_value.to_string(),
+        "erc20_amount": decision.erc20_amount.map(|v| v.to_string()),
+    })
+}
+
+fn simulation_pass_payload(return_bytes: &alloy_primitives::Bytes, gas_estimate: Option<u64>) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "pass",
+        "return_bytes": format!("0x{}", hex::encode(return_bytes)),
+        "gas_estimate": gas_estimate,
+    })
+}
+
+fn simulation_fail_payload(reason: &SimulationFailReason) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "fail",
+        "fail_reason": simulation_fail_reason(reason),
+        "decoded_revert": match reason {
+            SimulationFailReason::Revert { decoded } => decoded.clone(),
+            SimulationFailReason::Transport | SimulationFailReason::Timeout => None,
+        },
+    })
+}
+
+fn simulation_fail_reason(reason: &SimulationFailReason) -> &'static str {
+    match reason {
+        SimulationFailReason::Revert { .. } => "revert",
+        SimulationFailReason::Transport => "transport",
+        SimulationFailReason::Timeout => "timeout",
+    }
+}
+
+fn simulation_rule(reason: &SimulationFailReason) -> &'static str {
+    match reason {
+        SimulationFailReason::Revert { .. } => "simulation_revert",
+        SimulationFailReason::Transport => "simulation_transport",
+        SimulationFailReason::Timeout => "simulation_timeout",
+    }
+}
+
+fn simulation_detail(reason: &SimulationFailReason) -> String {
+    match reason {
+        SimulationFailReason::Revert { decoded } => {
+            format!("simulation revert: {}", decoded.as_deref().unwrap_or("unknown"))
+        }
+        SimulationFailReason::Transport => "simulation transport".to_string(),
+        SimulationFailReason::Timeout => "simulation timeout".to_string(),
+    }
 }

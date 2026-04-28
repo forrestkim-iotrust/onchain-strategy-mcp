@@ -435,6 +435,8 @@ async fn schema_contract_round_trip() -> Result<()> {
 // ─────────── Plan 02-02: Phase 2 strategy behaviours (D-08a) ───────────
 
 use common::{call_tool, extract_json_result, spawn_server_with_state};
+#[cfg(feature = "anvil-tests")]
+use common::spawn_server_with_config_text;
 
 #[tokio::test]
 async fn strategy_register_creates_row() -> Result<()> {
@@ -1121,6 +1123,78 @@ fn seed_strategy(db_path: &std::path::Path, name: &str, source: &str) -> Result<
     Ok(id)
 }
 
+#[cfg(feature = "anvil-tests")]
+fn write_permissive_policy(contracts: &[&str]) -> Result<tempfile::NamedTempFile> {
+    let policy = tempfile::NamedTempFile::new()?;
+    let contracts_toml = contracts
+        .iter()
+        .map(|addr| format!("    \"{addr}\","))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let selector_entries = contracts
+        .iter()
+        .map(|addr| {
+            format!(
+                "[selectors.\"31337:{addr}\"]\nallow = [\"any\"]\n"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let raw_allow = contracts
+        .iter()
+        .map(|addr| format!("    {{ chain = 31337, contract = \"{addr}\", selector = \"any\" }},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(
+        policy.path(),
+        format!(
+            r#"[chains]
+allow = [31337]
+
+[contracts.31337]
+allow = [
+{contracts_toml}
+]
+
+{selector_entries}
+[native_value.31337]
+max_per_action = "1000000000000000000000000"
+
+[raw_call]
+allow_global = false
+allow = [
+{raw_allow}
+]
+"#
+        ),
+    )?;
+    Ok(policy)
+}
+
+#[cfg(feature = "anvil-tests")]
+async fn spawn_server_with_policy_and_rpc(
+    db_path: &std::path::Path,
+    policy_path: &std::path::Path,
+    rpc_url: &str,
+) -> Result<common::ServerProc> {
+    spawn_server_with_config_text(&format!(
+        r#"[state]
+path = "{}"
+
+[policy]
+path = "{}"
+
+[evm]
+rpc_url = "{}"
+call_timeout_ms = 1000
+"#,
+        db_path.display(),
+        policy_path.display(),
+        rpc_url,
+    ))
+    .await
+}
+
 #[tokio::test]
 async fn strategy_run_returns_noop_for_minimal_strategy() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1284,6 +1358,7 @@ async fn strategy_run_rejects_non_function_source() -> Result<()> {
 // spirit is preserved by `strategy_run_rejects_unknown_action_kind` below
 // — `kind:"multi_call"` is still rejected because it's not in the Phase-4
 // allowlist.
+#[cfg(feature = "anvil-tests")]
 #[tokio::test]
 async fn strategy_run_accepts_contract_call() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1315,6 +1390,7 @@ async fn strategy_run_accepts_contract_call() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "anvil-tests")]
 #[tokio::test]
 async fn strategy_run_accepts_raw_call() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1337,6 +1413,7 @@ async fn strategy_run_accepts_raw_call() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "anvil-tests")]
 #[tokio::test]
 async fn strategy_run_accepts_erc20_transfer() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1359,6 +1436,7 @@ async fn strategy_run_accepts_erc20_transfer() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "anvil-tests")]
 #[tokio::test]
 async fn strategy_run_accepts_erc20_approve() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1381,6 +1459,7 @@ async fn strategy_run_accepts_erc20_approve() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "anvil-tests")]
 #[tokio::test]
 async fn strategy_run_accepts_native_transfer() -> Result<()> {
     let dir = tempfile::tempdir()?;
@@ -1390,8 +1469,15 @@ async fn strategy_run_accepts_native_transfer() -> Result<()> {
         to:    "0x0000000000000000000000000000000000000002",
         value: "1000000000000000000"
     })]"#;
+    let _ = db_path_str;
     let strategy_id = seed_strategy(&db_path, "nt_accept", source)?;
-    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let policy = write_permissive_policy(&["0x0000000000000000000000000000000000000002"])?;
+    let mut proc = spawn_server_with_policy_and_rpc(
+        &db_path,
+        policy.path(),
+        "http://127.0.0.1:8545",
+    )
+    .await?;
     let _ = initialize(&mut proc).await?;
     let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
     let body = extract_json_result(&r);

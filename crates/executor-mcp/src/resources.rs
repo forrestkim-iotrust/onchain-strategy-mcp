@@ -188,13 +188,14 @@ async fn read_journal(
         let s = store.list_source_reads_for_run(&rid_owned)?;
         let a = store.list_actions_for_run(&rid_owned)?;
         let l = store.list_logs_for_run(&rid_owned)?;
-        Ok(Some((s, a, l)))
+        let d = store.list_decisions_for_run(&rid_owned)?;
+        Ok(Some((s, a, l, d)))
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
 
-    let (sources, actions, logs) = match result {
+    let (sources, actions, logs, decisions) = match result {
         Some(t) => t,
         None => {
             return Err(McpError::resource_not_found(
@@ -229,6 +230,18 @@ async fn read_journal(
             "recorded_at": s.recorded_at,
         })).collect::<Vec<_>>(),
         "actions": action_rows,
+        "decisions": decisions.iter().map(|d| serde_json::json!({
+            "id": d.id,
+            "run_id": d.run_id,
+            "action_index": d.action_index,
+            "gate": d.gate,
+            "verdict": d.verdict,
+            "rule": d.rule,
+            "detail": d.detail,
+            "payload_json": d.payload_json,
+            "recorded_at": d.recorded_at,
+            "seq": d.seq,
+        })).collect::<Vec<_>>(),
         "logs": logs.iter().map(|l| serde_json::json!({
             "id": l.id,
             "message": l.message,

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 05 Plan 03 COMPLETE. Policy DSL + 6-dim evaluator + fail-closed boot wired at evaluator+factory level (POL-01..06 + EXE-05 await orchestrator wiring in 05-04). LoadedPolicy / evaluate / Erc20SpendState exposed; [policy] config; ExecutorServer.policy: Arc<RwLock<Option<LoadedPolicy>>>; map_policy_error + policy_not_loaded factories. Workspace 469 tests / clippy clean / executor-policy alloy-FREE.
-last_updated: "2026-04-28T08:30:00.000Z"
-last_activity: 2026-04-28
+stopped_at: Phase 05 Plan 01 COMPLETE. executor-policy crate scaffolded (alloy-FREE per D-20); Action -> NormalizedAction normalize layer per D-02; encode_call_input shared encoder per D-03; ERC20_WRITE_ABI sibling per D-04; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02. Workspace 388 tests / clippy clean. Ready for Plan 05-02.
+last_updated: "2026-04-28T11:05:19.785Z"
+last_activity: 2026-04-28 -- Phase 05 execution started
 progress:
   total_phases: 7
   completed_phases: 4
   total_plans: 17
-  completed_plans: 15
-  percent: 88
+  completed_plans: 16
+  percent: 94
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-24)
 
 **Core value:** AI agent가 EVM 자동화 로직을 실제 온체인 실행으로 바꾸되, 모든 실행은 policy 검사를 거치고 기록으로 남아야 한다.  
-**Current focus:** Phase 02 — strategy-state-and-journal
+**Current focus:** Phase 05 — simulation-and-policy-gate
 
 ## Current Position
 
-Phase: 05 (simulation-and-policy-gate) — IN PROGRESS
-Plan: 2 of 4 complete
-Status: Ready to execute
-Last activity: 2026-04-28
+Phase: 05 (simulation-and-policy-gate) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase 05
+Last activity: 2026-04-28 -- Phase 05 execution started
 
 Progress: [█████████░] 88%
 

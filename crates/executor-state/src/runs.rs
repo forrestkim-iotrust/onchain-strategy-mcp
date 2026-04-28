@@ -63,9 +63,9 @@ pub(crate) fn insert_run(
     strategy_id: &str,
     status: RunStatus,
 ) -> Result<String, StateError> {
-    if !status.phase2_emittable() {
+    if !status.phase5_emittable() {
         return Err(StateError::InvalidInput(format!(
-            "status {status:?} is reserved for Phase 5/6 and cannot be emitted from Phase 2"
+            "status {status:?} is reserved for Phase 6 and cannot be emitted from Phase 2"
         )));
     }
     let id = ulid::Ulid::new().to_string();
@@ -89,9 +89,9 @@ pub(crate) fn insert_run_with_started_at(
     status: RunStatus,
     started_at: &str,
 ) -> Result<String, StateError> {
-    if !status.phase2_emittable() {
+    if !status.phase5_emittable() {
         return Err(StateError::InvalidInput(format!(
-            "status {status:?} is reserved for Phase 5/6 and cannot be emitted from Phase 2"
+            "status {status:?} is reserved for Phase 6 and cannot be emitted from Phase 2"
         )));
     }
     let id = ulid::Ulid::new().to_string();
@@ -111,9 +111,9 @@ pub(crate) fn update_run_status(
     run_id: &str,
     status: RunStatus,
 ) -> Result<(), StateError> {
-    if !status.phase2_emittable() {
+    if !status.phase5_emittable() {
         return Err(StateError::InvalidInput(format!(
-            "status {status:?} is reserved for Phase 5/6"
+            "status {status:?} is reserved for Phase 6"
         )));
     }
     let finished_at = matches!(status, RunStatus::Succeeded | RunStatus::Failed)
@@ -134,7 +134,7 @@ pub(crate) fn update_run_status(
 /// caller's invariant is violated, not the row's existence.
 ///
 /// `NotFound` is returned only when the row does not exist at all.
-/// Reserved-variant gate (`phase2_emittable`) is enforced for both `from`
+/// Reserved-variant gate (`phase5_emittable`) is enforced for both `from`
 /// and `to` (you cannot transition INTO a reserved variant from Phase 3 code,
 /// nor declare you expect a reserved one).
 ///
@@ -155,9 +155,9 @@ pub(crate) fn update_run_status_with_transition(
     from: RunStatus,
     to: RunStatus,
 ) -> Result<(), StateError> {
-    if !from.phase2_emittable() || !to.phase2_emittable() {
+    if !from.phase5_emittable() || !to.phase5_emittable() {
         return Err(StateError::InvalidInput(format!(
-            "transition {from:?} → {to:?} involves a Phase 5/6 reserved status; \
+            "transition {from:?} → {to:?} involves a Phase 6 reserved status; \
              not allowed from Phase 3 code paths"
         )));
     }

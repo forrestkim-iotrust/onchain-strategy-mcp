@@ -42,7 +42,7 @@ pub use native::{fetch_chain_id, native_balance, native_block_number};
 pub use normalize::{NormalizedAction, NormalizedActionKind, normalize_action};
 pub use provider::build_provider;
 pub use read::{BlockTag, ReadContractInput, read_contract};
-pub use simulate::{SimulationFailReason, SimulationOutcome, simulate_one};
+pub use simulate::{SimulationFailReason, SimulationOutcome, simulate_one, simulate_one_latest};
 pub use units::{format_units, format_units_from_str, parse_units};
 
 // Re-export the alloy `DynProvider` alias so downstream crates

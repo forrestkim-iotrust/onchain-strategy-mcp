@@ -131,6 +131,18 @@ pub async fn simulate_one(
     }
 }
 
+/// Phase 5 D-07 — convenience wrapper around [`simulate_one`] that pins the
+/// block tag to `latest`. Lets the orchestrator (executor-mcp) stay alloy-free
+/// by avoiding a direct `alloy::eips::BlockId` import.
+pub async fn simulate_one_latest(
+    provider: Arc<DynProvider>,
+    cfg: &EvmConfig,
+    tx: &TransactionRequest,
+    from: Option<Address>,
+) -> SimulationOutcome {
+    simulate_one(provider, cfg, tx, BlockId::latest(), from).await
+}
+
 /// Heuristic: does this raw alloy error string look like a contract revert?
 ///
 /// Used as a defensive fallback when `try_extract_revert_reason` cannot find

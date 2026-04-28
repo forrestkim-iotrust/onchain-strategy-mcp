@@ -71,18 +71,23 @@ pub async fn recv(proc: &mut ServerProc) -> Result<Value> {
 /// whose `[state].path` is the supplied DB path. Use `":memory:"` for
 /// ephemeral tests; pass a persistent path for restart tests.
 pub async fn spawn_server_with_state(db_path: &str) -> Result<ServerProc> {
+    spawn_server_with_config_text(&format!(
+        "[state]\npath = \"{}\"\n",
+        db_path.replace('\\', "\\\\")
+    ))
+    .await
+}
+
+/// Spawn with an arbitrary full TOML config. This intentionally does not alter
+/// `spawn_server_with_state`'s fail-closed no-policy behavior; Phase 5 success
+/// tests opt in to `[policy].path` and live `[evm]` config explicitly.
+pub async fn spawn_server_with_config_text(config_text: &str) -> Result<ServerProc> {
     let bin = env!("CARGO_BIN_EXE_executor-mcp");
     let tmp = tempfile::NamedTempFile::new()?;
     let config_path = tmp.path().to_path_buf();
     // Write the config, then persist the temp file (drop the auto-delete
     // guard) so the child can read it after we've handed off the path.
-    std::fs::write(
-        &config_path,
-        format!(
-            "[state]\npath = \"{}\"\n",
-            db_path.replace('\\', "\\\\")
-        ),
-    )?;
+    std::fs::write(&config_path, config_text)?;
     let _ = tmp.into_temp_path().keep()?;
 
     let mut child = Command::new(bin)
