@@ -475,6 +475,17 @@ impl ExecutorServer {
                                     Some(policy_payload(&decision)),
                                 )
                                 .await?;
+                                record_decision_row(
+                                    &self.state,
+                                    &run_id,
+                                    idx as i64,
+                                    DecisionGate::Simulation,
+                                    JournalDecisionVerdict::Skipped,
+                                    None,
+                                    Some("simulation skipped: policy denied action"),
+                                    Some(simulation_skipped_payload(&decision, rule.as_ref())),
+                                )
+                                .await?;
                                 record_gate_action_outcome(
                                     &self.state,
                                     &run_id,
@@ -974,6 +985,19 @@ fn simulation_pass_payload(
         "outcome": "pass",
         "return_bytes": format!("0x{}", hex::encode(return_bytes)),
         "gas_estimate": gas_estimate,
+    })
+}
+
+fn simulation_skipped_payload(decision: &Decision, policy_rule: &str) -> serde_json::Value {
+    serde_json::json!({
+        "outcome": "skipped",
+        "reason": "policy_denied",
+        "policy_rule": policy_rule,
+        "chain_id": decision.chain_id,
+        "action_index": decision.action_index,
+        "action_kind": action_kind_name(decision.action_kind),
+        "to": decision.to.to_string(),
+        "selector": selector_hex(decision.selector),
     })
 }
 

@@ -438,9 +438,9 @@ async fn schema_contract_round_trip() -> Result<()> {
 
 // ─────────── Plan 02-02: Phase 2 strategy behaviours (D-08a) ───────────
 
-#[cfg(feature = "anvil-tests")]
-use common::spawn_server_with_config_text;
-use common::{call_tool, extract_json_result, spawn_server_with_state};
+use common::{
+    call_tool, extract_json_result, spawn_server_with_config_text, spawn_server_with_state,
+};
 
 #[tokio::test]
 async fn strategy_register_creates_row() -> Result<()> {
@@ -2537,6 +2537,92 @@ async fn read_journal_resource(proc: &mut common::ServerProc, id: u64, run_id: &
     Ok(serde_json::from_str(text)?)
 }
 
+fn assert_decision_row(
+    journal: &Value,
+    action_index: i64,
+    gate: &str,
+    verdict: &str,
+    rule: Option<&str>,
+) {
+    let rows = journal["decisions"].as_array().expect("decisions array");
+    assert!(
+        rows.iter().any(|row| {
+            row["action_index"].as_i64() == Some(action_index)
+                && row["gate"].as_str() == Some(gate)
+                && row["verdict"].as_str() == Some(verdict)
+                && match rule {
+                    Some(expected) => row["rule"].as_str() == Some(expected),
+                    None => row["rule"].is_null(),
+                }
+        }),
+        "missing decision row action_index={action_index} gate={gate} verdict={verdict} rule={rule:?}; rows={rows:?}"
+    );
+}
+
+fn policy_with_contracts(
+    chains_allow: &[u64],
+    contracts: &[&str],
+    selector_entries: &[(&str, &[&str])],
+    raw_entries: &[(&str, &str)],
+    native_cap: &str,
+    erc20_caps: &[(&str, &str)],
+) -> String {
+    let chains = chains_allow
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let contracts_toml = contracts
+        .iter()
+        .map(|addr| format!("    \"{addr}\","))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let selectors_toml = selector_entries
+        .iter()
+        .map(|(addr, selectors)| {
+            let values = selectors
+                .iter()
+                .map(|sel| format!("\"{sel}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[selectors.\"31337:{addr}\"]\nallow = [{values}]\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let raw_toml = raw_entries
+        .iter()
+        .map(|(addr, selector)| {
+            format!("    {{ chain = 31337, contract = \"{addr}\", selector = \"{selector}\" }},")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let erc20_toml = erc20_caps
+        .iter()
+        .map(|(token, cap)| format!("[erc20_spend.\"31337:{token}\"]\nmax_per_run = \"{cap}\"\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        r#"[chains]
+allow = [{chains}]
+
+[contracts.31337]
+allow = [
+{contracts_toml}
+]
+
+{selectors_toml}
+[native_value.31337]
+max_per_action = "{native_cap}"
+
+{erc20_toml}[raw_call]
+allow_global = false
+allow = [
+{raw_toml}
+]
+"#
+    )
+}
+
 #[cfg(feature = "anvil-tests")]
 #[tokio::test(flavor = "multi_thread")]
 async fn strategy_run_returns_simulation_failed_when_revert() -> Result<()> {
@@ -2591,4 +2677,92 @@ async fn strategy_run_returns_simulation_failed_when_revert() -> Result<()> {
     assert_ne!(err["data"]["kind"].as_str(), Some("policy_violation"));
     proc.child.kill().await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_journal_records_pass_decisions_on_success() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let recipient = "0x0000000000000000000000000000000000000002";
+    let policy_toml = policy_with_contracts(
+        &[31337],
+        &[recipient],
+        &[],
+        &[],
+        "1000000000000000000",
+        &[],
+    );
+    let policy = write_policy(&policy_toml)?;
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "native_transfer",
+            to: "{recipient}",
+            value: "0"
+        }}]"#
+    );
+    let strategy_id = seed_strategy(&db_path, "journal_success", &source)?;
+    let mut proc = spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let body = extract_json_result(&r);
+    let run_id = body["run_id"].as_str().expect("run_id");
+    let journal = read_journal_resource(&mut proc, 3, run_id).await?;
+    assert_decision_row(&journal, 0, "policy", "pass", None);
+    assert_decision_row(&journal, 0, "simulation", "pass", None);
+    proc.child.kill().await?;
+    Ok(())
+}
+
+async fn assert_policy_denied_journal(name: &str, policy_toml: String, source: String) -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let policy = write_policy(&policy_toml)?;
+    let strategy_id = seed_strategy(&db_path, name, &source)?;
+    let mut proc = spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope");
+    assert_policy_violation(err, "contract_not_allowed");
+    let run_id = err["data"]["run_id"].as_str().expect("run_id");
+    let journal = read_journal_resource(&mut proc, 3, run_id).await?;
+    assert_decision_row(&journal, 0, "policy", "fail", Some("contract_not_allowed"));
+    assert_decision_row(&journal, 0, "simulation", "skipped", None);
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_journal_records_fail_decision_on_policy_denied() -> Result<()> {
+    let policy_toml = policy_with_contracts(&[31337], &[], &[], &[], "0", &[]);
+    let source = r#"(ctx) => [{
+        kind: "native_transfer",
+        to: "0x0000000000000000000000000000000000000002",
+        value: "0"
+    }]"#
+    .to_string();
+    assert_policy_denied_journal("journal_policy_fail", policy_toml, source).await
+}
+
+#[tokio::test]
+async fn strategy_run_records_skipped_simulation_when_policy_denied() -> Result<()> {
+    let policy_toml = policy_with_contracts(&[31337], &[], &[], &[], "0", &[]);
+    let source = r#"(ctx) => [{
+        kind: "native_transfer",
+        to: "0x0000000000000000000000000000000000000002",
+        value: "0"
+    }]"#
+    .to_string();
+    assert_policy_denied_journal("journal_sim_skipped", policy_toml, source).await
 }
