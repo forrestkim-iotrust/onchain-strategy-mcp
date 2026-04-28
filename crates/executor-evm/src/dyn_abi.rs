@@ -20,10 +20,79 @@
 
 use std::str::FromStr;
 
-use alloy_dyn_abi::{DynSolType, DynSolValue};
-use alloy_primitives::{B256, I256, U256};
+use alloy_dyn_abi::{DynSolType, DynSolValue, JsonAbiExt};
+use alloy_json_abi::JsonAbi;
+use alloy_primitives::{B256, Bytes, I256, U256};
 
 use crate::EvmError;
+use crate::action::validate_abi_size;
+
+/// Encode a function call's input parameters into ABI calldata bytes
+/// (selector + tail-encoded args).
+///
+/// Performs the full Phase-4 dry-run encoding flow:
+/// 1. [`validate_abi_size`] — D-08 / RESEARCH Pitfall 11 hard cap.
+/// 2. Parse `abi` as [`JsonAbi`].
+/// 3. Resolve `function` (overload by arg count).
+/// 4. Convert each arg via [`js_value_to_dyn_sol`] against the function's
+///    input types.
+/// 5. Call `Function::abi_encode_input` and **return** the encoded
+///    `Bytes`.
+///
+/// Phase-4 [`crate::action::dry_run_abi_encode`] discards these bytes
+/// (validation only); Phase-5 `executor_evm::normalize::normalize_contract_call`
+/// keeps them and feeds them into `TransactionRequest.input` (D-03).
+///
+/// Error categories propagate from the existing helpers — same wire-safe
+/// taxonomy as Phase 4 (`abi_oversize`, `abi_parse`, `abi_function_missing`,
+/// `abi_arg_count`, `abi_type_parse`, `abi_encode_input`).
+pub fn encode_call_input(
+    abi: &str,
+    function: &str,
+    args: &[serde_json::Value],
+) -> Result<Bytes, EvmError> {
+    validate_abi_size(abi)?;
+    let parsed: JsonAbi = serde_json::from_str(abi).map_err(|e| EvmError::Decode {
+        category: std::borrow::Cow::Borrowed("abi_parse"),
+        detail_for_log: format!("JsonAbi parse: {e}"),
+    })?;
+    let candidates = match parsed.function(function) {
+        Some(fs) if !fs.is_empty() => fs,
+        _ => {
+            return Err(EvmError::Decode {
+                category: std::borrow::Cow::Borrowed("abi_function_missing"),
+                detail_for_log: format!("abi does not contain function {function}"),
+            });
+        }
+    };
+    let func = candidates
+        .iter()
+        .find(|f| f.inputs.len() == args.len())
+        .ok_or_else(|| EvmError::Encode {
+            category: std::borrow::Cow::Borrowed("abi_arg_count"),
+            detail_for_log: format!(
+                "no overload of {function} accepts {} args",
+                args.len()
+            ),
+        })?;
+    let dyn_values: Vec<DynSolValue> = func
+        .inputs
+        .iter()
+        .zip(args)
+        .map(|(p, a)| {
+            let ty: DynSolType = p.selector_type().parse().map_err(|e| EvmError::Encode {
+                category: std::borrow::Cow::Borrowed("abi_type_parse"),
+                detail_for_log: format!("DynSolType parse '{}': {e}", p.selector_type()),
+            })?;
+            js_value_to_dyn_sol(a, &ty)
+        })
+        .collect::<Result<_, _>>()?;
+    let encoded = func.abi_encode_input(&dyn_values).map_err(|e| EvmError::Encode {
+        category: std::borrow::Cow::Borrowed("abi_encode_input"),
+        detail_for_log: format!("alloy abi_encode_input: {e}"),
+    })?;
+    Ok(Bytes::from(encoded))
+}
 
 /// Convert a `serde_json::Value` (carrying a JS-side argument) into a
 /// `DynSolValue` using `ty` as the source of truth (Pitfall 10).
@@ -362,5 +431,54 @@ fn int_to_json(i: I256, bits: usize) -> Result<serde_json::Value, EvmError> {
         Ok(serde_json::Value::Number(v.into()))
     } else {
         Ok(serde_json::Value::String(i.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod encode_call_input_tests {
+    use super::*;
+    use serde_json::json;
+
+    const SAMPLE_ABI: &str = r#"[
+        {"type":"function","name":"f","inputs":[{"name":"x","type":"uint256"}],
+         "outputs":[],"stateMutability":"nonpayable"}
+    ]"#;
+
+    fn cat_of(e: &EvmError) -> &str {
+        match e {
+            EvmError::Encode { category, .. } => category.as_ref(),
+            EvmError::Decode { category, .. } => category.as_ref(),
+            _ => "OTHER",
+        }
+    }
+
+    #[test]
+    fn encode_call_input_is_pub_and_returns_bytes() {
+        let bytes = encode_call_input(SAMPLE_ABI, "f", &[json!("1")]).expect("ok");
+        // 4-byte selector + 32-byte uint256 tail = 36 bytes.
+        assert_eq!(bytes.len(), 36);
+        // Determinism: same input → same selector bytes.
+        let bytes2 = encode_call_input(SAMPLE_ABI, "f", &[json!("1")]).expect("ok");
+        assert_eq!(&bytes[..4], &bytes2[..4]);
+    }
+
+    #[test]
+    fn encode_call_input_rejects_missing_function() {
+        let err = encode_call_input(SAMPLE_ABI, "nonexistent", &[]).unwrap_err();
+        assert_eq!(cat_of(&err), "abi_function_missing");
+        // Wire taxonomy: stable Display, no raw alloy text.
+        assert!(err.to_string().starts_with("evm decode error"));
+    }
+
+    #[test]
+    fn encode_call_input_rejects_arg_count_mismatch() {
+        let err = encode_call_input(SAMPLE_ABI, "f", &[]).unwrap_err();
+        assert_eq!(cat_of(&err), "abi_arg_count");
+    }
+
+    #[test]
+    fn encode_call_input_rejects_unparseable_abi() {
+        let err = encode_call_input("not json", "f", &[]).unwrap_err();
+        assert_eq!(cat_of(&err), "abi_parse");
     }
 }

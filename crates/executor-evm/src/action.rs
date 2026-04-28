@@ -21,7 +21,6 @@
 
 use std::str::FromStr;
 
-use alloy_json_abi::JsonAbi;
 use alloy_primitives::{Address, Bytes, U256};
 use executor_core::schema::action::MAX_ABI_BYTES;
 
@@ -29,13 +28,6 @@ use crate::EvmError;
 
 fn encode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
     EvmError::Encode {
-        category: std::borrow::Cow::Borrowed(category),
-        detail_for_log: detail.into(),
-    }
-}
-
-fn decode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
-    EvmError::Decode {
         category: std::borrow::Cow::Borrowed(category),
         detail_for_log: detail.into(),
     }
@@ -145,65 +137,20 @@ pub fn validate_abi_size(s: &str) -> Result<(), EvmError> {
 
 /// Dry-run ABI encode at builder time (D-09).
 ///
-/// Sequence:
-/// 1. [`validate_abi_size`].
-/// 2. Parse `abi` as [`JsonAbi`].
-/// 3. Resolve `function` (overload by arg count).
-/// 4. Convert each arg via `js_value_to_dyn_sol` against the function's input
-///    types.
-/// 5. Call `Function::abi_encode_input`. The encoded bytes are DISCARDED —
-///    Phase 5 owns canonical encoding.
+/// Phase 5 D-03 refactor: delegates to [`crate::dyn_abi::encode_call_input`]
+/// and discards the resulting bytes. The full sequence (validate ABI size →
+/// parse JsonAbi → resolve overload → walk args via `js_value_to_dyn_sol` →
+/// `Function::abi_encode_input`) lives in `dyn_abi.rs` so the same encoder
+/// is shared with `executor_evm::normalize::normalize_contract_call`. The
+/// stable wire-safe error taxonomy (`abi_oversize` / `abi_parse` /
+/// `abi_function_missing` / `abi_arg_count` / `abi_type_parse` /
+/// `abi_encode_input`) is byte-for-byte preserved.
 pub fn dry_run_abi_encode(
     abi: &str,
     function: &str,
     args: &[serde_json::Value],
 ) -> Result<(), EvmError> {
-    use alloy_dyn_abi::JsonAbiExt;
-
-    validate_abi_size(abi)?;
-    let parsed: JsonAbi = serde_json::from_str(abi)
-        .map_err(|e| decode_err("abi_parse", format!("JsonAbi parse: {e}")))?;
-    let candidates = match parsed.function(function) {
-        Some(fs) if !fs.is_empty() => fs,
-        _ => {
-            return Err(decode_err(
-                "abi_function_missing",
-                format!("abi does not contain function {function}"),
-            ));
-        }
-    };
-    let func = candidates
-        .iter()
-        .find(|f| f.inputs.len() == args.len())
-        .ok_or_else(|| {
-            encode_err(
-                "abi_arg_count",
-                format!(
-                    "no overload of {function} accepts {} args",
-                    args.len()
-                ),
-            )
-        })?;
-    let dyn_values: Vec<alloy_dyn_abi::DynSolValue> = func
-        .inputs
-        .iter()
-        .zip(args)
-        .map(|(p, a)| {
-            let ty: alloy_dyn_abi::DynSolType = p
-                .selector_type()
-                .parse()
-                .map_err(|e| {
-                    encode_err(
-                        "abi_type_parse",
-                        format!("DynSolType parse '{}': {e}", p.selector_type()),
-                    )
-                })?;
-            crate::dyn_abi::js_value_to_dyn_sol(a, &ty)
-        })
-        .collect::<Result<_, _>>()?;
-    let _bytes = func
-        .abi_encode_input(&dyn_values)
-        .map_err(|e| encode_err("abi_encode_input", format!("alloy abi_encode_input: {e}")))?;
+    let _bytes = crate::dyn_abi::encode_call_input(abi, function, args)?;
     Ok(())
 }
 

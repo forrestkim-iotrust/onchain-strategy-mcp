@@ -30,9 +30,10 @@ pub use action::{
 };
 pub use address::{ZERO_ADDRESS, checksum as address_checksum, is_address};
 pub use config::EvmConfig;
+pub use dyn_abi::encode_call_input;
 pub use erc20::{
-    ERC20_ABI, erc20_allowance, erc20_balance_of, erc20_decimals, erc20_name, erc20_symbol,
-    erc20_total_supply,
+    ERC20_ABI, ERC20_WRITE_ABI, erc20_allowance, erc20_balance_of, erc20_decimals, erc20_name,
+    erc20_symbol, erc20_total_supply,
 };
 pub use error::EvmError;
 pub use native::{native_balance, native_block_number};

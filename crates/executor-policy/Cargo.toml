@@ -1,0 +1,29 @@
+[package]
+name = "executor-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# Phase 5 D-20: executor-policy is intentionally alloy-FREE. We consume
+# `Action` shapes via executor-core and `Address`/`U256` via alloy-primitives
+# (a separate crate). NEVER add the umbrella `alloy` dep here. The reverse
+# dep (executor-evm -> executor-policy) is also forbidden — the orchestrator
+# in executor-mcp::tools::strategy_run builds the bridge between the two
+# crates by constructing `Decision` from `NormalizedAction`.
+[dependencies]
+executor-core = { path = "../executor-core" }
+alloy-primitives = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+
+[dev-dependencies]
+# No runtime deps; pure-fn tests + TOML fixtures only.

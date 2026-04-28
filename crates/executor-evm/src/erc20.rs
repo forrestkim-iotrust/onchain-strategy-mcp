@@ -29,6 +29,29 @@ pub const ERC20_ABI: &str = r#"[
     {"type":"function","name":"totalSupply","inputs":[],"outputs":[{"name":"","type":"uint256"}],"stateMutability":"view"}
 ]"#;
 
+/// OpenZeppelin-compatible ERC20 WRITE ABI fragments (Phase 5 D-04).
+///
+/// Sibling of [`ERC20_ABI`] (read-only). Selectors are universal across all
+/// canonical ERC20 implementations:
+/// - `transfer(address,uint256)` → `0xa9059cbb`
+/// - `approve(address,uint256)`  → `0x095ea7b3`
+///
+/// Used by `executor_evm::normalize::{normalize_erc20_transfer,
+/// normalize_erc20_approve}` via `crate::dyn_abi::encode_call_input` to
+/// produce calldata for `Erc20Transfer` / `Erc20Approve` actions. NEVER
+/// extend [`ERC20_ABI`] with these write fragments — keep the read-only
+/// surface and the write surface as separate constants (D-04).
+pub const ERC20_WRITE_ABI: &str = r#"[
+    {"type":"function","name":"transfer","inputs":[
+        {"name":"to","type":"address"},
+        {"name":"value","type":"uint256"}
+    ],"outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable"},
+    {"type":"function","name":"approve","inputs":[
+        {"name":"spender","type":"address"},
+        {"name":"value","type":"uint256"}
+    ],"outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable"}
+]"#;
+
 /// `ctx.evm.readErc20.balanceOf(token, account, blockTag?)` — wei decimal
 /// string per D-03.
 pub async fn erc20_balance_of(
@@ -208,5 +231,69 @@ mod tests {
         let f = &abi.function("decimals").unwrap()[0];
         assert_eq!(f.outputs.len(), 1);
         assert_eq!(f.outputs[0].ty, "uint8");
+    }
+
+    // ─────── Phase 5 D-04 — ERC20_WRITE_ABI ───────
+
+    #[test]
+    fn erc20_write_abi_parses_and_contains_two_functions() {
+        let abi: JsonAbi = serde_json::from_str(ERC20_WRITE_ABI)
+            .expect("ERC20_WRITE_ABI must be valid JsonAbi");
+        for f in ["transfer", "approve"] {
+            let fns = abi
+                .function(f)
+                .unwrap_or_else(|| panic!("ERC20_WRITE_ABI missing function: {f}"));
+            assert!(
+                !fns.is_empty(),
+                "ERC20_WRITE_ABI function `{f}` resolves to empty overload set"
+            );
+        }
+    }
+
+    #[test]
+    fn erc20_write_abi_transfer_selector_is_a9059cbb() {
+        use crate::dyn_abi::encode_call_input;
+        use serde_json::json;
+        let bytes = encode_call_input(
+            ERC20_WRITE_ABI,
+            "transfer",
+            &[
+                json!("0x0000000000000000000000000000000000000001"),
+                json!("1"),
+            ],
+        )
+        .expect("encode ok");
+        assert_eq!(&bytes[..4], &[0xa9, 0x05, 0x9c, 0xbb]);
+    }
+
+    #[test]
+    fn erc20_write_abi_approve_selector_is_095ea7b3() {
+        use crate::dyn_abi::encode_call_input;
+        use serde_json::json;
+        let bytes = encode_call_input(
+            ERC20_WRITE_ABI,
+            "approve",
+            &[
+                json!("0x0000000000000000000000000000000000000001"),
+                json!("1"),
+            ],
+        )
+        .expect("encode ok");
+        assert_eq!(&bytes[..4], &[0x09, 0x5e, 0xa7, 0xb3]);
+    }
+
+    /// Phase 5 D-04: the read-only `ERC20_ABI` MUST NOT contain `transfer` or
+    /// `approve` write entries (sibling-constants invariant).
+    #[test]
+    fn erc20_abi_read_only_does_not_contain_write_functions() {
+        let abi: JsonAbi = serde_json::from_str(ERC20_ABI).unwrap();
+        assert!(
+            abi.function("transfer").is_none(),
+            "ERC20_ABI must not contain write fn `transfer`; it lives in ERC20_WRITE_ABI (D-04)"
+        );
+        assert!(
+            abi.function("approve").is_none(),
+            "ERC20_ABI must not contain write fn `approve`; it lives in ERC20_WRITE_ABI (D-04)"
+        );
     }
 }
