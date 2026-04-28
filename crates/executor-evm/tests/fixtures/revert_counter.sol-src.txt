@@ -1,0 +1,48 @@
+// Phase 5 D-05 — bytecode source for `revert_counter.hex`.
+//
+// This contract reverts UNCONDITIONALLY on any incoming call (no function
+// dispatch — every call to the runtime body REVERTs with a standard
+// `Error(string)` payload). simulate_one tests target it via any selector.
+//
+// The bytecode is hand-assembled (no solc dep) — it is small enough that
+// inline assembly is clearer than a Solidity build pipeline. Audit by
+// disassembling `revert_counter.hex`:
+//
+//   Constructor (deployer, 12 bytes — returns runtime body):
+//     PUSH1 0x70        ; runtime length = 112
+//     PUSH1 0x0c        ; runtime offset within constructor code
+//     PUSH1 0x00        ; dest mem
+//     CODECOPY          ; mem[0..112] = code[12..124]
+//     PUSH1 0x70        ; length
+//     PUSH1 0x00        ; offset
+//     RETURN
+//
+//   Runtime (12 bytes preamble + 100 bytes embedded revert data):
+//     PUSH1 0x64        ; revert-data length = 100
+//     PUSH1 0x0c        ; data offset within runtime code (after preamble)
+//     PUSH1 0x00        ; dest mem
+//     CODECOPY          ; mem[0..100] = revert payload
+//     PUSH1 0x64        ; length
+//     PUSH1 0x00        ; offset
+//     REVERT            ; revert with mem[0..100]
+//
+//   Embedded revert data (100 bytes — `Error(string)` ABI-encoded):
+//     selector  : 0x08c379a0
+//     offset    : 0x00..0020 (32-byte BE = 32)
+//     length    : 0x00..0014 (32-byte BE = 20)
+//     "forced revert reason" (20 bytes) padded right with 12 zero bytes
+//
+// Equivalent Solidity:
+//   // SPDX-License-Identifier: MIT
+//   pragma solidity ^0.8.20;
+//   contract RevertCounter {
+//       fallback() external payable {
+//           revert("forced revert reason");
+//       }
+//       receive() external payable {
+//           revert("forced revert reason");
+//       }
+//   }
+//
+// (The Solidity version compiles to ~250 bytes after function-dispatch
+// preamble; the hand-assembled version is 124 bytes total.)
