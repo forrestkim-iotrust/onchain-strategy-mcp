@@ -82,6 +82,13 @@ pub async fn spawn_server_with_state(db_path: &str) -> Result<ServerProc> {
 /// `spawn_server_with_state`'s fail-closed no-policy behavior; Phase 5 success
 /// tests opt in to `[policy].path` and live `[evm]` config explicitly.
 pub async fn spawn_server_with_config_text(config_text: &str) -> Result<ServerProc> {
+    spawn_server_with_config_text_and_env(config_text, &[]).await
+}
+
+pub async fn spawn_server_with_config_text_and_env(
+    config_text: &str,
+    envs: &[(&str, &str)],
+) -> Result<ServerProc> {
     let bin = env!("CARGO_BIN_EXE_executor-mcp");
     let tmp = tempfile::NamedTempFile::new()?;
     let config_path = tmp.path().to_path_buf();
@@ -90,14 +97,18 @@ pub async fn spawn_server_with_config_text(config_text: &str) -> Result<ServerPr
     std::fs::write(&config_path, config_text)?;
     let _ = tmp.into_temp_path().keep()?;
 
-    let mut child = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .env("RUST_LOG", "error")
         .env("EXECUTOR_CONFIG", config_path.as_os_str())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn()?;
 
     let stderr = child.stderr.take().expect("stderr piped");
     tokio::spawn(async move {

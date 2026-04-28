@@ -439,7 +439,8 @@ async fn schema_contract_round_trip() -> Result<()> {
 // ─────────── Plan 02-02: Phase 2 strategy behaviours (D-08a) ───────────
 
 use common::{
-    call_tool, extract_json_result, spawn_server_with_config_text, spawn_server_with_state,
+    call_tool, extract_json_result, spawn_server_with_config_text,
+    spawn_server_with_config_text_and_env, spawn_server_with_state,
 };
 
 #[tokio::test]
@@ -1179,6 +1180,39 @@ call_timeout_ms = 1000
         policy_path.display(),
         rpc_url,
     ))
+    .await
+}
+
+async fn spawn_server_with_policy_rpc_and_signer(
+    db_path: &std::path::Path,
+    policy_path: &std::path::Path,
+    rpc_url: &str,
+    private_key_env: &str,
+    private_key: &str,
+) -> Result<common::ServerProc> {
+    spawn_server_with_config_text_and_env(
+        &format!(
+            r#"[state]
+path = "{}"
+
+[policy]
+path = "{}"
+
+[evm]
+rpc_url = "{}"
+call_timeout_ms = 1000
+
+[signer]
+private_key_env = "{}"
+receipt_timeout_ms = 120000
+"#,
+            db_path.display(),
+            policy_path.display(),
+            rpc_url,
+            private_key_env,
+        ),
+        &[(private_key_env, private_key)],
+    )
     .await
 }
 
@@ -2718,7 +2752,7 @@ async fn strategy_run_returns_simulation_failed_when_revert() -> Result<()> {
 async fn strategy_run_journal_records_pass_decisions_on_success() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("state.db");
-    let recipient = "0x0000000000000000000000000000000000000002";
+    let recipient = "0x0000000000000000000000000000000000001000";
     let policy_toml = policy_with_contracts(
         &[31337],
         &[recipient],
@@ -2737,7 +2771,14 @@ async fn strategy_run_journal_records_pass_decisions_on_success() -> Result<()> 
     );
     let strategy_id = seed_strategy(&db_path, "journal_success", &source)?;
     ensure_anvil_8545().await?;
-    let mut proc = spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
+    let mut proc = spawn_server_with_policy_rpc_and_signer(
+        &db_path,
+        policy.path(),
+        "http://127.0.0.1:8545",
+        "EXECUTOR_TEST_PRIVATE_KEY",
+        "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    )
+    .await?;
     let _ = initialize(&mut proc).await?;
     let r = call_tool(
         &mut proc,
