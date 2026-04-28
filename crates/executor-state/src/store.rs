@@ -311,6 +311,7 @@ impl StateStore {
         &mut self,
         run_id: &str,
         action_index: i64,
+        signer_address: Option<&str>,
         error_kind: &str,
         error_detail: Option<&str>,
     ) -> Result<(), StateError> {
@@ -318,6 +319,7 @@ impl StateStore {
             &self.conn,
             run_id,
             action_index,
+            signer_address,
             error_kind,
             error_detail,
         )

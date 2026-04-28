@@ -574,7 +574,7 @@ impl ExecutorServer {
             }
         };
 
-        if let StrategyOutcome::Actions { .. } = &outcome {
+        if approved_normalized.iter().any(Option::is_some) {
             let signer_config = crate::config::load()
                 .map_err(|e| storage_error(format!("load config for signer: {e}")))?
                 .signer_config()
@@ -882,6 +882,7 @@ pub async fn execute_approved_actions(
                 state,
                 run_id,
                 first_action_index,
+                None,
                 "signer_not_configured",
                 Some("set [signer].private_key_env"),
             )
@@ -900,7 +901,7 @@ pub async fn execute_approved_actions(
         Ok(signer) => signer,
         Err(err) => {
             let kind = err.execution_error_kind();
-            record_execution_error(state, run_id, first_action_index, kind, Some(kind)).await?;
+            record_execution_error(state, run_id, first_action_index, None, kind, Some(kind)).await?;
             record_runtime_error(state, run_id, kind).await?;
             transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
             return Err(strategy_runtime_error(kind, kind, run_id));
@@ -917,7 +918,7 @@ pub async fn execute_approved_actions(
             Ok(pending) => pending,
             Err(err) => {
                 let kind = err.execution_error_kind();
-                record_execution_error(state, run_id, idx as i64, kind, Some(kind)).await?;
+                record_execution_error(state, run_id, idx as i64, Some(&signer_address), kind, Some(kind)).await?;
                 record_runtime_error(state, run_id, kind).await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
                 return Err(strategy_runtime_error(kind, kind, run_id));
@@ -935,7 +936,7 @@ pub async fn execute_approved_actions(
             Ok(receipt) => receipt,
             Err(err) => {
                 let kind = err.execution_error_kind();
-                record_execution_error(state, run_id, idx as i64, kind, Some(kind)).await?;
+                record_execution_error(state, run_id, idx as i64, Some(&signer_address), kind, Some(kind)).await?;
                 record_runtime_error(state, run_id, kind).await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
                 return Err(strategy_runtime_error(kind, kind, run_id));
@@ -950,8 +951,15 @@ pub async fn execute_approved_actions(
         )
         .await?;
         if receipt.receipt_status == executor_signer::LocalReceiptStatus::Reverted {
-            record_execution_error(state, run_id, idx as i64, "receipt_failed", Some("reverted"))
-                .await?;
+            record_execution_error(
+                state,
+                run_id,
+                idx as i64,
+                Some(&signer_address),
+                "receipt_failed",
+                Some("reverted"),
+            )
+            .await?;
             record_runtime_error(state, run_id, "receipt_failed").await?;
             transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
             return Err(strategy_runtime_error("receipt_failed", "reverted", run_id));
@@ -1006,16 +1014,24 @@ async fn record_execution_error(
     state: &Arc<Mutex<StateStore>>,
     run_id: &str,
     action_index: i64,
+    signer_address: Option<&str>,
     error_kind: &str,
     error_detail: Option<&str>,
 ) -> Result<(), McpError> {
     let state = state.clone();
     let rid = run_id.to_string();
+    let signer_address = signer_address.map(str::to_string);
     let error_kind = error_kind.to_string();
     let error_detail = error_detail.map(str::to_string);
     tokio::task::spawn_blocking(move || {
         let mut store = state.blocking_lock();
-        store.record_execution_error(&rid, action_index, &error_kind, error_detail.as_deref())
+        store.record_execution_error(
+            &rid,
+            action_index,
+            signer_address.as_deref(),
+            &error_kind,
+            error_detail.as_deref(),
+        )
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?

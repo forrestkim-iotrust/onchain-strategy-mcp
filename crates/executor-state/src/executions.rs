@@ -110,6 +110,7 @@ pub(crate) fn record_execution_error(
     conn: &Connection,
     run_id: &str,
     action_index: i64,
+    signer_address: Option<&str>,
     error_kind: &str,
     error_detail: Option<&str>,
 ) -> Result<(), StateError> {
@@ -124,8 +125,17 @@ pub(crate) fn record_execution_error(
         conn.execute(
             "INSERT INTO execution_actions \
              (id, run_id, action_index, signer_address, status, error_kind, error_detail, recorded_at, updated_at) \
-             VALUES (?1, ?2, ?3, '', 'failed', ?4, ?5, ?6, ?7)",
-            params![&id, run_id, action_index, error_kind, error_detail, &now, &now],
+             VALUES (?1, ?2, ?3, ?4, 'failed', ?5, ?6, ?7, ?8)",
+            params![
+                &id,
+                run_id,
+                action_index,
+                signer_address.unwrap_or_default(),
+                error_kind,
+                error_detail,
+                &now,
+                &now,
+            ],
         )?;
     }
     Ok(())
