@@ -784,7 +784,7 @@ fn read_contract_host_binding<'js>(
     // current-thread runtime.
     let result: Result<serde_json::Value, executor_evm::EvmError> =
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => handle.block_on(executor_evm::read_contract(provider, cfg, input)),
+            Ok(handle) => handle.block_on(executor_evm::read_contract(provider.clone(), cfg, input)),
             Err(_) => {
                 // No ambient runtime: spin up a transient single-threaded
                 // runtime. This path is only reached from synchronous unit
@@ -798,7 +798,7 @@ fn read_contract_host_binding<'js>(
                             &format!("evm rpc error: runtime build failed: {e}"),
                         )
                     })?;
-                rt.block_on(executor_evm::read_contract(provider, cfg, input))
+                rt.block_on(executor_evm::read_contract(provider.clone(), cfg, input))
             }
         };
 
@@ -817,13 +817,19 @@ fn read_contract_host_binding<'js>(
     };
 
     // Phase 4 D-13: journal the read (kind="evm_read").
-    let payload = serde_json::json!({
+    let resolved = resolve_block_number(&provider, cfg, block_tag);
+    let mut payload = serde_json::json!({
         "helper": "readContract",
         "args": args_arr,
         "function": function_name,
         "address": address,
         "block_tag": block_tag_to_json(block_tag),
     });
+    if let Some(n) = resolved {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
+        }
+    }
     evm_reads
         .borrow_mut()
         .push(crate::runtime::EvmReadRecord {
@@ -1102,12 +1108,18 @@ fn erc20_host_binding<'js>(
         .skip(1)
         .map(|s| serde_json::Value::String(s.clone()))
         .collect();
-    let payload = serde_json::json!({
+    let resolved = resolve_block_number(&provider, cfg, block_tag);
+    let mut payload = serde_json::json!({
         "helper": kind.helper_name(),
         "args": payload_args,
         "address": token,
         "block_tag": block_tag_to_json(block_tag),
     });
+    if let Some(n) = resolved {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
+        }
+    }
     evm_reads
         .borrow_mut()
         .push(crate::runtime::EvmReadRecord {
@@ -1167,7 +1179,7 @@ fn native_balance_host_binding<'js>(
     };
 
     let dispatch =
-        executor_evm::native::native_balance(provider, cfg, &account, block_tag);
+        executor_evm::native::native_balance(provider.clone(), cfg, &account, block_tag);
     let result: Result<serde_json::Value, executor_evm::EvmError> =
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => handle.block_on(dispatch),
@@ -1200,12 +1212,18 @@ fn native_balance_host_binding<'js>(
     };
 
     let target = account.to_lowercase();
-    let payload = serde_json::json!({
+    let resolved = resolve_block_number(&provider, cfg, block_tag);
+    let mut payload = serde_json::json!({
         "helper": "balance",
         "args": [],
         "account": account,
         "block_tag": block_tag_to_json(block_tag),
     });
+    if let Some(n) = resolved {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
+        }
+    }
     evm_reads
         .borrow_mut()
         .push(crate::runtime::EvmReadRecord {
@@ -1318,6 +1336,48 @@ fn block_tag_to_json(tag: executor_evm::read::BlockTag) -> serde_json::Value {
         BlockTag::Latest => serde_json::Value::String("latest".into()),
         BlockTag::Pending => serde_json::Value::String("pending".into()),
         BlockTag::Number(n) => serde_json::Value::from(n),
+    }
+}
+
+/// WR-03: resolve `block_number_resolved` for the journal payload (D-13).
+///
+/// - `BlockTag::Number(n)` → `Some(n)` (verbatim, no extra RPC).
+/// - `BlockTag::Latest|Pending` → one extra `eth_blockNumber` round-trip;
+///   on failure we log via `tracing::warn!` and return `None` (the field is
+///   then omitted from the payload).
+fn resolve_block_number(
+    provider: &std::sync::Arc<executor_evm::DynProvider>,
+    cfg: &executor_evm::EvmConfig,
+    tag: executor_evm::read::BlockTag,
+) -> Option<u64> {
+    use executor_evm::read::BlockTag;
+    match tag {
+        BlockTag::Number(n) => Some(n),
+        BlockTag::Latest | BlockTag::Pending => {
+            let dispatch = executor_evm::native::native_block_number(provider.clone(), cfg);
+            let result = match tokio::runtime::Handle::try_current() {
+                Ok(handle) => handle.block_on(dispatch),
+                Err(_) => {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .ok()?;
+                    rt.block_on(dispatch)
+                }
+            };
+            match result {
+                Ok(serde_json::Value::Number(n)) => n.as_u64(),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::warn!(
+                        detail = %e.detail_for_log(),
+                        kind = %e.data_kind(),
+                        "block_number_resolved lookup failed; omitting from payload"
+                    );
+                    None
+                }
+            }
+        }
     }
 }
 
