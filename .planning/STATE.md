@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
+status: ready_to_plan
 stopped_at: Phase 05 Plan 05 COMPLETE. Gap closure shipped: anvil-backed simulation_failure stdio proof, policy-denial simulation/skipped journaling, success/denied journal resource assertions, and six-rule policy_violation stdio grid. Workspace 487 tests / clippy clean. Ready for Phase 06.
 last_updated: "2026-04-28T12:55:06Z"
 last_activity: 2026-04-28 -- Phase 05 Plan 05 gap closure completed
 progress:
   total_phases: 7
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 17
   completed_plans: 17
-  percent: 100
+  percent: 86
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 05 (simulation-and-policy-gate) — COMPLETE
-Plan: 5 of 5
-Status: Phase 05 gap closure complete
-Last activity: 2026-04-28 -- Phase 05 Plan 05 gap closure completed
+Phase: 6
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-04-28
 
 Progress: [██████████] 100%
 
@@ -36,7 +36,7 @@ Progress: [██████████] 100%
 
 **Velocity:**
 
-- Total plans completed: 6
+- Total plans completed: 11
 - Average duration: ~5 min
 - Total execution time: ~0.3 hours
 
@@ -46,6 +46,7 @@ Progress: [██████████] 100%
 |-------|-------|-------|----------|
 | 01 | 3 | - | - |
 | 02 | 1/3 | ~6.5 min | ~6.5 min |
+| 05 | 5 | - | - |
 
 **Recent Trend:**
 
