@@ -5,6 +5,7 @@
 //! (Plan 05-03 implements the load wrapper). `Default` returns the deny-all
 //! shape — empty allowlists, raw_call gate disabled.
 
+use alloy_primitives::{Address, U256};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -90,6 +91,152 @@ pub struct PolicyConfig {
     pub erc20_spend: HashMap<String, Erc20SpendCap>,
     #[serde(default)]
     pub raw_call: RawCallGate,
+}
+
+// ───────────── Plan 05-03 — LoadedPolicy resolved type ─────────────
+
+/// Resolved (post-load) policy. Addresses parsed to alloy types; decimal
+/// strings parsed to `U256`; selectors parsed to typed enum.
+/// `evaluate(&LoadedPolicy, ...)` (Plan 05-03 Task 2) is the consumer.
+///
+/// `Default::default()` is **deny-all** — empty allowlists. The orchestrator
+/// (Plan 05-04) builds this once at boot via [`crate::load::load_policy_from_path`].
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LoadedPolicy {
+    pub chains_allow: Vec<u64>,
+    pub contracts_by_chain: HashMap<u64, Vec<Address>>,
+    pub selectors_by_chain_contract: HashMap<ChainContract, Vec<SelectorPattern>>,
+    pub native_value_by_chain: HashMap<u64, U256>,
+    pub erc20_spend_by_chain_token: HashMap<ChainContract, U256>,
+    pub raw_call_allow_global: bool,
+    pub raw_call_allow: Vec<RawCallAllowResolved>,
+}
+
+/// Composite key for selectors / erc20 spend caps. Serialised as
+/// `"<chain>:<address>"` so `policy_get` and tracing keep stable strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChainContract {
+    pub chain: u64,
+    pub contract: Address,
+}
+
+impl ChainContract {
+    pub fn new(chain: u64, contract: Address) -> Self {
+        Self { chain, contract }
+    }
+}
+
+impl Serialize for ChainContract {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&format!("{}:{}", self.chain, self.contract))
+    }
+}
+
+/// 4-byte selector pattern. `Any` admits all selectors at the matching
+/// `(chain, contract)` key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectorPattern {
+    Specific(#[serde(serialize_with = "serialize_selector_hex")] [u8; 4]),
+    Any,
+}
+
+fn serialize_selector_hex<S: serde::Serializer>(
+    s: &[u8; 4],
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(&format!("0x{:02x}{:02x}{:02x}{:02x}", s[0], s[1], s[2], s[3]))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RawCallAllowResolved {
+    pub chain: u64,
+    #[serde(serialize_with = "serialize_address")]
+    pub contract: Address,
+    pub selector: SelectorPattern,
+}
+
+fn serialize_address<S: serde::Serializer>(a: &Address, ser: S) -> Result<S::Ok, S::Error> {
+    ser.serialize_str(&format!("{a}"))
+}
+
+impl LoadedPolicy {
+    /// POL-01 — chain ∈ allowlist.
+    pub fn allows_chain(&self, chain_id: u64) -> bool {
+        self.chains_allow.contains(&chain_id)
+    }
+
+    /// POL-02 — chain has a `[contracts.<id>]` sub-table AND `addr` is in the
+    /// allow list. Empty subtable / missing subtable → deny.
+    pub fn allows_contract(&self, chain_id: u64, addr: &Address) -> bool {
+        self.contracts_by_chain
+            .get(&chain_id)
+            .is_some_and(|list| list.contains(addr))
+    }
+
+    /// POL-03 — selector match at `(chain, contract)`. The `Any` sentinel
+    /// admits every selector. Skipped by `eval` for `RawCall` actions
+    /// (POL-06 is the exclusive gate for raw calls — D-06).
+    pub fn allows_selector(
+        &self,
+        chain_id: u64,
+        contract: &Address,
+        selector: &[u8; 4],
+    ) -> bool {
+        let key = ChainContract::new(chain_id, *contract);
+        self.selectors_by_chain_contract
+            .get(&key)
+            .is_some_and(|list| {
+                list.iter().any(|p| match p {
+                    SelectorPattern::Any => true,
+                    SelectorPattern::Specific(s) => s == selector,
+                })
+            })
+    }
+
+    /// POL-04 — per-action native value cap. **Cap absent for a chain ⇒ 0**
+    /// (deny-by-default for any non-zero value on that chain).
+    pub fn native_value_cap(&self, chain_id: u64) -> U256 {
+        self.native_value_by_chain
+            .get(&chain_id)
+            .copied()
+            .unwrap_or(U256::ZERO)
+    }
+
+    /// POL-05 — per-(chain, token) cumulative spend cap. `None` means no cap
+    /// is configured for that token (researcher A-7: cap absent means
+    /// uncapped on that token specifically; documented behaviour).
+    pub fn erc20_spend_cap(&self, chain_id: u64, token: &Address) -> Option<U256> {
+        let key = ChainContract::new(chain_id, *token);
+        self.erc20_spend_by_chain_token.get(&key).copied()
+    }
+
+    /// POL-06 — raw_call gate. Returns `true` iff `allow_global == true` OR
+    /// some `(chain, contract, selector)` entry matches. The `Any` selector
+    /// sentinel admits every selector at the listed contract; a `Specific`
+    /// pattern requires both `Some(s)` calldata and exact byte match.
+    /// Sub-4-byte calldata (`selector = None`) requires either `allow_global`
+    /// or an `Any` entry at the matching contract.
+    pub fn raw_call_allows(
+        &self,
+        chain_id: u64,
+        contract: &Address,
+        selector: Option<&[u8; 4]>,
+    ) -> bool {
+        if self.raw_call_allow_global {
+            return true;
+        }
+        self.raw_call_allow.iter().any(|e| {
+            if e.chain != chain_id || &e.contract != contract {
+                return false;
+            }
+            match (&e.selector, selector) {
+                (SelectorPattern::Any, _) => true,
+                (SelectorPattern::Specific(a), Some(b)) => a == b,
+                (SelectorPattern::Specific(_), None) => false,
+            }
+        })
+    }
 }
 
 #[cfg(test)]

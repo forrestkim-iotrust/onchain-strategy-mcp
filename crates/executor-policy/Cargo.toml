@@ -15,7 +15,7 @@ workspace = true
 # crates by constructing `Decision` from `NormalizedAction`.
 [dependencies]
 executor-core = { path = "../executor-core" }
-alloy-primitives = "1"
+alloy-primitives = { version = "1", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

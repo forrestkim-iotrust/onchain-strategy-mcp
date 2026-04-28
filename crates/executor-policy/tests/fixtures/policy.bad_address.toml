@@ -1,0 +1,5 @@
+[chains]
+allow = [31337]
+
+[contracts.31337]
+allow = ["0xnot_an_address"]

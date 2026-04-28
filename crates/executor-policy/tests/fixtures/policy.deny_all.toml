@@ -1,0 +1,6 @@
+[chains]
+allow = []
+
+[raw_call]
+allow_global = false
+allow = []

@@ -16,10 +16,14 @@
 
 pub mod decision;
 pub mod error;
+pub mod load;
 pub mod model;
 pub mod selector;
 
 pub use decision::{Decision, DecisionVerdict, NormalizedActionKindCopy};
 pub use error::PolicyError;
-pub use model::PolicyConfig;
+pub use load::{MAX_POLICY_FILE_BYTES, load_policy_from_path, parse_policy_str};
+pub use model::{
+    ChainContract, LoadedPolicy, PolicyConfig, RawCallAllowResolved, SelectorPattern,
+};
 pub use selector::{extract_selector, selector_to_hex};

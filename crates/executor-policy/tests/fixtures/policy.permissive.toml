@@ -1,0 +1,26 @@
+[chains]
+allow = [31337]
+
+[contracts.31337]
+allow = [
+    "0x5fbdb2315678afecb367f032d93f642f64180aa3",
+    "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+]
+
+[selectors."31337:0x5fbdb2315678afecb367f032d93f642f64180aa3"]
+allow = ["any"]
+
+[selectors."31337:0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"]
+allow = ["0xa9059cbb", "0x095ea7b3", "0x70a08231"]
+
+[native_value.31337]
+max_per_action = "1000000000000000000000"
+
+[erc20_spend."31337:0xe7f1725e7734ce288f8367e1bb143e90bb3f0512"]
+max_per_run = "1000000000000000000000000"
+
+[raw_call]
+allow_global = false
+allow = [
+    { chain = 31337, contract = "0x5fbdb2315678afecb367f032d93f642f64180aa3", selector = "any" },
+]
