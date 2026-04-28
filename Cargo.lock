@@ -1671,7 +1671,12 @@ dependencies = [
 name = "executor-signer"
 version = "0.1.0"
 dependencies = [
+ "alloy",
+ "alloy-primitives",
  "executor-core",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
