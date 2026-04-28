@@ -18,8 +18,8 @@ use executor_core::schema::{
         NativeTransferAction, RawCallAction,
     },
     execution::{
-        ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome, RunStatus, StrategyOutcome,
-        StrategyRunResponse,
+        ExecutionActionReport, ExecutionGetResponse, ExecutionIdInput, JournalActionOutcome,
+        RunStatus, StrategyOutcome, StrategyRunResponse,
     },
     policy::PolicyUpdateInput,
     prompt_args::{ReviewEvmStrategyArgs, WriteEvmStrategyArgs},
@@ -139,6 +139,11 @@ fn strategy_delete_response_schema_stable() {
 #[test]
 fn execution_get_response_schema_stable() {
     assert_schema_matches_golden("ExecutionGetResponse", schema_for!(ExecutionGetResponse));
+}
+
+#[test]
+fn execution_action_report_schema_stable() {
+    assert_schema_matches_golden("ExecutionActionReport", schema_for!(ExecutionActionReport));
 }
 
 #[test]

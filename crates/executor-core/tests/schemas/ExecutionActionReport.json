@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ExecutionActionReport",
+  "type": "object",
+  "properties": {
+    "action_index": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "error_detail": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error_kind": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "gas_used": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "receipt_status": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recorded_at": {
+      "type": "string"
+    },
+    "signer_address": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "tx_hash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "updated_at": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "action_index",
+    "signer_address",
+    "status",
+    "recorded_at",
+    "updated_at"
+  ]
+}

@@ -199,8 +199,9 @@ impl ServerHandler for ExecutorServer {
              or -32018 (strategy_invalid_output). \
              Storage errors use -32014 (not_found), -32015 (name_conflict), \
              -32016 (storage_error); validation failures use -32602 (invalid_params). \
-             Resource templates: `strategy://{strategy_id}` and `journal://{run_id}` \
-             return real JSON; `execution://{id}` remains phase-gated (Phase 6). \
+             Resource templates: `strategy://{strategy_id}`, `journal://{run_id}`, \
+             and `execution://{run_id}` return real JSON. `execution_get` and \
+             `execution://{run_id}` return receipt-backed execution reports. \
              Only `policy_update` still returns the structured `unimplemented` envelope \
              (code -32010, data.phase=5).",
         )

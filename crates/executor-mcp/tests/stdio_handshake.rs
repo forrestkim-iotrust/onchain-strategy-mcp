@@ -221,7 +221,7 @@ async fn resources_surface_matches_contract() -> Result<()> {
         "missing strategy template; got {template_uris:?}"
     );
     assert!(
-        template_uris.contains(&"execution://{execution_id}"),
+        template_uris.contains(&"execution://{run_id}"),
         "missing execution template; got {template_uris:?}"
     );
     assert!(
@@ -884,6 +884,71 @@ async fn execution_get_returns_not_found_when_empty() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn execution_status_surfaces_match() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+
+    let (strategy_id, run_id) = {
+        let mut store = executor_state::StateStore::open(&db_path)?;
+        let outcome = store.register_strategy("exec_status", "(ctx) => []", None, None)?;
+        let sid = match outcome {
+            executor_state::RegisterOutcome::Created(s)
+            | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+        };
+        let rid = store.insert_run(&sid, executor_core::schema::execution::RunStatus::Running)?;
+        store.record_execution_broadcast(
+            &rid,
+            1,
+            "0x1111111111111111111111111111111111111111",
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )?;
+        store.record_execution_receipt_success(&rid, 1, "success", "21000")?;
+        (sid, rid)
+    };
+
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let tool = extract_json_result(
+        &call_tool(
+            &mut proc,
+            2,
+            "execution_get",
+            json!({ "execution_id": run_id }),
+        )
+        .await?,
+    );
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 3, "method": "resources/read",
+            "params": { "uri": format!("execution://{run_id}") }
+        }),
+    )
+    .await?;
+    let resource_resp = recv(&mut proc).await?;
+    let contents = resource_resp["result"]["contents"]
+        .as_array()
+        .expect("contents array");
+    let resource_text = contents[0]["text"].as_str().expect("resource text");
+    let resource: Value = serde_json::from_str(resource_text)?;
+
+    assert_eq!(tool["run_id"], run_id);
+    assert_eq!(tool["strategy_id"], strategy_id);
+    assert_eq!(tool["run_id"], resource["run_id"]);
+    assert_eq!(tool["status"], resource["status"]);
+    assert_eq!(tool["actions"], resource["actions"]);
+    assert_eq!(tool["actions"][0]["action_index"], 1);
+    assert_eq!(tool["actions"][0]["status"], "confirmed");
+    assert_eq!(tool["actions"][0]["receipt_status"], "success");
+    assert_eq!(tool["actions"][0]["gas_used"], "21000");
+    assert_eq!(tool["actions"][0]["tx_hash"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
 // ─────────── Plan 02-03: end-to-end run roundtrip + schema future-variants ───────────
 
 #[tokio::test]
@@ -921,6 +986,14 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
         assert_eq!(body["run_id"].as_str(), Some(run_id.as_str()));
         assert_eq!(body["strategy_id"].as_str(), Some(strategy_id.as_str()));
         assert_eq!(body["status"].as_str(), Some("queued"));
+        assert!(
+            body["actions"].as_array().is_some_and(|a| a.is_empty()),
+            "runs without execution rows must return actions: []: {body}"
+        );
+        assert!(
+            body.get("signer_address").is_none_or(|v| v.is_null()),
+            "runs without execution rows must omit/null signer_address: {body}"
+        );
         assert!(
             body["started_at"].as_str().is_some_and(|s| !s.is_empty()),
             "started_at must be a non-empty string: {body}"

@@ -5,10 +5,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Input for execution_get (Phase 2 implements persistence).")]
+#[schemars(description = "Input for execution_get; the legacy field name accepts a run ID.")]
 pub struct ExecutionIdInput {
-    /// Opaque execution identifier returned from a previous `strategy_run_once`.
-    #[schemars(description = "Opaque execution identifier returned from a previous `strategy_run_once`.")]
+    /// Run ID returned from a previous `strategy_run`.
+    #[schemars(description = "Run ID returned from a previous `strategy_run`.")]
     pub execution_id: String,
 }
 
@@ -146,8 +146,27 @@ pub struct StrategyRunResponse {
     pub outcome: StrategyOutcome,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ExecutionActionReport {
+    pub action_index: u32,
+    pub signer_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gas_used: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
+    pub recorded_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Response for execution_get (Phase 2 base run model).")]
+#[schemars(description = "Response for execution_get with persisted Phase 6 execution action rows.")]
 pub struct ExecutionGetResponse {
     pub run_id: String,
     pub strategy_id: String,
@@ -157,4 +176,8 @@ pub struct ExecutionGetResponse {
     pub finished_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_address: Option<String>,
+    #[serde(default)]
+    pub actions: Vec<ExecutionActionReport>,
 }
