@@ -35,24 +35,24 @@
 
 ### Execution Pipeline
 
-- [ ] **EXE-01**: Runtime validates `Action[]` before any simulation or signing.
-- [ ] **EXE-02**: Runtime ABI-encodes contract call actions into transaction requests.
+- [x] **EXE-01**: Runtime validates `Action[]` before any simulation or signing.
+- [x] **EXE-02**: Runtime ABI-encodes contract call actions into transaction requests.
 - [x] **EXE-03**: Runtime simulates transaction requests before signing.
 - [x] **EXE-04**: Runtime denies signing when simulation fails.
-- [ ] **EXE-05**: Runtime applies policy before signing.
-- [ ] **EXE-06**: Runtime denies signing when policy rejects an action.
+- [x] **EXE-05**: Runtime applies policy before signing.
+- [x] **EXE-06**: Runtime denies signing when policy rejects an action.
 - [ ] **EXE-07**: Runtime signs approved transaction requests with a local signer.
 - [ ] **EXE-08**: Runtime broadcasts signed transactions to the configured RPC.
 - [ ] **EXE-09**: Runtime waits for receipt and records confirmed/failed status.
 
 ### Policy
 
-- [ ] **POL-01**: Policy can restrict allowed chain IDs.
-- [ ] **POL-02**: Policy can restrict target contract addresses.
-- [ ] **POL-03**: Policy can restrict function selectors.
-- [ ] **POL-04**: Policy can restrict max native value per action.
-- [ ] **POL-05**: Policy can restrict max ERC20 spend for helper-generated ERC20 actions.
-- [ ] **POL-06**: Raw calldata actions are denied unless explicitly allowed by policy.
+- [x] **POL-01**: Policy can restrict allowed chain IDs.
+- [x] **POL-02**: Policy can restrict target contract addresses.
+- [x] **POL-03**: Policy can restrict function selectors.
+- [x] **POL-04**: Policy can restrict max native value per action.
+- [x] **POL-05**: Policy can restrict max ERC20 spend for helper-generated ERC20 actions.
+- [x] **POL-06**: Raw calldata actions are denied unless explicitly allowed by policy.
 
 ### State and Journal
 
@@ -60,7 +60,7 @@
 - [x] **STJ-02**: Runtime persists each strategy run with run ID, strategy ID, started time, and status. *(02-01 base CRUD + ULID + phase2_emittable; 02-03 lifecycle tests + run_roundtrip_insert_get_update_status end-to-end MCP stdio proof + run_status_schema_includes_future_variants D-08a.)*
 - [x] **STJ-03**: Runtime records source reads performed during each run. *(03-02 RuntimeContext::flush emits one journal_source_reads row per run with kind="strategy_source"; 03-03 stdio test verifies end-to-end.)*
 - [x] **STJ-04**: Runtime records returned actions and validation errors. *(03-03 record_action / record_validation_error / record_runtime_error helpers; one journal_actions row per run with outcome ∈ {noop, actions, validation_error, runtime_error}.)*
-- [ ] **STJ-05**: Runtime records simulation results and policy decisions.
+- [x] **STJ-05**: Runtime records simulation results and policy decisions.
 - [ ] **STJ-06**: Runtime records tx hash, receipt status, gas used, and execution errors.
 - [ ] **STJ-07**: Agent can query execution status by execution/run ID.
 
@@ -118,26 +118,26 @@
 | CTX-07 | Phase 4 | Closed |
 | CTX-08 | Phase 4 | Closed |
 | CTX-09 | Phase 4 | Closed |
-| EXE-01 | Phase 5 | In progress (05-01 added MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output; full sim/sign-gate wiring lands in 05-04) |
-| EXE-02 | Phase 5 | Closed (05-01 normalize_action per D-02 + shared encode_call_input + ERC20_WRITE_ABI; cargo test -p executor-evm --test normalize 11/11) |
+| EXE-01 | Phase 5 | Complete |
+| EXE-02 | Phase 5 | Complete |
 | EXE-03 | Phase 5 | Complete |
-| EXE-04 | Phase 5 | Complete |
-| EXE-05 | Phase 5 | Pending |
-| EXE-06 | Phase 5 | Pending |
+| EXE-04 | Phase 5 | Complete (05-05 anvil-backed stdio proof asserts simulation_failure/revert) |
+| EXE-05 | Phase 5 | Complete |
+| EXE-06 | Phase 5 | Complete (05-05 stdio grid asserts policy denials before signing) |
 | EXE-07 | Phase 6 | Pending |
 | EXE-08 | Phase 6 | Pending |
 | EXE-09 | Phase 6 | Pending |
-| POL-01 | Phase 5 | Pending |
-| POL-02 | Phase 5 | Pending |
-| POL-03 | Phase 5 | Pending |
-| POL-04 | Phase 5 | Pending |
-| POL-05 | Phase 5 | Pending |
-| POL-06 | Phase 5 | Pending |
+| POL-01 | Phase 5 | Complete (05-05 stdio rule grid) |
+| POL-02 | Phase 5 | Complete (05-05 stdio rule grid) |
+| POL-03 | Phase 5 | Complete (05-05 stdio rule grid) |
+| POL-04 | Phase 5 | Complete (05-05 stdio rule grid) |
+| POL-05 | Phase 5 | Complete (05-05 stdio rule grid) |
+| POL-06 | Phase 5 | Complete (05-05 stdio rule grid) |
 | STJ-01 | Phase 2 | Complete (02-01 schema + 02-02 strategies_persist_across_restart) |
 | STJ-02 | Phase 2 | Complete (02-01 base CRUD + 02-03 lifecycle + run_roundtrip_insert_get_update_status) |
 | STJ-03 | Phase 3 | Complete (03-02 RuntimeContext::flush emits journal_source_reads; 03-03 stdio coverage) |
 | STJ-04 | Phase 3 | Complete (03-03 record_action / record_validation_error / record_runtime_error → journal_actions) |
-| STJ-05 | Phase 5 | Pending |
+| STJ-05 | Phase 5 | Complete (05-05 journal resource assertions for policy/simulation pass, fail, and skipped rows) |
 | STJ-06 | Phase 6 | Pending |
 | STJ-07 | Phase 6 | Pending |
 | VER-01 | Phase 7 | Pending |

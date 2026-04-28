@@ -10,7 +10,7 @@ v1 builds a local MCP runtime that lets an AI agent write JavaScript EVM automat
 - [x] **Phase 2: Strategy State and Journal** - Persist strategies, runs, and journal records locally.
 - [x] **Phase 3: JavaScript Strategy Runner** - Run sandboxed JavaScript strategies with a constrained `ctx`.
 - [x] **Phase 4: EVM Context and Actions** - Implement generic EVM reads/writes plus ERC20/native helpers.
-- [ ] **Phase 5: Simulation and Policy Gate** - Validate actions, simulate, and enforce policy before signing.
+- [x] **Phase 5: Simulation and Policy Gate** - Validate actions, simulate, and enforce policy before signing.
 - [ ] **Phase 6: Local Managed Execution** - Sign locally, broadcast transactions, wait receipts, and record execution reports.
 - [ ] **Phase 7: Examples, Tests, and Documentation** - Prove the runtime with local EVM examples and verification tests.
 
@@ -95,8 +95,9 @@ Plans:
 Plans:
 - [x] 05-01: Action-to-transaction normalization
 - [x] 05-02: Simulation adapter and failure handling
-- [~] 05-03: Policy model and deny-by-default evaluator (evaluator+factories complete; orchestrator wiring lands in 05-04)
-- [ ] 05-04: Journaled decisions and MCP error reporting
+- [x] 05-03: Policy model and deny-by-default evaluator
+- [x] 05-04: Journaled decisions and MCP error reporting
+- [x] 05-05: Gap closure: simulation failure stdio proof, skipped simulation journaling, and policy negative grid
 
 ### Phase 6: Local Managed Execution
 **Goal**: Approved actions execute on-chain through a local signer and produce receipt-backed reports.  
@@ -139,6 +140,6 @@ Plans:
 | 2. Strategy State and Journal | 3/3 | Complete | 2026-04-26 |
 | 3. JavaScript Strategy Runner | 3/3 | Complete | 2026-04-27 |
 | 4. EVM Context and Actions | 4/4 | Complete | 2026-04-27 |
-| 5. Simulation and Policy Gate | 1/4 | In progress | - |
+| 5. Simulation and Policy Gate | 5/5 | Complete | 2026-04-28 |
 | 6. Local Managed Execution | 0/3 | Not started | - |
 | 7. Examples, Tests, and Documentation | 0/3 | Not started | - |

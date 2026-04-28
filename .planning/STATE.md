@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 05 Plan 01 COMPLETE. executor-policy crate scaffolded (alloy-FREE per D-20); Action -> NormalizedAction normalize layer per D-02; encode_call_input shared encoder per D-03; ERC20_WRITE_ABI sibling per D-04; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02. Workspace 388 tests / clippy clean. Ready for Plan 05-02.
-last_updated: "2026-04-28T11:05:19.785Z"
-last_activity: 2026-04-28 -- Phase 05 execution started
+stopped_at: Phase 05 Plan 05 COMPLETE. Gap closure shipped: anvil-backed simulation_failure stdio proof, policy-denial simulation/skipped journaling, success/denied journal resource assertions, and six-rule policy_violation stdio grid. Workspace 487 tests / clippy clean. Ready for Phase 06.
+last_updated: "2026-04-28T12:55:06Z"
+last_activity: 2026-04-28 -- Phase 05 Plan 05 gap closure completed
 progress:
   total_phases: 7
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 17
-  completed_plans: 16
-  percent: 94
+  completed_plans: 17
+  percent: 100
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 05 (simulation-and-policy-gate) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 05
-Last activity: 2026-04-28 -- Phase 05 execution started
+Phase: 05 (simulation-and-policy-gate) — COMPLETE
+Plan: 5 of 5
+Status: Phase 05 gap closure complete
+Last activity: 2026-04-28 -- Phase 05 Plan 05 gap closure completed
 
-Progress: [█████████░] 88%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -61,6 +61,7 @@ Progress: [█████████░] 88%
 | Phase 04 P02 | ~10 min | 2 tasks | 6 created + 3 modified |
 | Phase 05 P01 | ~25 min | 3 tasks | 9 created + 9 modified |
 | Phase 05 P02 | 12 | 3 tasks | 16 files |
+| Phase 05 P05 | 15 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -127,7 +128,9 @@ Recent decisions affecting current work:
 - [Phase ?]: sanitize_revert_reason promoted pub(crate)->pub for cross-module reuse (D-19); body unchanged
 - [Phase ?]: Hand-assembled 124-byte revert_counter.hex (no solc dep); audit in revert_counter.sol-src.txt
 - [Phase ?]: map_simulation_error takes &SimulationFailReason (not full Outcome) — type system prevents raw_for_log leak (MR-01)
-- [Phase ?]: Cross-plan #[ignore]'d stdio stub registered in 05-02; 05-04 flips ignore + fills body
+- Phase 05-05: `strategy_run_returns_simulation_failed_when_revert` is now an active anvil-backed stdio proof for -32017 simulation_failure/action_index=0/fail_reason=revert.
+- Phase 05-05: Policy denial records both policy/fail and simulation/skipped journal_decisions rows without running RPC simulation.
+- Phase 05-05: stdio policy negative grid covers chain_not_allowed, contract_not_allowed, selector_not_allowed, native_value_exceeds, erc20_spend_exceeds, and raw_call_denied.
 
 ### Pending Todos
 
@@ -137,11 +140,10 @@ Recent decisions affecting current work:
   - 04-02: ERC20 + native helpers + flat aliases (CTX-02/03/04)
   - 04-03: 5 Action variants + builders + validator widening + D-16 flip (CTX-05/06/07/08)
   - 04-04: ctx.units + ctx.address + 15-case negative grid + 6 schema goldens (CTX-09)
-- Phase 5 IN PROGRESS (1/4 plans):
-  - 05-01: executor-policy crate scaffold (alloy-FREE) + Action -> NormalizedAction (D-02) + shared encode_call_input (D-03) + ERC20_WRITE_ABI (D-04) + MAX_ACTIONS_PER_RUN=32 cap (D-12 / BR-02 carry-forward). EXE-01 + EXE-02 demonstrable.
-- Workspace: 388 tests across 38 suites (was 349 after Phase 4; +39 net for 05-01: 13 executor-policy + 8 executor-evm lib + 11 normalize + 1 validation + ≥6 stdio); clippy `--workspace --all-targets -- -D warnings` clean; sandbox_host_globals (HR-01 regression) still green (no new ctx.* surface).
-- D-13 carry-forward (HR-01 / MR-01 / MR-03 / MR-04 / BR-01 / BR-02 / WR-01 / WR-04) observably honoured across Plan 05-01.
-- Next: Plan 05-02 (simulation adapter — executor-evm::simulate + sanitize_revert_reason promotion to pub per D-19).
+- Phase 5 COMPLETE after gap closure (05-05): simulation failure stdio proof, policy denial, six policy dimensions, and STJ-05 decision journaling are now covered through MCP-visible stdio tests.
+- Workspace: 487 tests across 48 suites; clippy `--workspace --all-targets -- -D warnings` clean.
+- D-13 carry-forward (HR-01 / MR-01 / MR-03 / MR-04 / BR-01 / BR-02 / WR-01 / WR-04) observably honoured across Phase 05.
+- Next: Phase 06 (local managed execution: signer boundary, broadcast, receipt/status reporting).
 
 ### Blockers/Concerns
 
@@ -159,8 +161,8 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-28T07:13:25.410Z
-Stopped at: Phase 05 Plan 01 COMPLETE. executor-policy crate scaffolded (alloy-FREE per D-20); Action -> NormalizedAction normalize layer per D-02; encode_call_input shared encoder per D-03; ERC20_WRITE_ABI sibling per D-04; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02. Workspace 388 tests / clippy clean. Ready for Plan 05-02.
+Last session: 2026-04-28T12:55:06Z
+Stopped at: Phase 05 Plan 05 COMPLETE. Gap closure shipped: anvil-backed simulation_failure stdio proof, policy-denial simulation/skipped journaling, success/denied journal resource assertions, and six-rule policy_violation stdio grid. Workspace 487 tests / clippy clean. Ready for Phase 06.
 Resume file: None
 
 **Planned Phase:** 1 (mcp-runtime-surface) — 3 plans — 2026-04-24T09:01:09.909Z (COMPLETE)
