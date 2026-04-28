@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 05 Plan 01 COMPLETE (executor-policy crate scaffolded alloy-free; encode_call_input + ERC20_WRITE_ABI extracted; normalize per D-02; MAX_ACTIONS_PER_RUN=32 cap)
-last_updated: "2026-04-27T11:00:00Z"
-last_activity: 2026-04-27
+stopped_at: Phase 05 Plan 01 COMPLETE. executor-policy crate scaffolded (alloy-FREE per D-20); Action -> NormalizedAction normalize layer per D-02; encode_call_input shared encoder per D-03; ERC20_WRITE_ABI sibling per D-04; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02. Workspace 388 tests / clippy clean. Ready for Plan 05-02.
+last_updated: "2026-04-28T07:13:45.002Z"
+last_activity: 2026-04-28
 progress:
   total_phases: 7
   completed_phases: 4
-  total_plans: 14
-  completed_plans: 14
-  percent: 100
+  total_plans: 17
+  completed_plans: 15
+  percent: 88
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 ## Current Position
 
 Phase: 05 (simulation-and-policy-gate) — IN PROGRESS
-Plan: 1 of 4 complete
-Status: Plan 05-01 closed (executor-policy crate scaffolded alloy-FREE per D-20; encode_call_input shared between dry_run_abi_encode and normalize per D-03; ERC20_WRITE_ABI sibling per D-04; Action -> NormalizedAction normalize layer per D-02 table; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02 carry-forward). 388 workspace tests (was 349; +39 net); clippy strict clean; HR-01 sandbox regression green.
-Last activity: 2026-04-27
+Plan: 2 of 4 complete
+Status: Ready to execute
+Last activity: 2026-04-28
 
-Progress: [██░░░░░░░░] 25% Phase-5 plans complete (1/4); next: 05-02 simulation adapter.
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [██░░░░░░░░] 25% Phase-5 plans complete (1/4); nex
 | Phase 04 P01 | ~30 min | 3 tasks | 14 created + 14 modified |
 | Phase 04 P02 | ~10 min | 2 tasks | 6 created + 3 modified |
 | Phase 05 P01 | ~25 min | 3 tasks | 9 created + 9 modified |
+| Phase 05 P02 | 12 | 3 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,11 @@ Recent decisions affecting current work:
 - Plan 05-01: normalize::parse_address_field re-wraps EvmError::Encode { category: bad_address } as bad_address_to so wire detail names the failing field at the normalize layer (vs the inner walker).
 - Plan 05-01: Erc20Transfer/Approve calldata uses original input strings (et.to / ea.spender) directly — js_value_to_dyn_sol accepts lowercase + EIP-55, so no lossy Address::Display round-trip needed (refines plan note in Sub-task 2.2).
 - Plan 05-01: MAX_ACTIONS_PER_RUN=32 enforced at validate_strategy_output BEFORE the per-element kind walk so a 1000-element noop array fails O(1) instead of O(n) (D-12 / D-18 / BR-02 carry-forward — cap at gate, not at builder).
+- [Phase ?]: simulate_one is async fn; orchestrator drives via Handle::current().block_on inside spawn_blocking (WR-01 lock)
+- [Phase ?]: sanitize_revert_reason promoted pub(crate)->pub for cross-module reuse (D-19); body unchanged
+- [Phase ?]: Hand-assembled 124-byte revert_counter.hex (no solc dep); audit in revert_counter.sol-src.txt
+- [Phase ?]: map_simulation_error takes &SimulationFailReason (not full Outcome) — type system prevents raw_for_log leak (MR-01)
+- [Phase ?]: Cross-plan #[ignore]'d stdio stub registered in 05-02; 05-04 flips ignore + fills body
 
 ### Pending Todos
 
@@ -153,7 +159,7 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-04-27T11:00:00Z
+Last session: 2026-04-28T07:13:25.410Z
 Stopped at: Phase 05 Plan 01 COMPLETE. executor-policy crate scaffolded (alloy-FREE per D-20); Action -> NormalizedAction normalize layer per D-02; encode_call_input shared encoder per D-03; ERC20_WRITE_ABI sibling per D-04; MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output per D-12 / BR-02. Workspace 388 tests / clippy clean. Ready for Plan 05-02.
 Resume file: None
 

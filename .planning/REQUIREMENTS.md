@@ -37,8 +37,8 @@
 
 - [ ] **EXE-01**: Runtime validates `Action[]` before any simulation or signing.
 - [ ] **EXE-02**: Runtime ABI-encodes contract call actions into transaction requests.
-- [ ] **EXE-03**: Runtime simulates transaction requests before signing.
-- [ ] **EXE-04**: Runtime denies signing when simulation fails.
+- [x] **EXE-03**: Runtime simulates transaction requests before signing.
+- [x] **EXE-04**: Runtime denies signing when simulation fails.
 - [ ] **EXE-05**: Runtime applies policy before signing.
 - [ ] **EXE-06**: Runtime denies signing when policy rejects an action.
 - [ ] **EXE-07**: Runtime signs approved transaction requests with a local signer.
@@ -120,8 +120,8 @@
 | CTX-09 | Phase 4 | Closed |
 | EXE-01 | Phase 5 | In progress (05-01 added MAX_ACTIONS_PER_RUN=32 cap at validate_strategy_output; full sim/sign-gate wiring lands in 05-04) |
 | EXE-02 | Phase 5 | Closed (05-01 normalize_action per D-02 + shared encode_call_input + ERC20_WRITE_ABI; cargo test -p executor-evm --test normalize 11/11) |
-| EXE-03 | Phase 5 | Pending |
-| EXE-04 | Phase 5 | Pending |
+| EXE-03 | Phase 5 | Complete |
+| EXE-04 | Phase 5 | Complete |
 | EXE-05 | Phase 5 | Pending |
 | EXE-06 | Phase 5 | Pending |
 | EXE-07 | Phase 6 | Pending |

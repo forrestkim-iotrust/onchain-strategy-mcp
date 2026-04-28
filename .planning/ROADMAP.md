@@ -94,7 +94,7 @@ Plans:
 
 Plans:
 - [x] 05-01: Action-to-transaction normalization
-- [ ] 05-02: Simulation adapter and failure handling
+- [x] 05-02: Simulation adapter and failure handling
 - [ ] 05-03: Policy model and deny-by-default evaluator
 - [ ] 05-04: Journaled decisions and MCP error reporting
 
