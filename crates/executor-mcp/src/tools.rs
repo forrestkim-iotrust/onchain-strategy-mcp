@@ -28,6 +28,7 @@ use executor_evm::{
 use executor_policy::{
     Decision, DecisionVerdict, LoadedPolicy, NormalizedActionKindCopy, evaluate,
 };
+use executor_signer::{LocalSignerConfig, LocalSignerHandle};
 use executor_state::{
     DecisionGate, DecisionVerdict as JournalDecisionVerdict, RegisterOutcome, StateError,
     StateStore, Strategy, StrategySummary,
@@ -48,7 +49,7 @@ use crate::{
     errors::{
         invalid_params, map_evm_error, map_policy_error, map_runtime_error, map_simulation_error,
         map_state_error, policy_not_loaded, storage_error, strategy_deleted,
-        strategy_invalid_output, unimplemented_err,
+        strategy_invalid_output, strategy_runtime_error, unimplemented_err,
     },
     server::ExecutorServer,
     validation::{
@@ -360,6 +361,7 @@ impl ExecutorServer {
         };
 
         // STEP 7: Phase 5 gate pipeline (D-07): policy → simulation.
+        let mut approved_normalized: Vec<Option<NormalizedAction>> = Vec::new();
         let outcome = match outcome {
             StrategyOutcome::Noop => StrategyOutcome::Noop,
             StrategyOutcome::Actions { actions, .. } => {
@@ -511,6 +513,7 @@ impl ExecutorServer {
                         }
                     }
 
+                    approved_normalized = normalized.clone();
                     let mut decision_pos = 0usize;
                     for (idx, normalized_action) in normalized.iter().enumerate() {
                         let Some(na) = normalized_action else {
@@ -591,6 +594,23 @@ impl ExecutorServer {
                 }
             }
         };
+
+        if let StrategyOutcome::Actions { .. } = &outcome {
+            let signer_config = crate::config::load()
+                .map_err(|e| storage_error(format!("load config for signer: {e}")))?
+                .signer_config()
+                .map_err(|e| storage_error(format!("parse signer config: {e}")))?;
+            let chain_id = self.chain_id().await.map_err(|e| map_evm_error(e, &run_id))?;
+            execute_approved_actions(
+                &self.state,
+                &run_id,
+                self.evm_config.rpc_url.as_str(),
+                signer_config.as_ref(),
+                chain_id,
+                &approved_normalized,
+            )
+            .await?;
+        }
 
         record_action(&self.state, &run_id, &outcome).await?;
 
@@ -796,6 +816,171 @@ async fn transition(
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)
+}
+
+pub async fn execute_approved_actions(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    rpc_url: &str,
+    signer_config: Option<&LocalSignerConfig>,
+    chain_id: u64,
+    normalized: &[Option<NormalizedAction>],
+) -> Result<(), McpError> {
+    if normalized.iter().all(Option::is_none) {
+        return Ok(());
+    }
+
+    let first_action_index = normalized
+        .iter()
+        .position(Option::is_some)
+        .ok_or_else(|| storage_error("execution helper called without executable action"))?
+        as i64;
+    let signer_config = match signer_config {
+        Some(config) => config,
+        None => {
+            record_execution_error(
+                state,
+                run_id,
+                first_action_index,
+                "signer_not_configured",
+                Some("set [signer].private_key_env"),
+            )
+            .await?;
+            record_runtime_error(state, run_id, "signer_not_configured").await?;
+            transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+            return Err(strategy_runtime_error(
+                "signer_not_configured",
+                "set [signer].private_key_env",
+                run_id,
+            ));
+        }
+    };
+
+    let signer = match LocalSignerHandle::from_env(signer_config, chain_id) {
+        Ok(signer) => signer,
+        Err(err) => {
+            let kind = err.execution_error_kind();
+            record_execution_error(state, run_id, first_action_index, kind, Some(kind)).await?;
+            record_runtime_error(state, run_id, kind).await?;
+            transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+            return Err(strategy_runtime_error(kind, kind, run_id));
+        }
+    };
+    let signer_address = signer.signer_address_string();
+    let receipt_timeout = std::time::Duration::from_millis(signer_config.receipt_timeout_ms);
+
+    for (idx, normalized_action) in normalized.iter().enumerate() {
+        let Some(na) = normalized_action else {
+            continue;
+        };
+        let pending = match signer.broadcast(rpc_url, na.tx.clone()).await {
+            Ok(pending) => pending,
+            Err(err) => {
+                let kind = err.execution_error_kind();
+                record_execution_error(state, run_id, idx as i64, kind, Some(kind)).await?;
+                record_runtime_error(state, run_id, kind).await?;
+                transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+                return Err(strategy_runtime_error(kind, kind, run_id));
+            }
+        };
+        record_execution_broadcast(
+            state,
+            run_id,
+            idx as i64,
+            &signer_address,
+            &pending.tx_hash.to_string(),
+        )
+        .await?;
+        let receipt = match signer.wait_for_receipt(pending, receipt_timeout).await {
+            Ok(receipt) => receipt,
+            Err(err) => {
+                let kind = err.execution_error_kind();
+                record_execution_error(state, run_id, idx as i64, kind, Some(kind)).await?;
+                record_runtime_error(state, run_id, kind).await?;
+                transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+                return Err(strategy_runtime_error(kind, kind, run_id));
+            }
+        };
+        record_execution_receipt_success(
+            state,
+            run_id,
+            idx as i64,
+            receipt.receipt_status.as_str(),
+            &receipt.gas_used,
+        )
+        .await?;
+        if receipt.receipt_status == executor_signer::LocalReceiptStatus::Reverted {
+            record_execution_error(state, run_id, idx as i64, "receipt_failed", Some("reverted"))
+                .await?;
+            record_runtime_error(state, run_id, "receipt_failed").await?;
+            transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+            return Err(strategy_runtime_error("receipt_failed", "reverted", run_id));
+        }
+    }
+    Ok(())
+}
+
+async fn record_execution_broadcast(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    action_index: i64,
+    signer_address: &str,
+    tx_hash: &str,
+) -> Result<(), McpError> {
+    let state = state.clone();
+    let rid = run_id.to_string();
+    let signer_address = signer_address.to_string();
+    let tx_hash = tx_hash.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_execution_broadcast(&rid, action_index, &signer_address, &tx_hash)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
+}
+
+async fn record_execution_receipt_success(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    action_index: i64,
+    receipt_status: &str,
+    gas_used: &str,
+) -> Result<(), McpError> {
+    let state = state.clone();
+    let rid = run_id.to_string();
+    let receipt_status = receipt_status.to_string();
+    let gas_used = gas_used.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_execution_receipt_success(&rid, action_index, &receipt_status, &gas_used)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
+}
+
+async fn record_execution_error(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    action_index: i64,
+    error_kind: &str,
+    error_detail: Option<&str>,
+) -> Result<(), McpError> {
+    let state = state.clone();
+    let rid = run_id.to_string();
+    let error_kind = error_kind.to_string();
+    let error_detail = error_detail.map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        let mut store = state.blocking_lock();
+        store.record_execution_error(&rid, action_index, &error_kind, error_detail.as_deref())
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    Ok(())
 }
 
 async fn record_action(

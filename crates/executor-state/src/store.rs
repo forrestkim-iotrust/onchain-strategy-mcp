@@ -10,7 +10,7 @@
 //! (`partial_index_behaviour.rs`, `foreign_keys_enforced`). Production code
 //! must go through the typed façade methods.
 
-use crate::{error::StateError, runs, schema, strategies};
+use crate::{error::StateError, executions, runs, schema, strategies};
 use executor_core::schema::execution::RunStatus;
 use rusqlite::Connection;
 use std::path::Path;
@@ -269,5 +269,64 @@ impl StateStore {
         run_id: &str,
     ) -> Result<Vec<crate::journal::DecisionEntry>, StateError> {
         crate::journal::list_decisions_for_run(&self.conn, run_id)
+    }
+
+    // ---- Phase 6 execution_actions façade ----
+
+    pub fn record_execution_broadcast(
+        &mut self,
+        run_id: &str,
+        action_index: i64,
+        signer_address: &str,
+        tx_hash: &str,
+    ) -> Result<String, StateError> {
+        executions::record_broadcast(
+            &self.conn,
+            executions::NewExecutionBroadcast {
+                run_id,
+                action_index,
+                signer_address,
+                tx_hash,
+            },
+        )
+    }
+
+    pub fn record_execution_receipt_success(
+        &mut self,
+        run_id: &str,
+        action_index: i64,
+        receipt_status: &str,
+        gas_used: &str,
+    ) -> Result<(), StateError> {
+        executions::record_receipt_success(
+            &self.conn,
+            run_id,
+            action_index,
+            receipt_status,
+            gas_used,
+        )
+    }
+
+    pub fn record_execution_error(
+        &mut self,
+        run_id: &str,
+        action_index: i64,
+        error_kind: &str,
+        error_detail: Option<&str>,
+    ) -> Result<(), StateError> {
+        executions::record_execution_error(
+            &self.conn,
+            run_id,
+            action_index,
+            error_kind,
+            error_detail,
+        )
+    }
+
+    pub fn list_executions_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<executions::ExecutionActionEntry>, StateError> {
+        executions::list_executions_for_run(&self.conn, run_id)
     }
 }
