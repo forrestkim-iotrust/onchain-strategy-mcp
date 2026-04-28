@@ -51,6 +51,15 @@ pub fn validate_address(s: &str) -> Result<Address, EvmError> {
         return Ok(a);
     }
     let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    // Defense-in-depth (WR-05): early-reject non-hex bodies before classifying
+    // case. Mirrors `address::checksum`. `Address::from_str` is still the
+    // bottom-line authority, but this makes the invariant explicit.
+    if !body.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(encode_err(
+            "bad_address",
+            format!("address contains non-hex characters: {s}"),
+        ));
+    }
     let has_alpha = body.chars().any(|c| c.is_ascii_alphabetic());
     let all_lower = body.chars().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase());
     let all_upper = body.chars().all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
