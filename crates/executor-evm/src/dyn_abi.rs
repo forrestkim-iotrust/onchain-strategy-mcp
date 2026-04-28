@@ -21,7 +21,7 @@
 use std::str::FromStr;
 
 use alloy_dyn_abi::{DynSolType, DynSolValue};
-use alloy_primitives::{Address, B256, I256, U256};
+use alloy_primitives::{B256, I256, U256};
 
 use crate::EvmError;
 
@@ -47,10 +47,11 @@ pub fn js_value_to_dyn_sol(
             let s = value
                 .as_str()
                 .ok_or_else(|| encode_err("type_mismatch", "address expects JSON string"))?;
-            // Accept lowercase / uppercase / EIP-55 — the action validator at
-            // the MCP boundary enforces checksum strictness for D-09.
-            let addr = Address::from_str(s)
-                .map_err(|e| encode_err("bad_address", format!("address parse: {e}")))?;
+            // WR-08: route ABI-arg addresses through the same lenient EIP-55
+            // validator the top-level action `address` field uses. Reject
+            // mixed-case-bad-checksum here too so address-typed ABI args can't
+            // sail through where the top-level field would be rejected.
+            let addr = crate::action::validate_address(s)?;
             Ok(DynSolValue::Address(addr))
         }
         DynSolType::Bytes => {

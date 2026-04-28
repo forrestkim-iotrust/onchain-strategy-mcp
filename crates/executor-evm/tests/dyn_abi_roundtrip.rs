@@ -47,6 +47,24 @@ fn address_lowercase_and_eip55_both_accepted() {
 }
 
 #[test]
+fn address_mixed_case_bad_checksum_rejected_as_abi_arg() {
+    // WR-08: ABI-arg `address` path now routes through validate_address,
+    // matching the top-level action.address strictness. Mixed-case-bad-checksum
+    // must be rejected here too.
+    let ty: DynSolType = "address".parse().unwrap();
+    // Take a valid EIP-55 address and flip one alphabetic case bit to make
+    // it a mixed-case-bad-checksum input.
+    let bad = "0x52908400098527886E0F7030069857D2E4169Ee7"; // last 'e' → 'e'
+    let err = js_value_to_dyn_sol(&json!(bad), &ty).unwrap_err();
+    // Stable wire-safe message includes the encode taxonomy.
+    let s = err.to_string();
+    assert!(
+        s.contains("evm encode error: bad_address"),
+        "expected bad_address rejection, got {s}"
+    );
+}
+
+#[test]
 fn bytes_hex_roundtrip() {
     let ty: DynSolType = "bytes".parse().unwrap();
     let v = js_value_to_dyn_sol(&json!("0xdeadbeef"), &ty).unwrap();
