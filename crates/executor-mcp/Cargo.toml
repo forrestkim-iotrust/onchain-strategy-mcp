@@ -11,6 +11,14 @@ workspace = true
 name = "executor-mcp"
 path = "src/main.rs"
 
+[features]
+default = []
+# Phase 5 Plan 05-02 / D-08 — opts integration tests in to anvil-gated paths
+# (`strategy_run_returns_simulation_failed_when_revert` and any future stdio
+# test that requires foundry's `anvil` on PATH). Mirrors the executor-evm
+# `anvil-tests` feature (D-14 carry-forward).
+anvil-tests = []
+
 [dependencies]
 rmcp.workspace = true
 schemars.workspace = true

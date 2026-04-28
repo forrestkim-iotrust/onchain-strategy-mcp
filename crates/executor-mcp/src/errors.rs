@@ -15,7 +15,7 @@
 //! Wire code: **-32010** (unimplemented) verified against rmcp 1.5
 //! `model::ErrorCode(pub i32)` tuple struct — cf. RESEARCH.md RESOLVED #4.
 
-use executor_evm::EvmError;
+use executor_evm::{EvmError, SimulationFailReason};
 use executor_state::StateError;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 use serde_json::json;
@@ -142,6 +142,70 @@ pub fn map_evm_error(e: EvmError, run_id: &str) -> McpError {
             "code": "strategy_runtime_error",
             "kind": kind,
             "detail": stable,
+            "run_id": run_id,
+        })),
+    )
+}
+
+/// Phase 5 D-08 — emit `-32017 STRATEGY_RUNTIME_ERROR` with `data.kind =
+/// "simulation_failure"` for a failed `simulate_one` outcome (per Phase 4
+/// D-12 reuse precedent — no new wire codes).
+///
+/// Wire shape (LOCKED — Plan 05-04 stdio test pins this):
+/// - `error.code` = `-32017` STRATEGY_RUNTIME_ERROR.
+/// - `data.code` = `"strategy_runtime_error"` (string canon).
+/// - `data.kind` = `"simulation_failure"` (Phase 5 D-08; distinguishes from
+///   `"exception"` / `"timeout"` / `"evm_*"` so agents can dispatch).
+/// - `data.fail_reason` ∈ `{"revert", "transport", "timeout"}`.
+/// - `data.action_index`: zero-based index of the failing action in the
+///   strategy's action array.
+/// - `data.decoded_revert`: SANITIZED revert reason (string) or `null`. The
+///   sanitizer ([`executor_evm::read::sanitize_revert_reason`], WR-04) runs
+///   at `simulate_one` BEFORE this factory sees the data — attacker-controllable
+///   text is the only string that may survive to wire and only after
+///   sanitization (control-char strip + 256-byte cap).
+/// - `data.detail` mirrors `error.message` and starts with `"simulation failed: "`.
+/// - `data.run_id`: the run row whose journal captured the denial.
+///
+/// MR-01 carry-forward: NO raw alloy / reqwest text reaches the wire. The
+/// `SimulationOutcome::Fail::raw_for_log` field is consumed by `tracing::warn!`
+/// at the simulate site; this factory only sees the typed `SimulationFailReason`.
+pub fn map_simulation_error(
+    reason: &SimulationFailReason,
+    action_index: u32,
+    run_id: &str,
+) -> McpError {
+    let (fail_reason, decoded_revert) = match reason {
+        SimulationFailReason::Revert { decoded } => ("revert", decoded.clone()),
+        SimulationFailReason::Transport => ("transport", None),
+        SimulationFailReason::Timeout => ("timeout", None),
+    };
+    let detail = match (fail_reason, decoded_revert.as_deref()) {
+        ("revert", Some(d)) => format!("simulation failed: evm revert: {d}"),
+        ("revert", None) => "simulation failed: evm revert: unknown".to_string(),
+        ("transport", _) => "simulation failed: evm rpc error: transport".to_string(),
+        ("timeout", _) => "simulation failed: evm rpc error: timeout".to_string(),
+        // The match above is exhaustive — `fail_reason` is one of three
+        // const string literals. The compiler can't prove this, so use a
+        // safe fallback rather than `unreachable!()`.
+        _ => "simulation failed".to_string(),
+    };
+    tracing::warn!(
+        action_index,
+        run_id,
+        fail_reason,
+        "simulation denial",
+    );
+    McpError::new(
+        STRATEGY_RUNTIME_ERROR,
+        detail.clone(),
+        Some(json!({
+            "code": "strategy_runtime_error",
+            "kind": "simulation_failure",
+            "fail_reason": fail_reason,
+            "action_index": action_index,
+            "decoded_revert": decoded_revert,
+            "detail": detail,
             "run_id": run_id,
         })),
     )
@@ -468,5 +532,89 @@ mod tests {
             "message not preserved: {}",
             e.message
         );
+    }
+
+    // ─────────── Phase 5 Plan 05-02 / D-08 simulation_failure ───────────
+
+    #[test]
+    fn map_simulation_error_for_revert_emits_simulation_failure_kind() {
+        let e = map_simulation_error(
+            &SimulationFailReason::Revert {
+                decoded: Some("ERC20: insufficient balance".into()),
+            },
+            0,
+            "01ARZ123",
+        );
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        assert_eq!(e.code, ErrorCode(-32017));
+        let data = e.data.as_ref().expect("data present");
+        assert_eq!(data["code"], "strategy_runtime_error");
+        assert_eq!(data["kind"], "simulation_failure");
+        assert_eq!(data["fail_reason"], "revert");
+        assert_eq!(data["action_index"], 0);
+        assert_eq!(data["decoded_revert"], "ERC20: insufficient balance");
+        assert_eq!(data["run_id"], "01ARZ123");
+        assert!(
+            data["detail"]
+                .as_str()
+                .unwrap()
+                .starts_with("simulation failed: evm revert: "),
+            "detail missing canonical prefix: {}",
+            data["detail"]
+        );
+    }
+
+    #[test]
+    fn map_simulation_error_for_revert_with_no_decoded_uses_unknown() {
+        let e = map_simulation_error(
+            &SimulationFailReason::Revert { decoded: None },
+            7,
+            "01ARZ123",
+        );
+        let data = e.data.as_ref().expect("data");
+        assert_eq!(data["fail_reason"], "revert");
+        assert_eq!(data["action_index"], 7);
+        assert_eq!(data["decoded_revert"], serde_json::Value::Null);
+        assert_eq!(data["detail"], "simulation failed: evm revert: unknown");
+    }
+
+    #[test]
+    fn map_simulation_error_for_transport_emits_transport_fail_reason() {
+        let e = map_simulation_error(&SimulationFailReason::Transport, 2, "01ARZ123");
+        assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+        let data = e.data.as_ref().expect("data");
+        assert_eq!(data["kind"], "simulation_failure");
+        assert_eq!(data["fail_reason"], "transport");
+        assert_eq!(data["action_index"], 2);
+        assert_eq!(data["decoded_revert"], serde_json::Value::Null);
+        assert_eq!(data["detail"], "simulation failed: evm rpc error: transport");
+    }
+
+    #[test]
+    fn map_simulation_error_for_timeout_emits_timeout_fail_reason() {
+        let e = map_simulation_error(&SimulationFailReason::Timeout, 5, "01ARZ123");
+        let data = e.data.as_ref().expect("data");
+        assert_eq!(data["kind"], "simulation_failure");
+        assert_eq!(data["fail_reason"], "timeout");
+        assert_eq!(data["action_index"], 5);
+        assert_eq!(data["detail"], "simulation failed: evm rpc error: timeout");
+    }
+
+    #[test]
+    fn map_simulation_error_does_not_leak_raw_alloy_text() {
+        // MR-01: even with a benign decoded revert, no top-level field
+        // carries raw alloy crate names. The factory never sees raw_for_log.
+        let e = map_simulation_error(
+            &SimulationFailReason::Revert {
+                decoded: Some("benign reason".into()),
+            },
+            0,
+            "01ARZ123",
+        );
+        let data = e.data.as_ref().expect("data");
+        let s = serde_json::to_string(data).unwrap();
+        assert!(!s.contains("TransportError"), "raw alloy text leaked: {s}");
+        assert!(!s.contains("Reqwest"), "reqwest text leaked: {s}");
+        assert!(!s.contains("ErrorResp"), "alloy ErrorResp leaked: {s}");
     }
 }

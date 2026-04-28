@@ -1987,3 +1987,50 @@ async fn strategy_run_accepts_action_array_length_32() -> Result<()> {
     proc.child.kill().await?;
     Ok(())
 }
+
+// ─────────── Phase 5 Plan 05-02 / D-08 / EXE-04 ───────────
+
+/// Phase 5 D-08 / EXE-04 — registered in Plan 05-02; **enabled in Plan 05-04**
+/// once `tools::strategy_run` wires the simulation gate. The orchestration
+/// plumbing does not exist yet (Plan 05-02 only ships the adapter +
+/// `map_simulation_error` factory), so this test is `#[ignore]` until 05-04
+/// lands. Plan 05-04 will:
+///   1. Remove the `#[ignore]`.
+///   2. Replace this stub body with a real anvil-gated end-to-end assertion
+///      (deploy `revert_counter.hex`, register a strategy returning a single
+///      `contract_call` to it, expect `-32017` + `data.kind == "simulation_failure"`
+///      + `data.action_index == 0` + sanitized `data.decoded_revert`).
+///
+/// The reason for landing the registered stub here (not in Plan 05-04 only):
+/// keeps the cross-plan test inventory visible at `cargo test -- --list` so
+/// the gate test is never silently forgotten.
+#[cfg(feature = "anvil-tests")]
+#[ignore = "enabled by Plan 05-04 — needs tools::strategy_run sim wiring"]
+#[tokio::test(flavor = "multi_thread")]
+async fn strategy_run_returns_simulation_failed_when_revert() -> Result<()> {
+    // Setup (Plan 05-04 fills this in):
+    //   - spawn anvil
+    //   - deploy revert_counter.hex via anvil[0]
+    //   - register a strategy that returns
+    //     [{ kind: "contract_call",
+    //        address: <revert_counter>,
+    //        abi: REVERT_ABI,
+    //        function: "anything",
+    //        args: [],
+    //        value: "0" }]
+    //   - configure policy.toml as permissive (allows the chain, contract,
+    //     selector — POL-* gates pass so the simulation gate is the one
+    //     producing the denial).
+    //
+    // Expected wire (Plan 05-04 wires the path that produces this):
+    //   error.code = -32017 STRATEGY_RUNTIME_ERROR
+    //   error.data.kind = "simulation_failure"   (NOT "exception" — BR-01)
+    //   error.data.fail_reason = "revert"
+    //   error.data.action_index = 0
+    //   error.data.decoded_revert = (sanitized string OR null)
+    //
+    // The assertion code path is exercised by the Plan 05-02 lib tests
+    // `errors::sim_factory_tests::map_simulation_error_for_revert_emits_simulation_failure_kind`;
+    // this stdio test proves the wire path end-to-end once 05-04 wires it.
+    panic!("test body filled in by Plan 05-04 — currently #[ignore]'d");
+}

@@ -271,4 +271,63 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("extra"));
     }
+
+    // ─────────── Phase 5 Plan 05-02 / D-14 [evm.simulation_from] ───────────
+
+    const ANVIL_0: &str = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+
+    #[test]
+    fn evm_section_default_simulation_from_is_anvil_account_0() {
+        // Empty TOML → all defaults; the [evm] default must include the
+        // anvil-0 EIP-55 simulation_from per D-14.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.evm.simulation_from, ANVIL_0);
+    }
+
+    #[test]
+    fn evm_section_simulation_from_override_is_propagated() {
+        let toml_str = "\
+            [evm]\n\
+            simulation_from = \"0x0000000000000000000000000000000000000001\"\n\
+        ";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.evm.simulation_from,
+            "0x0000000000000000000000000000000000000001"
+        );
+        // Lowercase + zeros parses through validate_address lenient path.
+        let evm = cfg.evm_config().expect("override builds");
+        // The address parses as the all-zero/one canonical address.
+        assert_ne!(
+            evm.simulation_from,
+            executor_evm::EvmConfig::default().simulation_from
+        );
+    }
+
+    #[test]
+    fn evm_section_simulation_from_bad_checksum_returns_err_at_evm_config() {
+        // Capital F at index 0 (after 0x) breaks the EIP-55 checksum.
+        let toml_str = "\
+            [evm]\n\
+            simulation_from = \"0xF39Fd6e51aad88F6F4ce6aB8827279cffFb92266\"\n\
+        ";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        // TOML parse OK — the field is a String at this layer.
+        assert!(cfg.evm.simulation_from.starts_with("0xF39Fd6"));
+        // But evm_config() rejects via the lenient EIP-55 validator.
+        let err = cfg.evm_config().unwrap_err();
+        assert_eq!(err.data_kind(), "evm_rpc_error");
+    }
+
+    #[test]
+    fn evm_config_default_simulation_from_round_trips_through_evm_config() {
+        // The default `[evm]` section MUST produce a buildable EvmConfig —
+        // this guards against the default string drifting out of EIP-55.
+        let cfg = Config::default();
+        let evm = cfg.evm_config().expect("default evm_config builds");
+        assert_eq!(
+            evm.simulation_from,
+            executor_evm::EvmConfig::default().simulation_from,
+        );
+    }
 }
