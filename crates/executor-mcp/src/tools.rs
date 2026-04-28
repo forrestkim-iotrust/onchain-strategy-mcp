@@ -34,8 +34,8 @@ use tokio::sync::Mutex;
 
 use crate::{
     errors::{
-        invalid_params, map_runtime_error, map_state_error, storage_error, strategy_deleted,
-        strategy_invalid_output, unimplemented_err,
+        invalid_params, map_evm_error, map_runtime_error, map_state_error, storage_error,
+        strategy_deleted, strategy_invalid_output, unimplemented_err,
     },
     server::ExecutorServer,
     validation::{validate_action_kind_allowlisted, validate_register, validate_strategy_id_format},
@@ -274,11 +274,18 @@ impl ExecutorServer {
         // independent of devnet liveness — this is the FIRST opportunity the
         // provider would be touched on this run, and a bad URL here is a
         // legitimate runtime config error to surface.
-        // Provider build failure (e.g. URL parse error) does NOT fail the
-        // whole run — strategies that don't call ctx.evm.* should still
-        // succeed. We pass `None` and let the host binding throw a typed
-        // error if they DO call it.
-        let evm_provider = self.evm_provider().await.ok();
+        //
+        // WR-06: URL/timeout validation already ran at server boot
+        // (`from_config → evm_config()? → EvmConfig::from_raw`). The only way
+        // `evm_provider()` can fail here is a near-impossible reqwest
+        // connection-builder failure on an already-parsed URL. If that ever
+        // happens, surface it as -32017 evm_rpc_error rather than swallowing
+        // with `.ok()` and producing a confusing "no provider configured"
+        // message later from the host binding.
+        let evm_provider = match self.evm_provider().await {
+            Ok(p) => Some(p),
+            Err(e) => return Err(map_evm_error(e, &run_id)),
+        };
         let evm_config = self.evm_config.clone();
         let state_for_run = self.state.clone();
         let source = strategy.source.clone();
