@@ -764,9 +764,7 @@ fn read_contract_host_binding<'js>(
     // current-thread runtime.
     let result: Result<serde_json::Value, executor_evm::EvmError> =
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| {
-                handle.block_on(executor_evm::read_contract(provider, cfg, input))
-            }),
+            Ok(handle) => handle.block_on(executor_evm::read_contract(provider, cfg, input)),
             Err(_) => {
                 // No ambient runtime: spin up a transient single-threaded
                 // runtime. This path is only reached from synchronous unit
@@ -1045,7 +1043,7 @@ fn erc20_host_binding<'js>(
             }
         };
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(dispatch)),
+            Ok(handle) => handle.block_on(dispatch),
             Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1152,7 +1150,7 @@ fn native_balance_host_binding<'js>(
         executor_evm::native::native_balance(provider, cfg, &account, block_tag);
     let result: Result<serde_json::Value, executor_evm::EvmError> =
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(dispatch)),
+            Ok(handle) => handle.block_on(dispatch),
             Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -1220,7 +1218,7 @@ fn native_block_number_host_binding<'js>(
     let dispatch = executor_evm::native::native_block_number(provider, cfg);
     let result: Result<serde_json::Value, executor_evm::EvmError> =
         match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(|| handle.block_on(dispatch)),
+            Ok(handle) => handle.block_on(dispatch),
             Err(_) => {
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
