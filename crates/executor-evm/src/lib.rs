@@ -20,6 +20,7 @@ pub mod dyn_abi;
 pub mod erc20;
 pub mod error;
 pub mod native;
+pub mod normalize;
 pub mod provider;
 pub mod read;
 pub mod units;
@@ -37,6 +38,7 @@ pub use erc20::{
 };
 pub use error::EvmError;
 pub use native::{native_balance, native_block_number};
+pub use normalize::{NormalizedAction, NormalizedActionKind, normalize_action};
 pub use provider::build_provider;
 pub use read::{BlockTag, ReadContractInput, read_contract};
 pub use units::{format_units, format_units_from_str, parse_units};
