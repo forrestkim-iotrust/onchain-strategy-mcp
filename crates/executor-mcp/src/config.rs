@@ -74,6 +74,13 @@ pub struct EvmSection {
     pub rpc_url: String,
     #[serde(default = "default_evm_call_timeout_ms")]
     pub call_timeout_ms: u64,
+    /// Phase 5 D-14: `from` address used by the simulation adapter
+    /// (`executor-evm::simulate::simulate_one`). Defaults to anvil
+    /// account[0] (EIP-55) for devnet ergonomics. Validated at
+    /// [`Config::evm_config`] (lenient EIP-55 — mixed-case-bad-checksum
+    /// REJECTED with `EvmError::Config`).
+    #[serde(default = "default_simulation_from")]
+    pub simulation_from: String,
 }
 
 fn default_evm_rpc_url() -> String {
@@ -84,11 +91,16 @@ fn default_evm_call_timeout_ms() -> u64 {
     1_000
 }
 
+fn default_simulation_from() -> String {
+    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into()
+}
+
 impl Default for EvmSection {
     fn default() -> Self {
         Self {
             rpc_url: default_evm_rpc_url(),
             call_timeout_ms: default_evm_call_timeout_ms(),
+            simulation_from: default_simulation_from(),
         }
     }
 }
@@ -98,7 +110,11 @@ impl Config {
     /// section. Validation errors (bad URL, timeout out of range) surface
     /// as [`executor_evm::EvmError::Config`].
     pub fn evm_config(&self) -> Result<executor_evm::EvmConfig, executor_evm::EvmError> {
-        executor_evm::EvmConfig::from_raw(&self.evm.rpc_url, self.evm.call_timeout_ms)
+        executor_evm::EvmConfig::from_raw(
+            &self.evm.rpc_url,
+            self.evm.call_timeout_ms,
+            &self.evm.simulation_from,
+        )
     }
 }
 

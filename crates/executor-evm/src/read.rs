@@ -214,7 +214,7 @@ fn classify_provider_error(e: &dyn std::error::Error) -> EvmError {
 /// Best-effort: scan a transport-error string for a `0x08c379a0...` payload
 /// and decode the `Error(string)` selector. Returns `None` if no decodable
 /// payload is present (caller falls back to `"unknown"`).
-fn try_extract_revert_reason(raw: &str) -> Option<String> {
+pub(crate) fn try_extract_revert_reason(raw: &str) -> Option<String> {
     // Find an `0x08c379a0` substring and treat what follows as hex.
     let needle = "08c379a0";
     let lower = raw.to_lowercase();
@@ -252,7 +252,11 @@ fn try_extract_revert_reason(raw: &str) -> Option<String> {
 /// C0/DEL byte) and caps length at 256 bytes (truncating with an ellipsis).
 /// Revert reasons are NOT trusted input — a malicious contract can revert
 /// with arbitrary UTF-8 including newlines and fake taxonomy prefixes.
-pub(crate) fn sanitize_revert_reason(s: &str) -> String {
+///
+/// Phase 5 D-19: promoted from `pub(crate)` so `executor_evm::simulate` can
+/// reuse the same sanitizer for `SimulationFailReason::Revert.decoded` —
+/// avoids copy-paste of the WR-04 invariants.
+pub fn sanitize_revert_reason(s: &str) -> String {
     const CAP: usize = 256;
     let mut out = String::with_capacity(s.len().min(CAP));
     for c in s.chars() {
@@ -403,7 +407,12 @@ mod tests {
     #[test]
     fn read_contract_timeout_fires_when_rpc_unreachable() {
         // Closed port — connection refused or timeout, depending on platform.
-        let cfg = EvmConfig::from_raw("http://127.0.0.1:1", 200).unwrap();
+        let cfg = EvmConfig::from_raw(
+            "http://127.0.0.1:1",
+            200,
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        )
+        .unwrap();
         let provider = crate::build_provider(&cfg).unwrap();
         let input = ReadContractInput {
             address: "0x0000000000000000000000000000000000000001".into(),

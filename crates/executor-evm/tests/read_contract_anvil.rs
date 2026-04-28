@@ -198,7 +198,12 @@ async fn read_overload_resolution_picks_correct_arity() {
 async fn read_contract_timeout_fires_under_call_timeout() {
     // Tight timeout against unreachable RPC — proves the per-call timeout
     // safety net (Pitfall 1).
-    let cfg = EvmConfig::from_raw("http://127.0.0.1:1", 200).unwrap();
+    let cfg = EvmConfig::from_raw(
+        "http://127.0.0.1:1",
+        200,
+        "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    )
+    .unwrap();
     let provider = build_provider(&cfg).expect("provider");
     let input = ReadContractInput {
         address: "0x0000000000000000000000000000000000000001".into(),
