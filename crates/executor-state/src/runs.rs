@@ -58,6 +58,16 @@ fn status_from_wire(s: &str) -> Result<RunStatus, StateError> {
     })
 }
 
+fn is_terminal_status(status: RunStatus) -> bool {
+    matches!(
+        status,
+        RunStatus::Succeeded
+            | RunStatus::Failed
+            | RunStatus::SimulationDenied
+            | RunStatus::PolicyDenied
+    )
+}
+
 pub(crate) fn insert_run(
     conn: &Connection,
     strategy_id: &str,
@@ -116,8 +126,7 @@ pub(crate) fn update_run_status(
             "status {status:?} is reserved for Phase 6"
         )));
     }
-    let finished_at = matches!(status, RunStatus::Succeeded | RunStatus::Failed)
-        .then(super::strategies::now_rfc3339);
+    let finished_at = is_terminal_status(status).then(super::strategies::now_rfc3339);
     let affected = conn.execute(
         "UPDATE runs SET status = ?1, finished_at = COALESCE(?2, finished_at) WHERE id = ?3",
         params![status_to_wire(status), finished_at, run_id],
@@ -161,28 +170,30 @@ pub(crate) fn update_run_status_with_transition(
              not allowed from Phase 3 code paths"
         )));
     }
-    // D-12: Succeeded / Failed are terminal — any transition out of them is
-    // disallowed, even an idempotent self-transition (Succeeded → Succeeded).
-    if matches!(from, RunStatus::Succeeded | RunStatus::Failed) {
+    // D-12 + Phase 5: terminal statuses cannot transition to any other status,
+    // even an idempotent self-transition (Succeeded → Succeeded).
+    if is_terminal_status(from) {
         return Err(StateError::InvalidInput(format!(
             "run {run_id} is in terminal state {from:?}; transition to {to:?} is disallowed (D-12)"
         )));
     }
-    let finished_at = matches!(to, RunStatus::Succeeded | RunStatus::Failed)
-        .then(super::strategies::now_rfc3339);
+    let finished_at = is_terminal_status(to).then(super::strategies::now_rfc3339);
     let affected = conn.execute(
         "UPDATE runs SET status = ?1, finished_at = COALESCE(?2, finished_at) \
          WHERE id = ?3 AND status = ?4",
-        params![status_to_wire(to), finished_at, run_id, status_to_wire(from)],
+        params![
+            status_to_wire(to),
+            finished_at,
+            run_id,
+            status_to_wire(from)
+        ],
     )?;
     if affected == 0 {
         // Distinguish NotFound vs InvalidInput by re-querying the row.
         let exists: bool = conn
-            .query_row(
-                "SELECT 1 FROM runs WHERE id = ?1",
-                params![run_id],
-                |_| Ok(()),
-            )
+            .query_row("SELECT 1 FROM runs WHERE id = ?1", params![run_id], |_| {
+                Ok(())
+            })
             .optional()?
             .is_some();
         if !exists {
@@ -249,15 +260,17 @@ pub(crate) fn list_runs_for_strategy(
         .collect::<Result<Vec<_>, rusqlite::Error>>()?;
 
     rows.into_iter()
-        .map(|(id, strategy_id, status_wire, started_at, finished_at, error)| {
-            Ok(Run {
-                id,
-                strategy_id,
-                status: status_from_wire(&status_wire)?,
-                started_at,
-                finished_at,
-                error,
-            })
-        })
+        .map(
+            |(id, strategy_id, status_wire, started_at, finished_at, error)| {
+                Ok(Run {
+                    id,
+                    strategy_id,
+                    status: status_from_wire(&status_wire)?,
+                    started_at,
+                    finished_at,
+                    error,
+                })
+            },
+        )
         .collect()
 }

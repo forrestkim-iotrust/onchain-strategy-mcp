@@ -24,7 +24,10 @@ fn update_run_status_with_transition_advances_queued_to_running() {
 
     let row = store.get_run(&rid).unwrap().unwrap();
     assert_eq!(row.status, RunStatus::Running);
-    assert!(row.finished_at.is_none(), "Running must not set finished_at");
+    assert!(
+        row.finished_at.is_none(),
+        "Running must not set finished_at"
+    );
 }
 
 #[test]
@@ -50,7 +53,11 @@ fn update_run_status_with_transition_rejects_unexpected_from() {
 
     // Row must NOT have mutated.
     let row = store.get_run(&rid).unwrap().unwrap();
-    assert_eq!(row.status, RunStatus::Queued, "row must not be mutated on transition reject");
+    assert_eq!(
+        row.status,
+        RunStatus::Queued,
+        "row must not be mutated on transition reject"
+    );
 }
 
 #[test]
@@ -66,7 +73,9 @@ fn update_run_status_with_transition_rejects_phase5_reserved_target() {
         StateError::InvalidInput(msg) => {
             let lower = msg.to_lowercase();
             assert!(
-                lower.contains("reserved") || lower.contains("phase 5") || lower.contains("phase 6"),
+                lower.contains("reserved")
+                    || lower.contains("phase 5")
+                    || lower.contains("phase 6"),
                 "message should mention reserved: {msg}"
             );
         }
@@ -112,7 +121,10 @@ fn update_run_status_with_transition_sets_finished_at_on_succeeded() {
 
     let row = store.get_run(&rid).unwrap().unwrap();
     assert_eq!(row.status, RunStatus::Succeeded);
-    assert!(row.finished_at.is_some(), "Succeeded must populate finished_at");
+    assert!(
+        row.finished_at.is_some(),
+        "Succeeded must populate finished_at"
+    );
 }
 
 #[test]
@@ -129,6 +141,10 @@ fn update_run_status_with_transition_accepts_running_to_simulation_denied() {
         .expect("Phase 5 unblocks Running → SimulationDenied");
     let row = store.get_run(&rid).unwrap().unwrap();
     assert_eq!(row.status, RunStatus::SimulationDenied);
+    assert!(
+        row.finished_at.is_some(),
+        "SimulationDenied must populate finished_at"
+    );
 }
 
 #[test]
@@ -145,6 +161,48 @@ fn update_run_status_with_transition_accepts_running_to_policy_denied() {
         .expect("Phase 5 unblocks Running → PolicyDenied");
     let row = store.get_run(&rid).unwrap().unwrap();
     assert_eq!(row.status, RunStatus::PolicyDenied);
+    assert!(
+        row.finished_at.is_some(),
+        "PolicyDenied must populate finished_at"
+    );
+}
+
+#[test]
+fn update_run_status_with_transition_rejects_phase5_terminal_denial_transitions() {
+    for (terminal, target) in [
+        (RunStatus::SimulationDenied, RunStatus::SimulationDenied),
+        (RunStatus::SimulationDenied, RunStatus::Running),
+        (RunStatus::PolicyDenied, RunStatus::PolicyDenied),
+        (RunStatus::PolicyDenied, RunStatus::Running),
+    ] {
+        let mut store = fresh_memory_store();
+        let sid = seed_strategy(&mut store, "terminal", "// code");
+        let rid = store.insert_run(&sid, RunStatus::Queued).unwrap();
+        store
+            .update_run_status_with_transition(&rid, RunStatus::Queued, RunStatus::Running)
+            .unwrap();
+        store
+            .update_run_status_with_transition(&rid, RunStatus::Running, terminal)
+            .unwrap();
+
+        let err = store
+            .update_run_status_with_transition(&rid, terminal, target)
+            .expect_err("terminal denial transition must be rejected");
+        match err {
+            StateError::InvalidInput(msg) => assert!(
+                msg.contains("terminal state"),
+                "expected terminal-state rejection, got {msg}"
+            ),
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        let row = store.get_run(&rid).unwrap().unwrap();
+        assert_eq!(row.status, terminal);
+        assert!(
+            row.finished_at.is_some(),
+            "terminal denial finished_at must survive rejected transition"
+        );
+    }
 }
 
 #[test]
