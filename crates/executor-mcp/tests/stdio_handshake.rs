@@ -2521,6 +2521,41 @@ fn assert_policy_violation(err: &Value, rule: &str) {
     assert_eq!(err["data"]["rule"].as_str(), Some(rule));
 }
 
+async fn ensure_anvil_8545() -> Result<()> {
+    let reachable = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        tokio::net::TcpStream::connect("127.0.0.1:8545"),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok());
+    if reachable {
+        return Ok(());
+    }
+
+    let _child = tokio::process::Command::new("anvil")
+        .args(["--host", "127.0.0.1", "--port", "8545", "--chain-id", "31337"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    // Keep the process alive for the test duration. The leaked child is scoped to
+    // the test binary process and exits when the test process ends.
+    std::mem::forget(_child);
+    for _ in 0..20 {
+        let reachable = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            tokio::net::TcpStream::connect("127.0.0.1:8545"),
+        )
+        .await
+        .is_ok_and(|r| r.is_ok());
+        if reachable {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    anyhow::bail!("anvil did not start on 127.0.0.1:8545")
+}
+
 async fn read_journal_resource(proc: &mut common::ServerProc, id: u64, run_id: &str) -> Result<Value> {
     send(
         proc,
@@ -2701,6 +2736,7 @@ async fn strategy_run_journal_records_pass_decisions_on_success() -> Result<()> 
         }}]"#
     );
     let strategy_id = seed_strategy(&db_path, "journal_success", &source)?;
+    ensure_anvil_8545().await?;
     let mut proc = spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
     let _ = initialize(&mut proc).await?;
     let r = call_tool(
@@ -2720,6 +2756,7 @@ async fn strategy_run_journal_records_pass_decisions_on_success() -> Result<()> 
 }
 
 async fn assert_policy_denied_journal(name: &str, policy_toml: String, source: String) -> Result<()> {
+    ensure_anvil_8545().await?;
     let dir = tempfile::tempdir()?;
     let db_path = dir.path().join("state.db");
     let policy = write_policy(&policy_toml)?;
@@ -2765,4 +2802,181 @@ async fn strategy_run_records_skipped_simulation_when_policy_denied() -> Result<
     }]"#
     .to_string();
     assert_policy_denied_journal("journal_sim_skipped", policy_toml, source).await
+}
+
+async fn assert_policy_violation_for_source(
+    name: &str,
+    policy_toml: String,
+    source: String,
+    expected_rule: &str,
+) -> Result<()> {
+    ensure_anvil_8545().await?;
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let policy = write_policy(&policy_toml)?;
+    let strategy_id = seed_strategy(&db_path, name, &source)?;
+    let mut proc =
+        spawn_server_with_policy_and_rpc(&db_path, policy.path(), "http://127.0.0.1:8545").await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope");
+    assert_policy_violation(err, expected_rule);
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_run_returns_policy_violation_for_disallowed_chain() -> Result<()> {
+    let policy_toml = r#"[chains]
+allow = [1]
+
+[contracts.1]
+allow = []
+
+[native_value.31337]
+max_per_action = "1000000000000000000"
+
+[raw_call]
+allow_global = false
+allow = []
+"#
+    .to_string();
+    let source = r#"(ctx) => [{
+        kind: "native_transfer",
+        to: "0x0000000000000000000000000000000000000002",
+        value: "0"
+    }]"#
+    .to_string();
+    assert_policy_violation_for_source(
+        "policy_chain_denied",
+        policy_toml,
+        source,
+        "chain_not_allowed",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_returns_policy_violation_for_disallowed_contract() -> Result<()> {
+    let policy_toml = policy_with_contracts(&[31337], &[], &[], &[], "0", &[]);
+    let source = r#"(ctx) => [{
+        kind: "native_transfer",
+        to: "0x0000000000000000000000000000000000000002",
+        value: "0"
+    }]"#
+    .to_string();
+    assert_policy_violation_for_source(
+        "policy_contract_denied",
+        policy_toml,
+        source,
+        "contract_not_allowed",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_returns_policy_violation_for_disallowed_selector() -> Result<()> {
+    let target = "0x0000000000000000000000000000000000000002";
+    let policy_toml = policy_with_contracts(
+        &[31337],
+        &[target],
+        &[(target, &["0xaaaaaaaa"])],
+        &[],
+        "0",
+        &[],
+    );
+    let abi = r#"[{"type":"function","name":"transfer","inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"name":"","type":"bool"}],"stateMutability":"nonpayable"}]"#;
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "contract_call",
+            address: "{target}",
+            abi: {},
+            function: "transfer",
+            args: ["0x0000000000000000000000000000000000000003", "1"],
+            value: "0"
+        }}]"#,
+        serde_json::to_string(abi)?
+    );
+    assert_policy_violation_for_source(
+        "policy_selector_denied",
+        policy_toml,
+        source,
+        "selector_not_allowed",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_returns_policy_violation_for_native_value_cap() -> Result<()> {
+    let recipient = "0x0000000000000000000000000000000000000002";
+    let policy_toml = policy_with_contracts(&[31337], &[recipient], &[], &[], "0", &[]);
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "native_transfer",
+            to: "{recipient}",
+            value: "1"
+        }}]"#
+    );
+    assert_policy_violation_for_source(
+        "policy_native_cap",
+        policy_toml,
+        source,
+        "native_value_exceeds",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_returns_policy_violation_for_erc20_spend_cap() -> Result<()> {
+    let token = "0x0000000000000000000000000000000000000002";
+    let policy_toml = policy_with_contracts(
+        &[31337],
+        &[token],
+        &[(token, &["any"])],
+        &[],
+        "0",
+        &[(token, "1000")],
+    );
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "erc20_transfer",
+            token: "{token}",
+            to: "0x0000000000000000000000000000000000000003",
+            amount: "1001"
+        }}]"#
+    );
+    assert_policy_violation_for_source(
+        "policy_erc20_cap",
+        policy_toml,
+        source,
+        "erc20_spend_exceeds",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn strategy_run_returns_policy_violation_for_raw_call_denied() -> Result<()> {
+    let target = "0x0000000000000000000000000000000000000002";
+    let policy_toml = policy_with_contracts(&[31337], &[target], &[], &[], "0", &[]);
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "raw_call",
+            address: "{target}",
+            data: "0xdeadbeef",
+            value: "0"
+        }}]"#
+    );
+    assert_policy_violation_for_source(
+        "policy_raw_denied",
+        policy_toml,
+        source,
+        "raw_call_denied",
+    )
+    .await
 }
