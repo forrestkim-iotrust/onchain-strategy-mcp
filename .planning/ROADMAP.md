@@ -111,7 +111,7 @@ Plans:
 **Plans**: 3 plans
 
 Plans:
-- [ ] 06-01: Signer boundary and local private-key signer
+- [x] 06-01: Signer boundary and local private-key signer
 - [ ] 06-02: Broadcast and receipt watcher
 - [ ] 06-03: Execution report and status tools
 
