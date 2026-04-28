@@ -190,6 +190,77 @@
         }
       ]
     },
+    "ActionDecision": {
+      "description": "Per-action gate verdict (D-11). Pairs the policy and simulation gate\noutcomes for a single normalized action. Carried in\n[`StrategyOutcome::Actions::decisions`] on success-path responses; failure\npaths surface the same data via the `journal://{run_id}` resource only.",
+      "type": "object",
+      "properties": {
+        "action_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "policy": {
+          "$ref": "#/$defs/GateVerdict"
+        },
+        "simulation": {
+          "$ref": "#/$defs/GateVerdict"
+        }
+      },
+      "required": [
+        "action_index",
+        "policy",
+        "simulation"
+      ]
+    },
+    "GateVerdict": {
+      "description": "Outcome of one gate (policy or simulation) for one action. `Skipped`\noccurs when an earlier gate denied so this gate never ran (research Q-12).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pass"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "skipped"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fail"
+            },
+            "rule": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "rule",
+            "detail"
+          ]
+        }
+      ]
+    },
     "RunStatus": {
       "description": "All run lifecycle states (D-05). Phase 2 emits only the first four\n(`queued`/`running`/`succeeded`/`failed`); the remaining three are\n**future-reserved** for Phase 5 (`simulation_denied`, `policy_denied`)\nand Phase 6 (`canceled`). They are declared here at Phase 2 to lock the\nagent-facing schema golden once and avoid contract churn later.",
       "oneOf": [
@@ -220,7 +291,7 @@
       ]
     },
     "StrategyOutcome": {
-      "description": "Outcome of a successful strategy run (D-08).",
+      "description": "Outcome of a successful strategy run (D-08, Phase 5 D-11).",
       "oneOf": [
         {
           "type": "object",
@@ -241,6 +312,13 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/Action"
+              }
+            },
+            "decisions": {
+              "type": "array",
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/ActionDecision"
               }
             },
             "kind": {

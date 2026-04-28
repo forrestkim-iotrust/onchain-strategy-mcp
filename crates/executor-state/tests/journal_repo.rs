@@ -96,31 +96,27 @@ fn record_action_outcome_inserts_row_for_each_phase3_emittable_variant() {
 }
 
 #[test]
-fn record_action_outcome_rejects_phase5_reserved_variants() {
+fn record_action_outcome_accepts_phase5_terminal_outcomes() {
+    // Phase 5 D-10: `phase3_emittable → phase5_emittable` widens to allow
+    // SimulationFailure + PolicyDenied. The Phase-3-era reservation test is
+    // inverted: the gate now ACCEPTS both terminal outcomes.
     let mut store = fresh_memory_store();
     let (_sid, rid) = fresh_run(&mut store, "act2");
 
-    for reserved in [
+    for outcome in [
         JournalActionOutcome::SimulationFailure,
         JournalActionOutcome::PolicyDenied,
     ] {
-        let err = store
-            .record_action_outcome(&rid, reserved, "{}")
-            .expect_err("reserved variant must be rejected");
-        match err {
-            StateError::InvalidInput(msg) => {
-                let lower = msg.to_lowercase();
-                assert!(
-                    lower.contains("reserved") || lower.contains("phase 5"),
-                    "message should mention reserved/phase 5: {msg}"
-                );
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
-        }
+        store
+            .record_action_outcome(&rid, outcome, "{}")
+            .expect("Phase 5 widens phase5_emittable to allow this terminal outcome");
     }
 
-    // Sanity — table is empty since both inserts were rejected pre-INSERT.
-    assert_eq!(store.list_actions_for_run(&rid).unwrap().len(), 0);
+    let rows = store.list_actions_for_run(&rid).unwrap();
+    assert_eq!(rows.len(), 2);
+    let outcomes: Vec<_> = rows.iter().map(|r| r.outcome).collect();
+    assert!(outcomes.contains(&JournalActionOutcome::SimulationFailure));
+    assert!(outcomes.contains(&JournalActionOutcome::PolicyDenied));
 }
 
 #[test]

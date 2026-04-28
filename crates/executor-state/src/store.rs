@@ -212,4 +212,62 @@ impl StateStore {
     ) -> Result<Vec<crate::journal::LogEntry>, StateError> {
         crate::journal::list_logs_for_run(&self.conn, run_id)
     }
+
+    // ---- Phase 5 D-09 journal_decisions façade ----
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_decision(
+        &mut self,
+        run_id: &str,
+        action_index: i64,
+        gate: crate::journal::DecisionGate,
+        verdict: crate::journal::DecisionVerdict,
+        rule: Option<&str>,
+        detail: Option<&str>,
+        payload: Option<&serde_json::Value>,
+    ) -> Result<String, StateError> {
+        crate::journal::record_decision(
+            &self.conn,
+            run_id,
+            action_index,
+            gate,
+            verdict,
+            rule,
+            detail,
+            payload,
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn __test_record_decision_with_time(
+        &mut self,
+        run_id: &str,
+        action_index: i64,
+        gate: crate::journal::DecisionGate,
+        verdict: crate::journal::DecisionVerdict,
+        rule: Option<&str>,
+        detail: Option<&str>,
+        payload: Option<&serde_json::Value>,
+        recorded_at: &str,
+    ) -> Result<String, StateError> {
+        crate::journal::record_decision_with_time(
+            &self.conn,
+            run_id,
+            action_index,
+            gate,
+            verdict,
+            rule,
+            detail,
+            payload,
+            recorded_at,
+        )
+    }
+
+    pub fn list_decisions_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::journal::DecisionEntry>, StateError> {
+        crate::journal::list_decisions_for_run(&self.conn, run_id)
+    }
 }

@@ -49,37 +49,35 @@ fn run_roundtrip_insert_get_update_status() {
 }
 
 #[test]
-fn phase2_emittable_rejects_reserved_variants() {
+fn phase5_emittable_rejects_phase6_reserved_variant() {
+    // Phase 5 D-10 widens phase5_emittable to allow {SimulationDenied,
+    // PolicyDenied}. Only Canceled stays Phase-6-reserved.
     let mut store = fresh_memory_store();
     let strategy_id = seed_strategy(&mut store, "arb", "// code");
 
-    for reserved in [
-        RunStatus::Canceled,
-        RunStatus::SimulationDenied,
-        RunStatus::PolicyDenied,
-    ] {
-        let err = store
-            .insert_run(&strategy_id, reserved)
-            .expect_err("reserved variant must be rejected");
-        match err {
-            StateError::InvalidInput(msg) => {
-                assert!(
-                    msg.to_lowercase().contains("reserved"),
-                    "message should mention reserved: {msg}"
-                );
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
+    let err = store
+        .insert_run(&strategy_id, RunStatus::Canceled)
+        .expect_err("Canceled stays reserved beyond Phase 5");
+    match err {
+        StateError::InvalidInput(msg) => {
+            assert!(
+                msg.to_lowercase().contains("reserved"),
+                "message should mention reserved: {msg}"
+            );
         }
+        other => panic!("expected InvalidInput, got {other:?}"),
     }
 
-    // Allowed ones succeed.
+    // All Phase 5 emittable variants succeed.
     for ok in [
         RunStatus::Queued,
         RunStatus::Running,
         RunStatus::Succeeded,
         RunStatus::Failed,
+        RunStatus::SimulationDenied,
+        RunStatus::PolicyDenied,
     ] {
-        store.insert_run(&strategy_id, ok).expect("phase2 status ok");
+        store.insert_run(&strategy_id, ok).expect("phase5 status ok");
     }
 }
 
@@ -242,23 +240,18 @@ fn update_run_status_rejects_reserved_variant() {
 
     let run_id = store.insert_run(&strategy_id, RunStatus::Queued).unwrap();
 
-    for reserved in [
-        RunStatus::Canceled,
-        RunStatus::SimulationDenied,
-        RunStatus::PolicyDenied,
-    ] {
-        let err = store
-            .update_run_status(&run_id, reserved)
-            .expect_err("reserved variant must be rejected on update");
-        match err {
-            StateError::InvalidInput(msg) => {
-                assert!(
-                    msg.to_lowercase().contains("reserved"),
-                    "message should mention reserved: {msg}"
-                );
-            }
-            other => panic!("expected InvalidInput, got {other:?}"),
+    // Phase 5 D-10: only Canceled stays Phase-6-reserved.
+    let err = store
+        .update_run_status(&run_id, RunStatus::Canceled)
+        .expect_err("Canceled stays reserved beyond Phase 5");
+    match err {
+        StateError::InvalidInput(msg) => {
+            assert!(
+                msg.to_lowercase().contains("reserved"),
+                "message should mention reserved: {msg}"
+            );
         }
+        other => panic!("expected InvalidInput, got {other:?}"),
     }
 
     // Status in DB must be unchanged (still Queued) — gate must run BEFORE the

@@ -48,6 +48,10 @@ pub struct ExecutorServer {
     /// `ctx.evm.*` call via [`ExecutorServer::evm_provider`]. Server boot
     /// is independent of devnet liveness.
     pub(crate) evm_provider: Arc<tokio::sync::OnceCell<Arc<DynProvider>>>,
+    /// Phase 5 D-17: cached chain_id. Lazy-initialised via `chain_id()` on
+    /// first call. `tokio::sync::OnceCell` does NOT memoize errors —
+    /// transport failures retry on next call (operator may bring devnet up).
+    pub(crate) chain_id_cell: Arc<tokio::sync::OnceCell<u64>>,
     /// Phase 5 Plan 05-03 / D-15: policy field. Loaded once at boot via
     /// [`Config::policy_config`]. Failure to load (missing file, bad TOML,
     /// bad address) leaves this field as `Arc<RwLock<None>>` and the orchestrator
@@ -82,6 +86,7 @@ impl ExecutorServer {
             state: Arc::new(Mutex::new(store)),
             evm_config: evm_config.clone(),
             evm_provider: Arc::new(tokio::sync::OnceCell::new()),
+            chain_id_cell: Arc::new(tokio::sync::OnceCell::new()),
             policy: Arc::new(RwLock::new(None)),
         })
     }
@@ -138,6 +143,19 @@ impl ExecutorServer {
     /// calls return the cached `Arc`. Errors propagate as `EvmError` so
     /// transport failures surface as `-32017` instead of crashing the
     /// server (Phase 4 D-04).
+    /// Phase 5 D-17: cached chain_id accessor. First call queries the
+    /// provider via `eth_chainId`; subsequent calls return the cached value.
+    /// Errors do NOT poison the cell — `OnceCell::get_or_try_init` retries
+    /// on each Err, so a transient transport failure doesn't permanently
+    /// disable strategy_run after the operator brings the devnet up.
+    pub async fn chain_id(&self) -> Result<u64, EvmError> {
+        let cell = self.chain_id_cell.clone();
+        let provider = self.evm_provider().await?;
+        cell.get_or_try_init(|| async move { executor_evm::fetch_chain_id(&provider).await })
+            .await
+            .copied()
+    }
+
     pub async fn evm_provider(&self) -> Result<Arc<DynProvider>, EvmError> {
         let cell = self.evm_provider.clone();
         let cfg = self.evm_config.clone();

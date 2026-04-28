@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StrategyOutcome",
-  "description": "Outcome of a successful strategy run (D-08).",
+  "description": "Outcome of a successful strategy run (D-08, Phase 5 D-11).",
   "oneOf": [
     {
       "type": "object",
@@ -22,6 +22,13 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/Action"
+          }
+        },
+        "decisions": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ActionDecision"
           }
         },
         "kind": {
@@ -186,6 +193,77 @@
             "kind",
             "to",
             "value"
+          ]
+        }
+      ]
+    },
+    "ActionDecision": {
+      "description": "Per-action gate verdict (D-11). Pairs the policy and simulation gate\noutcomes for a single normalized action. Carried in\n[`StrategyOutcome::Actions::decisions`] on success-path responses; failure\npaths surface the same data via the `journal://{run_id}` resource only.",
+      "type": "object",
+      "properties": {
+        "action_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "policy": {
+          "$ref": "#/$defs/GateVerdict"
+        },
+        "simulation": {
+          "$ref": "#/$defs/GateVerdict"
+        }
+      },
+      "required": [
+        "action_index",
+        "policy",
+        "simulation"
+      ]
+    },
+    "GateVerdict": {
+      "description": "Outcome of one gate (policy or simulation) for one action. `Skipped`\noccurs when an earlier gate denied so this gate never ran (research Q-12).",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "pass"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "skipped"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "fail"
+            },
+            "rule": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "rule",
+            "detail"
           ]
         }
       ]

@@ -116,6 +116,38 @@ fn update_run_status_with_transition_sets_finished_at_on_succeeded() {
 }
 
 #[test]
+fn update_run_status_with_transition_accepts_running_to_simulation_denied() {
+    // Phase 5 D-10: Running → SimulationDenied is a legal terminal transition.
+    let mut store = fresh_memory_store();
+    let sid = seed_strategy(&mut store, "arb", "// code");
+    let rid = store.insert_run(&sid, RunStatus::Queued).unwrap();
+    store
+        .update_run_status_with_transition(&rid, RunStatus::Queued, RunStatus::Running)
+        .unwrap();
+    store
+        .update_run_status_with_transition(&rid, RunStatus::Running, RunStatus::SimulationDenied)
+        .expect("Phase 5 unblocks Running → SimulationDenied");
+    let row = store.get_run(&rid).unwrap().unwrap();
+    assert_eq!(row.status, RunStatus::SimulationDenied);
+}
+
+#[test]
+fn update_run_status_with_transition_accepts_running_to_policy_denied() {
+    // Phase 5 D-10: Running → PolicyDenied is a legal terminal transition.
+    let mut store = fresh_memory_store();
+    let sid = seed_strategy(&mut store, "arb", "// code");
+    let rid = store.insert_run(&sid, RunStatus::Queued).unwrap();
+    store
+        .update_run_status_with_transition(&rid, RunStatus::Queued, RunStatus::Running)
+        .unwrap();
+    store
+        .update_run_status_with_transition(&rid, RunStatus::Running, RunStatus::PolicyDenied)
+        .expect("Phase 5 unblocks Running → PolicyDenied");
+    let row = store.get_run(&rid).unwrap().unwrap();
+    assert_eq!(row.status, RunStatus::PolicyDenied);
+}
+
+#[test]
 fn update_run_status_with_transition_does_not_overwrite_finished_at_on_re_succeed() {
     // STRICT D-12: Succeeded → * is Disallowed (terminal). The guard MUST
     // reject Succeeded → Succeeded with InvalidInput.

@@ -38,7 +38,7 @@ pub use erc20::{
     erc20_symbol, erc20_total_supply,
 };
 pub use error::EvmError;
-pub use native::{native_balance, native_block_number};
+pub use native::{fetch_chain_id, native_balance, native_block_number};
 pub use normalize::{NormalizedAction, NormalizedActionKind, normalize_action};
 pub use provider::build_provider;
 pub use read::{BlockTag, ReadContractInput, read_contract};

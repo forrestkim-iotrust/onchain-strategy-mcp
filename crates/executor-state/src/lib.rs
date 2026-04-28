@@ -17,7 +17,9 @@ pub mod store;
 pub mod strategies;
 
 pub use error::StateError;
-pub use journal::{ActionEntry, LogEntry, SourceReadEntry};
+pub use journal::{
+    ActionEntry, DecisionEntry, DecisionGate, DecisionVerdict, LogEntry, SourceReadEntry,
+};
 pub use runs::{Run, RunRepo};
 pub use store::StateStore;
 pub use strategies::{RegisterOutcome, Strategy, StrategySummary};

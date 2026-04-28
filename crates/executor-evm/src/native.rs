@@ -10,8 +10,10 @@
 //! - `blockNumber` → JSON Number. Block heights fit u64 / f64 within all
 //!   foreseeable lifetimes; JS can consume them as Number safely.
 //!
-//! `chainId` is intentionally **NOT** exposed — Phase-5 policy boundary owns
-//! chain identity (D-07).
+//! `chainId` is intentionally **NOT** exposed via the JS sandbox — Phase-5
+//! policy boundary owns chain identity (D-07). For host-side use the
+//! [`fetch_chain_id`] helper which the orchestrator caches on
+//! `ExecutorServer`.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -21,6 +23,18 @@ use alloy_primitives::Address;
 
 use crate::read::BlockTag;
 use crate::{EvmConfig, EvmError};
+
+/// Phase 5 D-17 — fetch the connected chain's id via `eth_chainId`. The
+/// orchestrator caches the value on `ExecutorServer.chain_id_cell`. Errors
+/// surface as [`EvmError::Transport`] per the Phase-4 wire taxonomy.
+pub async fn fetch_chain_id(provider: &Arc<DynProvider>) -> Result<u64, EvmError> {
+    provider
+        .get_chain_id()
+        .await
+        .map_err(|e| EvmError::Transport {
+            detail_for_log: format!("get_chain_id: {e}"),
+        })
+}
 
 /// `ctx.evm.readNative.balance(account, blockTag?)` — returns wei as decimal
 /// string. `blockTag` defaults to [`BlockTag::Latest`] in the host binding;

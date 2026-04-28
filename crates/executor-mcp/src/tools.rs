@@ -508,7 +508,10 @@ fn validate_strategy_output(v: &serde_json::Value) -> Result<StrategyOutcome, St
                     return Err(format!("action[{i}] (contract_call): {e}"));
                 }
             }
-            Ok(StrategyOutcome::Actions { actions })
+            Ok(StrategyOutcome::Actions {
+                actions,
+                decisions: Vec::new(),
+            })
         }
         other => Err(format!(
             "expected `\"noop\"` or `Action[]`, got {}",
@@ -552,7 +555,7 @@ async fn record_action(
 ) -> Result<(), McpError> {
     let (journal_outcome, payload_json): (JournalActionOutcome, String) = match outcome {
         StrategyOutcome::Noop => (JournalActionOutcome::Noop, "\"noop\"".to_string()),
-        StrategyOutcome::Actions { actions } => {
+        StrategyOutcome::Actions { actions, .. } => {
             // MR-03: never silently fall back to "[]" on serde failure — the
             // journal is the audit trail ("모든 실행은 기록으로 남는다") and a
             // legitimate empty-array success run is indistinguishable from a
