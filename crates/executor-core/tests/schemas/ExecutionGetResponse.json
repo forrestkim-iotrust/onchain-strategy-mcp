@@ -1,9 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ExecutionGetResponse",
-  "description": "Response for execution_get (Phase 2 base run model).",
+  "description": "Response for execution_get with persisted Phase 6 execution action rows.",
   "type": "object",
   "properties": {
+    "actions": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ExecutionActionReport"
+      }
+    },
     "error": {
       "type": [
         "string",
@@ -18,6 +25,12 @@
     },
     "run_id": {
       "type": "string"
+    },
+    "signer_address": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "started_at": {
       "type": "string"
@@ -36,6 +49,65 @@
     "started_at"
   ],
   "$defs": {
+    "ExecutionActionReport": {
+      "type": "object",
+      "properties": {
+        "action_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "error_detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "gas_used": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "receipt_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "signer_address": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "tx_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_index",
+        "signer_address",
+        "status",
+        "recorded_at",
+        "updated_at"
+      ]
+    },
     "RunStatus": {
       "description": "All run lifecycle states (D-05). Phase 2 emits only the first four\n(`queued`/`running`/`succeeded`/`failed`); the remaining three are\n**future-reserved** for Phase 5 (`simulation_denied`, `policy_denied`)\nand Phase 6 (`canceled`). They are declared here at Phase 2 to lock the\nagent-facing schema golden once and avoid contract churn later.",
       "oneOf": [
