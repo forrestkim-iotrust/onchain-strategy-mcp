@@ -173,7 +173,7 @@ pub fn dyn_sol_to_js_value(value: &DynSolValue) -> Result<serde_json::Value, Evm
             Ok(serde_json::Value::Array(arr))
         }
         other => Err(EvmError::Decode {
-            category: "unsupported_return_type",
+            category: std::borrow::Cow::Borrowed("unsupported_return_type"),
             detail_for_log: format!("unsupported DynSolValue for v1: {other:?}"),
         }),
     }
@@ -183,7 +183,7 @@ pub fn dyn_sol_to_js_value(value: &DynSolValue) -> Result<serde_json::Value, Evm
 
 fn encode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
     EvmError::Encode {
-        category,
+        category: std::borrow::Cow::Borrowed(category),
         detail_for_log: detail.into(),
     }
 }
@@ -344,7 +344,7 @@ fn uint_to_json(u: U256, bits: usize) -> Result<serde_json::Value, EvmError> {
         let n: u64 = u
             .try_into()
             .map_err(|_| EvmError::Decode {
-                category: "uint_too_wide_for_number",
+                category: std::borrow::Cow::Borrowed("uint_too_wide_for_number"),
                 detail_for_log: format!("uint{bits} value did not fit u64 (impossible at <=32)"),
             })?;
         Ok(serde_json::Value::Number(n.into()))
@@ -356,7 +356,7 @@ fn uint_to_json(u: U256, bits: usize) -> Result<serde_json::Value, EvmError> {
 fn int_to_json(i: I256, bits: usize) -> Result<serde_json::Value, EvmError> {
     if bits <= 32 {
         let v: i64 = i.try_into().map_err(|_| EvmError::Decode {
-            category: "int_too_wide_for_number",
+            category: std::borrow::Cow::Borrowed("int_too_wide_for_number"),
             detail_for_log: format!("int{bits} value did not fit i64"),
         })?;
         Ok(serde_json::Value::Number(v.into()))

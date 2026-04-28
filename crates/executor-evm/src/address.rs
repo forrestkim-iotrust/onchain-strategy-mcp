@@ -20,7 +20,7 @@ pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 fn encode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
     EvmError::Encode {
-        category,
+        category: std::borrow::Cow::Borrowed(category),
         detail_for_log: detail.into(),
     }
 }
@@ -111,9 +111,9 @@ pub fn checksum(s: &str) -> Result<String, EvmError> {
 mod tests {
     use super::*;
 
-    fn cat_of(e: &EvmError) -> &'static str {
+    fn cat_of(e: &EvmError) -> &str {
         match e {
-            EvmError::Encode { category, .. } => category,
+            EvmError::Encode { category, .. } => category.as_ref(),
             _ => "OTHER",
         }
     }

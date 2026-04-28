@@ -475,14 +475,14 @@ fn validate_strategy_output(v: &serde_json::Value) -> Result<StrategyOutcome, St
             // (e.g. `"evm encode error: abi_oversize"`) — never raw alloy /
             // serde text.
             for (i, action) in actions.iter().enumerate() {
-                if let Action::ContractCall(cc) = action {
-                    if let Err(e) = executor_evm::action::dry_run_abi_encode(
+                if let Action::ContractCall(cc) = action
+                    && let Err(e) = executor_evm::action::dry_run_abi_encode(
                         &cc.abi,
                         &cc.function,
                         &cc.args,
-                    ) {
-                        return Err(format!("action[{i}] (contract_call): {e}"));
-                    }
+                    )
+                {
+                    return Err(format!("action[{i}] (contract_call): {e}"));
                 }
             }
             Ok(StrategyOutcome::Actions { actions })

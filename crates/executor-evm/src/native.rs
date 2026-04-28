@@ -71,7 +71,7 @@ pub async fn native_block_number(
 /// boundary owns checksum strictness for D-09).
 fn parse_address(s: &str) -> Result<Address, EvmError> {
     Address::from_str(s).map_err(|e| EvmError::Encode {
-        category: "bad_address",
+        category: std::borrow::Cow::Borrowed("bad_address"),
         detail_for_log: format!("address parse: {e}"),
     })
 }

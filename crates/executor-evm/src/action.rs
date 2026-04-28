@@ -29,14 +29,14 @@ use crate::EvmError;
 
 fn encode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
     EvmError::Encode {
-        category,
+        category: std::borrow::Cow::Borrowed(category),
         detail_for_log: detail.into(),
     }
 }
 
 fn decode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
     EvmError::Decode {
-        category,
+        category: std::borrow::Cow::Borrowed(category),
         detail_for_log: detail.into(),
     }
 }
@@ -212,10 +212,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn cat_of(e: &EvmError) -> &'static str {
+    fn cat_of(e: &EvmError) -> &str {
         match e {
-            EvmError::Encode { category, .. } => category,
-            EvmError::Decode { category, .. } => category,
+            EvmError::Encode { category, .. } => category.as_ref(),
+            EvmError::Decode { category, .. } => category.as_ref(),
             _ => "OTHER",
         }
     }

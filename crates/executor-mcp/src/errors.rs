@@ -410,7 +410,7 @@ mod tests {
         // Decode → evm_decode_error
         let e = map_runtime_error(
             RuntimeError::Evm(EvmError::Decode {
-                category: "abi_decode_output",
+                category: std::borrow::Cow::Borrowed("abi_decode_output"),
                 detail_for_log: "alloy_dyn_abi::Error::TypeMismatch".into(),
             }),
             "rid",
@@ -446,7 +446,7 @@ mod tests {
         // map_runtime_error too) → evm_decode_error
         let e = map_runtime_error(
             RuntimeError::Evm(EvmError::Encode {
-                category: "type_mismatch",
+                category: std::borrow::Cow::Borrowed("type_mismatch"),
                 detail_for_log: "raw".into(),
             }),
             "rid",

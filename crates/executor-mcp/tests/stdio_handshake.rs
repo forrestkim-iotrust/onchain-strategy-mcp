@@ -1844,6 +1844,45 @@ async fn strategy_run_unknown_strategy_id_returns_not_found() -> Result<()> {
     Ok(())
 }
 
+/// BR-01 regression: when an EVM error is thrown from inside the JS sandbox
+/// (here, `ctx.actions.contractCall` with malformed `abi`), it must surface
+/// on the wire as `data.kind == "evm_decode_error"` (D-12 taxonomy), NOT
+/// the generic `"exception"`. Pre-fix, `RuntimeError::Evm(_)` was never
+/// constructed in production — every EVM error became `RuntimeError::Exception`
+/// and the taxonomy upgrade was decorative. Fix: `classify_message` now
+/// re-classifies stable EvmError prefixes back into `RuntimeError::Evm(_)`.
+#[tokio::test]
+async fn strategy_run_evm_error_surfaces_typed_data_kind() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    // ctx.actions.contractCall with malformed ABI → EvmError::Decode
+    // { category: "abi_parse" } → throw_js_error("evm decode error: abi_parse")
+    // → JS exception → caught_to_runtime_error → classify_message → Evm(Decode).
+    let src = "(ctx) => {\n\
+              ctx.actions.contractCall({ \
+                address: '0x0000000000000000000000000000000000000001', \
+                abi: 'this is not json', function: 'f', args: [] });\n\
+              return 'noop';\n\
+              }";
+    let strategy_id = seed_strategy(&db_path, "evm_typed", src)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(&mut proc, 2, "strategy_run", json!({ "strategy_id": strategy_id })).await?;
+    let err = r.get("error").expect("error envelope");
+    // -32017 = STRATEGY_RUNTIME_ERROR; data.kind must be a typed evm_*
+    // value, NOT "exception".
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    let kind = err["data"]["kind"].as_str().unwrap_or_default();
+    assert!(
+        matches!(kind, "evm_decode_error" | "evm_rpc_error" | "evm_revert"),
+        "expected typed evm_* data.kind, got: {kind}"
+    );
+    assert_ne!(kind, "exception", "BR-01 regressed: data.kind is generic 'exception'");
+    proc.child.kill().await?;
+    Ok(())
+}
+
 /// BR-02 regression: a strategy that hand-builds a `contract_call` action
 /// with an oversize `abi` string (1 MiB) MUST be rejected at the JSON-output
 /// gate (validate_strategy_output → dry_run_abi_encode), not just at builder

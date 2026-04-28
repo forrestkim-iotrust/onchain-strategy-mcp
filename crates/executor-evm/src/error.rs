@@ -8,6 +8,8 @@
 //! field and is intended for `tracing::warn!` consumption at the MCP boundary
 //! — NEVER `format!` it into a wire response.
 
+use std::borrow::Cow;
+
 #[derive(Debug, thiserror::Error)]
 pub enum EvmError {
     /// Transport-level RPC failure (anvil down, HTTP 500, connection refused).
@@ -17,9 +19,17 @@ pub enum EvmError {
 
     /// Host-side decode failure (wrong ABI for data, malformed return bytes,
     /// JSON parse failure, function-not-found).
+    ///
+    /// `category` is `Cow<'static, str>` so that:
+    /// - normal construction sites use the cheap `Cow::Borrowed("abi_parse")`
+    ///   form (zero-cost, identical to the old `&'static str`);
+    /// - the BR-01 re-classification path (`classify_message` in
+    ///   `strategy-js::sandbox`) can carry a runtime category string back
+    ///   into a typed variant when an EvmError is re-thrown from a JS
+    ///   exception message.
     #[error("evm decode error: {category}")]
     Decode {
-        category: &'static str,
+        category: Cow<'static, str>,
         detail_for_log: String,
     },
 
@@ -35,10 +45,11 @@ pub enum EvmError {
     #[error("evm rpc error: timeout")]
     Timeout,
 
-    /// Encoding-side input rejected before transport.
+    /// Encoding-side input rejected before transport. See [`EvmError::Decode`]
+    /// for `category`'s `Cow` rationale (BR-01).
     #[error("evm encode error: {category}")]
     Encode {
-        category: &'static str,
+        category: Cow<'static, str>,
         detail_for_log: String,
     },
 
@@ -94,7 +105,7 @@ mod tests {
         );
         assert_eq!(
             EvmError::Decode {
-                category: "abi_parse",
+                category: std::borrow::Cow::Borrowed("abi_parse"),
                 detail_for_log: "x".into()
             }
             .data_kind(),
@@ -102,7 +113,7 @@ mod tests {
         );
         assert_eq!(
             EvmError::Encode {
-                category: "type_mismatch",
+                category: std::borrow::Cow::Borrowed("type_mismatch"),
                 detail_for_log: "x".into()
             }
             .data_kind(),
@@ -133,7 +144,7 @@ mod tests {
         assert!(!wire.contains("connection refused"), "raw text leaked: {wire}");
 
         let e = EvmError::Decode {
-            category: "abi_parse",
+            category: std::borrow::Cow::Borrowed("abi_parse"),
             detail_for_log: "JsonAbi: at line 1 col 0".into(),
         };
         assert_eq!(e.to_string(), "evm decode error: abi_parse");

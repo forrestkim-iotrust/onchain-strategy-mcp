@@ -655,6 +655,66 @@ fn classify_message(msg: &str) -> Option<RuntimeError> {
         // the flag isn't set (e.g. a future API change).
         return Some(RuntimeError::Timeout);
     }
+    // BR-01: re-classify EVM stable-prefix exceptions back into
+    // `RuntimeError::Evm(_)` so the MCP boundary maps them onto the D-12
+    // `data.kind ∈ {evm_rpc_error, evm_decode_error, evm_revert}` taxonomy
+    // instead of a generic `data.kind = "exception"`. The host bindings
+    // throw `EvmError::Display` (e.g. `"evm rpc error: timeout"`) verbatim;
+    // this classifier matches each stable prefix and reconstructs the
+    // typed variant. The runtime category for re-thrown Decode/Encode is
+    // carried as a `Cow::Owned` string (BR-01-coupled fix in
+    // `executor-evm::EvmError`).
+    use executor_evm::EvmError;
+    use std::borrow::Cow;
+    // Trim the leading "Error: " prefix QuickJS prepends to thrown Error
+    // messages — `caught_to_runtime_error` may pass either form. Also
+    // peel off the builder-context prefix `"ctx.actions.<helper>: "` (and
+    // any `args[i]:` host-binding prefix) so the EvmError stable string
+    // is matched at the tail. We scan for the rightmost occurrence of an
+    // `evm ` taxonomy prefix instead of requiring it at position 0.
+    let body = msg.strip_prefix("Error: ").unwrap_or(msg);
+    // Find a stable taxonomy prefix anywhere in the body and slice from there.
+    let body = if let Some(idx) = body.find("evm rpc error: ")
+        .or_else(|| body.find("evm decode error: "))
+        .or_else(|| body.find("evm encode error: "))
+        .or_else(|| body.find("evm revert: "))
+        .or_else(|| body.find("evm provider config error"))
+    {
+        &body[idx..]
+    } else {
+        body
+    };
+    if body == "evm rpc error: timeout" {
+        return Some(RuntimeError::Evm(EvmError::Timeout));
+    }
+    if body == "evm rpc error: transport" {
+        return Some(RuntimeError::Evm(EvmError::Transport {
+            detail_for_log: "<re-thrown from JS>".into(),
+        }));
+    }
+    if body == "evm provider config error" {
+        return Some(RuntimeError::Evm(EvmError::Config {
+            detail_for_log: "<re-thrown from JS>".into(),
+        }));
+    }
+    if let Some(reason) = body.strip_prefix("evm revert: ") {
+        return Some(RuntimeError::Evm(EvmError::Revert {
+            reason: reason.into(),
+            detail_for_log: "<re-thrown from JS>".into(),
+        }));
+    }
+    if let Some(category) = body.strip_prefix("evm decode error: ") {
+        return Some(RuntimeError::Evm(EvmError::Decode {
+            category: Cow::Owned(category.to_string()),
+            detail_for_log: "<re-thrown from JS>".into(),
+        }));
+    }
+    if let Some(category) = body.strip_prefix("evm encode error: ") {
+        return Some(RuntimeError::Evm(EvmError::Encode {
+            category: Cow::Owned(category.to_string()),
+            detail_for_log: "<re-thrown from JS>".into(),
+        }));
+    }
     None
 }
 
@@ -825,10 +885,8 @@ fn read_contract_host_binding<'js>(
         "address": address,
         "block_tag": block_tag_to_json(block_tag),
     });
-    if let Some(n) = resolved {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
-        }
+    if let (Some(n), Some(obj)) = (resolved, payload.as_object_mut()) {
+        obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
     }
     evm_reads
         .borrow_mut()
@@ -1115,10 +1173,8 @@ fn erc20_host_binding<'js>(
         "address": token,
         "block_tag": block_tag_to_json(block_tag),
     });
-    if let Some(n) = resolved {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
-        }
+    if let (Some(n), Some(obj)) = (resolved, payload.as_object_mut()) {
+        obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
     }
     evm_reads
         .borrow_mut()
@@ -1219,10 +1275,8 @@ fn native_balance_host_binding<'js>(
         "account": account,
         "block_tag": block_tag_to_json(block_tag),
     });
-    if let Some(n) = resolved {
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
-        }
+    if let (Some(n), Some(obj)) = (resolved, payload.as_object_mut()) {
+        obj.insert("block_number_resolved".into(), serde_json::Value::from(n));
     }
     evm_reads
         .borrow_mut()

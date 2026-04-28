@@ -77,13 +77,13 @@ pub async fn read_contract(
 ) -> Result<serde_json::Value, EvmError> {
     // 1. Parse address.
     let addr = Address::from_str(&input.address).map_err(|e| EvmError::Encode {
-        category: "bad_address",
+        category: std::borrow::Cow::Borrowed("bad_address"),
         detail_for_log: format!("address parse: {e}"),
     })?;
 
     // 2. Parse JsonAbi (verbatim ABI string — agent supplied).
     let abi: JsonAbi = serde_json::from_str(&input.abi_json).map_err(|e| EvmError::Decode {
-        category: "abi_parse",
+        category: std::borrow::Cow::Borrowed("abi_parse"),
         detail_for_log: format!("JsonAbi: {e}"),
     })?;
 
@@ -98,7 +98,7 @@ pub async fn read_contract(
         .map(|(p, a)| {
             let ty: DynSolType =
                 p.selector_type().parse().map_err(|e| EvmError::Encode {
-                    category: "abi_type_parse",
+                    category: std::borrow::Cow::Borrowed("abi_type_parse"),
                     detail_for_log: format!("{}: {e}", p.selector_type()),
                 })?;
             js_value_to_dyn_sol(a, &ty)
@@ -107,7 +107,7 @@ pub async fn read_contract(
     let calldata = func
         .abi_encode_input(&dyn_values)
         .map_err(|e| EvmError::Encode {
-            category: "abi_encode_input",
+            category: std::borrow::Cow::Borrowed("abi_encode_input"),
             detail_for_log: format!("{e}"),
         })?;
 
@@ -127,7 +127,7 @@ pub async fn read_contract(
 
     // 7. Decode output.
     let outputs = func.abi_decode_output(&bytes).map_err(|e| EvmError::Decode {
-        category: "abi_decode_output",
+        category: std::borrow::Cow::Borrowed("abi_decode_output"),
         detail_for_log: format!("{e}"),
     })?;
 
@@ -154,7 +154,7 @@ fn resolve_overload<'a>(
     args: &[serde_json::Value],
 ) -> Result<&'a Function, EvmError> {
     let funcs = abi.function(name).ok_or_else(|| EvmError::Decode {
-        category: "abi_function_not_found",
+        category: std::borrow::Cow::Borrowed("abi_function_not_found"),
         detail_for_log: format!("function {name} not present in ABI"),
     })?;
     let candidates: Vec<&Function> = funcs
@@ -163,7 +163,7 @@ fn resolve_overload<'a>(
         .collect();
     match candidates.as_slice() {
         [] => Err(EvmError::Decode {
-            category: "abi_overload_arity",
+            category: std::borrow::Cow::Borrowed("abi_overload_arity"),
             detail_for_log: format!(
                 "no overload of {name} accepts {} args",
                 args.len()
@@ -171,7 +171,7 @@ fn resolve_overload<'a>(
         }),
         [only] => Ok(*only),
         _many => Err(EvmError::Decode {
-            category: "abi_overload_ambiguous",
+            category: std::borrow::Cow::Borrowed("abi_overload_ambiguous"),
             detail_for_log: format!(
                 "function {name} has overloads; cannot disambiguate by arg count alone"
             ),

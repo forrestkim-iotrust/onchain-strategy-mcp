@@ -31,7 +31,7 @@ pub const MAX_DECIMALS: u8 = 77;
 
 fn encode_err(category: &'static str, detail: impl Into<String>) -> EvmError {
     EvmError::Encode {
-        category,
+        category: std::borrow::Cow::Borrowed(category),
         detail_for_log: detail.into(),
     }
 }
@@ -214,9 +214,9 @@ pub fn format_units(value: U256, decimals: u8) -> Result<String, EvmError> {
 mod tests {
     use super::*;
 
-    fn cat_of(e: &EvmError) -> &'static str {
+    fn cat_of(e: &EvmError) -> &str {
         match e {
-            EvmError::Encode { category, .. } => category,
+            EvmError::Encode { category, .. } => category.as_ref(),
             _ => "OTHER",
         }
     }
@@ -317,8 +317,8 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(
             match r.unwrap_err() {
-                EvmError::Encode { category, .. } => category,
-                _ => "OTHER",
+                EvmError::Encode { category, .. } => category.into_owned(),
+                _ => "OTHER".to_string(),
             },
             "decimals_out_of_range"
         );
