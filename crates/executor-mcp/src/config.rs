@@ -11,7 +11,9 @@
 //! `#[serde(deny_unknown_fields)]` keeps typos noisy.
 
 use anyhow::{Context, Result};
+use executor_policy::{LoadedPolicy, PolicyError};
 use serde::Deserialize;
+use std::path::Path;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +26,21 @@ pub struct Config {
     /// absent — the provider is constructed lazily on first `ctx.evm.*` call.
     #[serde(default)]
     pub evm: EvmSection,
+    /// Phase 5 Plan 05-03 / D-15: `[policy]` section. Defaults to `path = None`
+    /// → server boots with `policy = None` → every `strategy_run` returns
+    /// -32017 `policy_not_loaded` (fail-closed). Set `path` to a TOML file
+    /// loaded by `executor_policy::load_policy_from_path` at boot.
+    #[serde(default)]
+    pub policy: PolicyFileSection,
+}
+
+/// `[policy]` section — points at a TOML file consumed by
+/// `executor_policy::load_policy_from_path`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyFileSection {
+    /// Path to policy.toml. `None` → policy NOT loaded (D-15 fail-closed).
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -116,6 +133,24 @@ impl Config {
             &self.evm.simulation_from,
         )
     }
+
+    /// Plan 05-03 / D-15: load + parse + validate the policy file at
+    /// `[policy].path`, if set.
+    ///
+    /// Returns:
+    /// - `Ok(None)` when `[policy].path` is absent — server proceeds with
+    ///   `policy = None`; `strategy_run` will fail-closed on every call.
+    /// - `Ok(Some(loaded))` when path is set + file parses + validates.
+    /// - `Err(_)` on any IO / parse / validation failure. The MCP boundary
+    ///   ([`crate::server::ExecutorServer::new_with_config`]) catches the
+    ///   error, logs it via `tracing::error!`, and stores `None` (D-15
+    ///   fail-closed — server still boots).
+    pub fn policy_config(&self) -> Result<Option<LoadedPolicy>, PolicyError> {
+        let Some(path_str) = self.policy.path.as_deref() else {
+            return Ok(None);
+        };
+        executor_policy::load_policy_from_path(Path::new(path_str)).map(Some)
+    }
 }
 
 /// Parse `--config=PATH` or `--config PATH` from an arg vector. Testable
@@ -199,9 +234,10 @@ mod tests {
 
     #[test]
     fn rejects_unknown_top_level_fields() {
-        // [state] is no longer unknown as of Phase 2 — use a genuinely unknown section.
-        let err = toml::from_str::<Config>("[policy]\nsomething = 1\n").unwrap_err();
-        assert!(err.to_string().to_lowercase().contains("policy"));
+        // Phase 2 made `[state]` legal; Phase 5 Plan 05-03 makes `[policy]`
+        // legal. Use a still-unreserved section name as the canary.
+        let err = toml::from_str::<Config>("[bogus]\nsomething = 1\n").unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("bogus"));
     }
 
     #[test]
@@ -329,5 +365,59 @@ mod tests {
             evm.simulation_from,
             executor_evm::EvmConfig::default().simulation_from,
         );
+    }
+
+    // ─────────── Phase 5 Plan 05-03 / D-15 [policy] ───────────
+
+    #[test]
+    fn policy_section_absent_yields_none_path() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.policy.path.is_none());
+    }
+
+    #[test]
+    fn policy_section_path_propagates() {
+        let toml_str = "[policy]\npath = \"/tmp/policy.toml\"\n";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.policy.path.as_deref(), Some("/tmp/policy.toml"));
+    }
+
+    #[test]
+    fn policy_config_returns_ok_none_when_path_absent() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(matches!(cfg.policy_config(), Ok(None)));
+    }
+
+    #[test]
+    fn policy_config_loads_when_path_valid() {
+        // Reference the fixture committed by Plan 05-03 Task 1. cargo test
+        // runs each crate from its crate root; use the workspace-relative
+        // path.
+        let fixture = "../executor-policy/tests/fixtures/policy.permissive.toml";
+        let toml_str = format!("[policy]\npath = \"{fixture}\"\n");
+        let cfg: Config = toml::from_str(&toml_str).unwrap();
+        match cfg.policy_config() {
+            Ok(Some(loaded)) => {
+                assert!(loaded.chains_allow.contains(&31337));
+            }
+            other => panic!("expected Ok(Some(_)); got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_config_returns_err_when_path_missing() {
+        let toml_str = "[policy]\npath = \"/no/such/__missing_policy__.toml\"\n";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        let err = cfg.policy_config().unwrap_err();
+        assert!(matches!(err, PolicyError::FileNotFound { .. }));
+        assert_eq!(err.data_kind(), "policy_not_loaded");
+    }
+
+    #[test]
+    fn policy_section_rejects_unknown_field() {
+        let err =
+            toml::from_str::<Config>("[policy]\npath = \"/tmp/p.toml\"\nextra = true\n")
+                .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("extra"));
     }
 }

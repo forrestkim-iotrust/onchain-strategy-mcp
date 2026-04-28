@@ -131,12 +131,13 @@ async fn unimplemented_tools_return_phase_hint() -> Result<()> {
     Ok(())
 }
 
-// VALIDATION.md 1-02-03 — narrowed in Plan 02-02:
-// `strategy_list` / `strategy_get` / `execution_get` are now storage-backed
-// (covered by the new Phase 2 tests below). `policy_get` keeps its
-// placeholder shape (Phase 5 wires the real engine).
+// VALIDATION.md 1-02-03 — narrowed in Plan 02-02 + updated in Plan 05-03:
+// `policy_get` now returns the live policy via `Arc<RwLock<Option<LoadedPolicy>>>`.
+// In the bare `spawn_server_with_state(":memory:")` setup there is no
+// `[policy].path` configured, so the response is the fail-closed placeholder
+// `{loaded: false, reason: ...}` (D-15).
 #[tokio::test]
-async fn policy_get_returns_placeholder() -> Result<()> {
+async fn policy_get_returns_loaded_false_when_policy_not_configured() -> Result<()> {
     let mut proc = common::spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -152,12 +153,17 @@ async fn policy_get_returns_placeholder() -> Result<()> {
     let content = r["result"]["content"][0]["text"]
         .as_str()
         .expect("content text");
-    let policy: Value = serde_json::from_str(content)?;
-    assert!(policy["chains"].is_array(), "policy.chains must be array");
-    assert!(policy["targets"].is_array(), "policy.targets must be array");
+    let body: Value = serde_json::from_str(content)?;
+    assert_eq!(
+        body["loaded"], false,
+        "policy_get without [policy].path must return loaded: false (D-15 fail-closed)"
+    );
     assert!(
-        policy["selectors"].is_array(),
-        "policy.selectors must be array"
+        body["reason"]
+            .as_str()
+            .is_some_and(|s| s.contains("policy not loaded")),
+        "reason missing fail-closed marker: {}",
+        body["reason"]
     );
 
     proc.child.kill().await?;

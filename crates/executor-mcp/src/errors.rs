@@ -16,6 +16,7 @@
 //! `model::ErrorCode(pub i32)` tuple struct — cf. RESEARCH.md RESOLVED #4.
 
 use executor_evm::{EvmError, SimulationFailReason};
+use executor_policy::DecisionVerdict;
 use executor_state::StateError;
 use rmcp::{ErrorData as McpError, model::ErrorCode};
 use serde_json::json;
@@ -205,6 +206,92 @@ pub fn map_simulation_error(
             "fail_reason": fail_reason,
             "action_index": action_index,
             "decoded_revert": decoded_revert,
+            "detail": detail,
+            "run_id": run_id,
+        })),
+    )
+}
+
+/// Phase 5 Plan 05-03 / D-08 — emit `-32017 STRATEGY_RUNTIME_ERROR` with
+/// `data.kind = "policy_violation"` for a policy denial verdict.
+///
+/// Wire shape (LOCKED — Plan 05-04 stdio tests pin this):
+/// - `error.code` = `-32017` STRATEGY_RUNTIME_ERROR (no new wire codes per D-08).
+/// - `data.code` = `"strategy_runtime_error"` (string canon).
+/// - `data.kind` = `"policy_violation"` (distinguishes from `"exception"` /
+///   `"timeout"` / `"evm_*"` / `"simulation_failure"` / `"policy_not_loaded"`).
+/// - `data.rule` = stable rule taxonomy (`chain_not_allowed`,
+///   `contract_not_allowed`, `selector_not_allowed`, `native_value_exceeds`,
+///   `erc20_spend_exceeds`, `raw_call_denied`).
+/// - `data.action_index` = 0-based index of the failing action.
+/// - `data.detail` = `"policy violation: " + verdict.detail` (stable wire-safe
+///   per MR-01; `verdict.detail` originates in `executor_policy::eval`).
+/// - `data.run_id` mirrors the run row whose journal will (Plan 05-04) record
+///   the denial.
+///
+/// MR-01 lock: `verdict.detail` strings are constructed in `eval.rs` from
+/// stable taxonomy templates; no raw alloy / serde / toml text.
+///
+/// **Panics** in debug builds when called with `DecisionVerdict::Allow` —
+/// callers must filter Allow verdicts before invoking this factory.
+pub fn map_policy_error(
+    verdict: &DecisionVerdict,
+    action_index: u32,
+    run_id: &str,
+) -> McpError {
+    let (rule, detail_inner) = match verdict {
+        DecisionVerdict::Deny { rule, detail } => (rule.clone(), detail.clone()),
+        DecisionVerdict::Allow => {
+            // Defense: do not panic in release; produce a synthetic deny so
+            // we never silently emit a malformed envelope.
+            debug_assert!(
+                false,
+                "map_policy_error called with Allow — caller must filter"
+            );
+            (
+                std::borrow::Cow::Borrowed("policy_violation"),
+                "unexpected Allow verdict reached map_policy_error".to_string(),
+            )
+        }
+    };
+    let stable_detail = format!("policy violation: {detail_inner}");
+    tracing::warn!(
+        action_index,
+        run_id,
+        rule = %rule.as_ref(),
+        "policy denial",
+    );
+    McpError::new(
+        STRATEGY_RUNTIME_ERROR,
+        stable_detail.clone(),
+        Some(json!({
+            "code": "strategy_runtime_error",
+            "kind": "policy_violation",
+            "rule": rule.as_ref(),
+            "action_index": action_index,
+            "detail": stable_detail,
+            "run_id": run_id,
+        })),
+    )
+}
+
+/// Phase 5 Plan 05-03 / D-15 — emit `-32017 STRATEGY_RUNTIME_ERROR` with
+/// `data.kind = "policy_not_loaded"` when `ExecutorServer.policy` is `None`.
+///
+/// Triggered at the orchestrator (Plan 05-04 — `tools::strategy_run`) when
+/// the policy field is `None` (boot-time load failed OR `[policy].path` was
+/// not configured). Stable detail string locks the operator-actionable hint:
+/// "set [policy].path in config".
+pub fn policy_not_loaded(run_id: &str) -> McpError {
+    let detail =
+        "policy violation: policy file not loaded — set [policy].path in config".to_string();
+    tracing::warn!(run_id, "strategy_run blocked: policy not loaded");
+    McpError::new(
+        STRATEGY_RUNTIME_ERROR,
+        detail.clone(),
+        Some(json!({
+            "code": "strategy_runtime_error",
+            "kind": "policy_not_loaded",
             "detail": detail,
             "run_id": run_id,
         })),
@@ -616,5 +703,93 @@ mod tests {
         assert!(!s.contains("TransportError"), "raw alloy text leaked: {s}");
         assert!(!s.contains("Reqwest"), "reqwest text leaked: {s}");
         assert!(!s.contains("ErrorResp"), "alloy ErrorResp leaked: {s}");
+    }
+
+    // ─────────── Phase 5 Plan 05-03 / D-08 policy_violation + D-15 policy_not_loaded ───────────
+
+    mod policy_factory_tests {
+        use super::*;
+        use std::borrow::Cow;
+
+        #[test]
+        fn map_policy_error_emits_policy_violation_kind() {
+            let verdict = DecisionVerdict::Deny {
+                rule: Cow::Borrowed("contract_not_allowed"),
+                detail: "contract 0xdead not allowed on chain 31337".into(),
+            };
+            let e = map_policy_error(&verdict, 1, "01ARZ");
+            assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+            assert_eq!(e.code, ErrorCode(-32017));
+            let data = e.data.expect("data present");
+            assert_eq!(data["code"], "strategy_runtime_error");
+            assert_eq!(data["kind"], "policy_violation");
+            assert_eq!(data["rule"], "contract_not_allowed");
+            assert_eq!(data["action_index"], 1);
+            assert_eq!(data["run_id"], "01ARZ");
+            let detail = data["detail"].as_str().unwrap();
+            assert!(
+                detail.starts_with("policy violation: "),
+                "detail missing prefix: {detail}"
+            );
+            assert!(detail.contains("contract 0xdead not allowed"));
+        }
+
+        #[test]
+        fn map_policy_error_carries_each_rule_taxonomy() {
+            // Probe each of the 6 stable rule strings.
+            for rule in [
+                "chain_not_allowed",
+                "contract_not_allowed",
+                "selector_not_allowed",
+                "native_value_exceeds",
+                "erc20_spend_exceeds",
+                "raw_call_denied",
+            ] {
+                let verdict = DecisionVerdict::Deny {
+                    rule: Cow::Owned(rule.to_string()),
+                    detail: "stub".into(),
+                };
+                let e = map_policy_error(&verdict, 0, "rid");
+                let data = e.data.expect("data present");
+                assert_eq!(data["rule"], rule);
+                assert_eq!(data["kind"], "policy_violation");
+            }
+        }
+
+        #[test]
+        fn policy_not_loaded_factory_emits_kind_policy_not_loaded() {
+            let e = policy_not_loaded("01ARZ");
+            assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
+            assert_eq!(e.code, ErrorCode(-32017));
+            let data = e.data.expect("data present");
+            assert_eq!(data["code"], "strategy_runtime_error");
+            assert_eq!(data["kind"], "policy_not_loaded");
+            assert_eq!(data["run_id"], "01ARZ");
+            assert_eq!(
+                data["detail"],
+                "policy violation: policy file not loaded — set [policy].path in config"
+            );
+            // No `rule` or `action_index` for policy_not_loaded — distinguishes
+            // wire shape from policy_violation.
+            assert!(data.get("rule").is_none() || data["rule"].is_null());
+            assert!(data.get("action_index").is_none() || data["action_index"].is_null());
+        }
+
+        #[test]
+        fn map_policy_error_does_not_leak_raw_alloy_text() {
+            // MR-01 — even with attacker-shaped detail text from eval.rs, the
+            // wire envelope carries only the stable taxonomy + the eval-built
+            // detail (which itself has stable prefixes by construction).
+            let verdict = DecisionVerdict::Deny {
+                rule: Cow::Borrowed("chain_not_allowed"),
+                detail: "chain 999 not in policy allowlist".into(),
+            };
+            let e = map_policy_error(&verdict, 0, "rid");
+            let data = e.data.expect("data");
+            let s = serde_json::to_string(&data).unwrap();
+            assert!(!s.contains("TransportError"), "alloy text leaked: {s}");
+            assert!(!s.contains("toml::de"), "toml text leaked: {s}");
+            assert!(!s.contains("Reqwest"), "reqwest text leaked: {s}");
+        }
     }
 }

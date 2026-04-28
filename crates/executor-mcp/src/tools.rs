@@ -383,18 +383,30 @@ impl ExecutorServer {
 
     #[tool(
         name = "policy_get",
-        description = "Get the current policy. Returns a placeholder shape until Phase 5 implements the policy engine."
+        description = "Get the current loaded policy. Returns `{loaded: false, reason: ...}` when no policy is configured (D-15 fail-closed)."
     )]
     async fn policy_get(&self) -> Result<CallToolResult, McpError> {
-        let placeholder = serde_json::json!({
-            "chains": [],
-            "targets": [],
-            "selectors": [],
-            "note": "policy engine lands in Phase 5",
-        });
-        Ok(CallToolResult::success(vec![Content::text(
-            placeholder.to_string(),
-        )]))
+        let guard = self.policy.read().await;
+        let body = match &*guard {
+            Some(loaded) => {
+                let policy_json = serde_json::to_value(loaded).map_err(|e| {
+                    // MR-03: never silently fall back to {} on serde failure.
+                    tracing::warn!(detail = %e, "policy_get: failed to serialize LoadedPolicy");
+                    storage_error(format!("policy_get serialize: {e}"))
+                })?;
+                serde_json::json!({
+                    "loaded": true,
+                    "policy": policy_json,
+                })
+            }
+            None => serde_json::json!({
+                "loaded": false,
+                "reason": "policy not loaded (set [policy].path in config or fix policy.toml; see tracing logs)",
+            }),
+        };
+        let body_str = serde_json::to_string(&body)
+            .map_err(|e| storage_error(format!("policy_get encode: {e}")))?;
+        Ok(CallToolResult::success(vec![Content::text(body_str)]))
     }
 }
 

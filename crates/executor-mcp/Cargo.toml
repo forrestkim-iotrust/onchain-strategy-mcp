@@ -37,6 +37,8 @@ strategy-js = { path = "../strategy-js" }            # Plan 03-03: needed by too
 # Phase 4 D-04: executor-evm provides the lazy DynProvider + EvmConfig built
 # from the [evm] config section. alloy itself stays per-crate in executor-evm.
 executor-evm = { path = "../executor-evm" }
+# Phase 5 Plan 05-03: policy DSL load + evaluator (alloy-FREE per D-20).
+executor-policy = { path = "../executor-policy" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal", "process", "io-util", "time"] }
