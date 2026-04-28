@@ -113,7 +113,7 @@ Plans:
 Plans:
 - [x] 06-01: Signer boundary and local private-key signer
 - [x] 06-02: Broadcast and receipt watcher
-- [ ] 06-03: Execution report and status tools
+- [x] 06-03: Execution report and status tools
 
 ### Phase 7: Examples, Tests, and Documentation
 **Goal**: The repo demonstrates the full runtime loop and has enough tests to prevent unsafe regressions.  
