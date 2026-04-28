@@ -95,7 +95,7 @@ Plans:
 Plans:
 - [x] 05-01: Action-to-transaction normalization
 - [x] 05-02: Simulation adapter and failure handling
-- [ ] 05-03: Policy model and deny-by-default evaluator
+- [~] 05-03: Policy model and deny-by-default evaluator (evaluator+factories complete; orchestrator wiring lands in 05-04)
 - [ ] 05-04: Journaled decisions and MCP error reporting
 
 ### Phase 6: Local Managed Execution
