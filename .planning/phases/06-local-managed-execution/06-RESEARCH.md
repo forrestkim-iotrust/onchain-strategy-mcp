@@ -396,22 +396,11 @@ for (idx, normalized_action) in normalized.iter().enumerate() {
 | A3 | Execution error taxonomy should include `signer_not_configured`, `invalid_private_key`, `broadcast_failed`, `receipt_timeout`, `receipt_failed`, `receipt_missing`. | Pitfall 5 | Wire tests may need a different taxonomy if user has hidden preferences. |
 | A4 | `execution_id` should remain accepted as field name while semantically being `run_id`. | State of the Art | Renaming may break existing schema golden expectations; planner should inspect tests. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Should receipt timeout live in `[signer]` or `[evm]`?**
-   - What we know: `[evm].call_timeout_ms` is used for read/simulation calls; Phase 6 context says receipt waiting uses configured timeout defaults. [VERIFIED: codebase config + CONTEXT]
-   - What's unclear: Whether to add `[signer].receipt_timeout_ms` or `[evm].receipt_timeout_ms`. [ASSUMED]
-   - Recommendation: Add `[signer].receipt_timeout_ms` or `[execution].receipt_timeout_ms` only if introducing an execution config section; avoid reusing call timeout because receipt waits are longer than eth_call timeouts. [ASSUMED]
-
-2. **Should failed receipt stop remaining actions?**
-   - What we know: Actions execute sequentially and wait for each receipt before broadcasting the next action. [VERIFIED: Phase 6 CONTEXT.md]
-   - What's unclear: CONTEXT does not explicitly state whether a reverted/failed receipt halts subsequent actions. [VERIFIED: CONTEXT.md]
-   - Recommendation: Halt on first non-success receipt and mark run `Failed`; broadcasting later dependent actions after a failed earlier action is unsafe. [ASSUMED]
-
-3. **Which receipt status field should be serialized?**
-   - What we know: Requirement asks for receipt status and gas used. [VERIFIED: REQUIREMENTS.md]
-   - What's unclear: Exact Alloy receipt accessor/field naming should be confirmed during implementation against compiler because receipt response type is network-associated. [VERIFIED: cargo registry source uses `receipt.transaction_hash` and `receipt.from` in tests]
-   - Recommendation: Persist a project enum/string `confirmed`/`failed` derived from the receipt status and gas as decimal string. [ASSUMED]
+1. **Receipt timeout location:** add `[signer].receipt_timeout_ms` with a v1 default of `120000`; do not reuse `[evm].call_timeout_ms` because receipt waits are longer than read/simulation calls.
+2. **Failed receipt behavior:** halt on the first failed receipt, mark the run/execution failed, and do not broadcast later actions in that run.
+3. **Serialized receipt status:** persist a project-owned string status of `confirmed` or `failed` derived from the chain receipt status, with gas used stored as a decimal string.
 
 ## Environment Availability
 
