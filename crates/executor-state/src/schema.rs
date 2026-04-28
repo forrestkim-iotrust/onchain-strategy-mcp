@@ -98,6 +98,24 @@ CREATE TABLE IF NOT EXISTS journal_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_journal_decisions_run_id
     ON journal_decisions(run_id);
+
+-- Phase 6: per-action local managed execution attempts and receipt status.
+CREATE TABLE IF NOT EXISTS execution_actions (
+    id             TEXT PRIMARY KEY,
+    run_id         TEXT NOT NULL REFERENCES runs(id),
+    action_index   INTEGER NOT NULL,
+    signer_address TEXT NOT NULL,
+    tx_hash        TEXT,
+    status         TEXT NOT NULL,
+    receipt_status TEXT,
+    gas_used       TEXT,
+    error_kind     TEXT,
+    error_detail   TEXT,
+    recorded_at    TEXT NOT NULL,
+    updated_at     TEXT NOT NULL,
+    UNIQUE (run_id, action_index)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_actions_run_id ON execution_actions(run_id);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {

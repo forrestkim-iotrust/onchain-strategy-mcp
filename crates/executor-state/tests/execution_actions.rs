@@ -72,7 +72,7 @@ fn execution_actions_order_by_action_index() {
 }
 
 #[test]
-fn execution_action_unique_run_action_index() {
+fn execution_actions_unique_run_action_index() {
     let mut store = fresh_memory_store();
     let run_id = seed_run(&mut store);
 
