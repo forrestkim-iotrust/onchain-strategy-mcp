@@ -11,6 +11,12 @@ pub(crate) const MAX_DESCRIPTION_CHARS: usize = 4096;
 pub(crate) const MAX_TAGS: usize = 16;
 pub(crate) const MAX_TAG_CHARS: usize = 64;
 
+/// Phase 5 D-12 / D-18 / BR-02 carry-forward — Action[] length cap enforced
+/// at the JSON-output gate (`validate_strategy_output`). Mirrors Phase-4
+/// `MAX_ABI_BYTES` cap-at-gate semantics: a strategy returning more than
+/// 32 actions is a *shape* problem, surfaced as -32018 STRATEGY_INVALID_OUTPUT.
+pub(crate) const MAX_ACTIONS_PER_RUN: usize = 32;
+
 pub fn validate_register(input: &StrategyRegisterInput) -> Result<(), String> {
     // source: byte-length check (D-09 + Pitfall 8 — NOT chars).
     if input.source.is_empty() {
@@ -226,6 +232,11 @@ mod tests {
                 "kind {k:?} should be allowed"
             );
         }
+    }
+
+    #[test]
+    fn max_actions_per_run_constant_is_32() {
+        assert_eq!(MAX_ACTIONS_PER_RUN, 32);
     }
 
     #[test]

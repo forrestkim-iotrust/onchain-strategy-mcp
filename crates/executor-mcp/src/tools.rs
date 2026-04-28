@@ -438,6 +438,17 @@ fn validate_strategy_output(v: &serde_json::Value) -> Result<StrategyOutcome, St
     match v {
         serde_json::Value::String(s) if s == "noop" => Ok(StrategyOutcome::Noop),
         serde_json::Value::Array(items) => {
+            // Phase 5 D-12 / D-18 / BR-02 carry-forward: cap Action[] length
+            // at the JSON-output gate (NOT only at the strategy-js builder).
+            // A strategy returning more than MAX_ACTIONS_PER_RUN actions
+            // surfaces as -32018 STRATEGY_INVALID_OUTPUT with stable detail.
+            if items.len() > crate::validation::MAX_ACTIONS_PER_RUN {
+                return Err(format!(
+                    "actions length {} exceeds MAX_ACTIONS_PER_RUN {}",
+                    items.len(),
+                    crate::validation::MAX_ACTIONS_PER_RUN
+                ));
+            }
             // Phase-4 D-09 pre-pass: walk each element, extract `kind`, and
             // reject non-allowlisted kinds with a CLEAR error before serde
             // gets a chance to emit a less-specific "unknown variant"

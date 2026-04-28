@@ -1917,3 +1917,73 @@ async fn strategy_run_rejects_hand_built_oversize_abi() -> Result<()> {
     proc.child.kill().await?;
     Ok(())
 }
+
+/// Phase 5 D-12 / D-18 / BR-02 carry-forward: a strategy that hand-builds
+/// an `Action[]` longer than `MAX_ACTIONS_PER_RUN` (32) MUST be rejected at
+/// `validate_strategy_output` (the JSON-output gate, NOT only at the
+/// strategy-js builder). Wire mapping: -32018 strategy_invalid_output with
+/// stable detail naming both the offending length (33) and the cap
+/// (`MAX_ACTIONS_PER_RUN 32`).
+#[tokio::test]
+async fn strategy_run_caps_action_array_length_at_32() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    // 33 noop actions — one over the cap. Hand-built (no ctx.actions.* —
+    // the cap MUST be enforced at the JSON-output gate regardless of the
+    // construction path).
+    let src = "(ctx) => Array.from({length: 33}, () => ({kind:'noop'}))";
+    let strategy_id = seed_strategy(&db_path, "cap33", src)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32018));
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("MAX_ACTIONS_PER_RUN 32"),
+        "detail must include the cap; got {detail:?}"
+    );
+    assert!(
+        detail.contains("33"),
+        "detail must include the offending length; got {detail:?}"
+    );
+    proc.child.kill().await?;
+    Ok(())
+}
+
+/// Boundary regression for D-12: exactly 32 noop actions PASSES validation
+/// (the cap is `>` not `>=`).
+#[tokio::test]
+async fn strategy_run_accepts_action_array_length_32() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let src = "(ctx) => Array.from({length: 32}, () => ({kind:'noop'}))";
+    let strategy_id = seed_strategy(&db_path, "cap32", src)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    assert!(
+        r.get("error").is_none(),
+        "expected no error envelope at boundary 32; got {r:?}"
+    );
+    let body = extract_json_result(&r);
+    assert_eq!(body["outcome"]["kind"].as_str(), Some("actions"));
+    assert_eq!(body["outcome"]["actions"].as_array().unwrap().len(), 32);
+    proc.child.kill().await?;
+    Ok(())
+}
