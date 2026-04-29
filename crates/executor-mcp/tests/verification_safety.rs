@@ -9,7 +9,10 @@ use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 #[cfg(feature = "anvil-tests")]
 use alloy_primitives::Address;
-use common::{call_tool, extract_json_result, initialize, spawn_server_with_config_text_and_env};
+use common::{
+    call_tool, extract_json_result, initialize, spawn_server_with_config_text_and_env,
+    spawn_server_with_state,
+};
 use serde_json::{Value, json};
 
 #[cfg(feature = "anvil-tests")]
@@ -255,6 +258,145 @@ allow = []
         proc.child.kill().await?;
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "anvil-tests")]
+async fn deploy_bytecode(provider: &executor_evm::DynProvider, deployer: Address, bytecode_hex: &str) -> Address {
+    let stripped = bytecode_hex
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| bytecode_hex.trim().strip_prefix("0X"))
+        .unwrap_or(bytecode_hex.trim());
+    let padded;
+    let stripped = if stripped.len() % 2 == 0 {
+        stripped
+    } else {
+        padded = format!("0{stripped}");
+        padded.as_str()
+    };
+    let bytecode = hex::decode(stripped).expect("hex bytecode");
+    let tx = TransactionRequest::default()
+        .with_from(deployer)
+        .with_deploy_code(bytecode);
+    let pending = provider.send_transaction(tx).await.expect("send deploy tx");
+    let receipt = pending.get_receipt().await.expect("deploy receipt");
+    receipt
+        .contract_address
+        .expect("deploy receipt has contract_address")
+}
+
+#[cfg(feature = "anvil-tests")]
+#[tokio::test(flavor = "multi_thread")]
+async fn simulation_failure_prevents_signing_and_records_no_tx_hash() -> Result<()> {
+    let Some(fixture) = alloy::node_bindings::Anvil::new()
+        .chain_id(31337)
+        .try_spawn()
+        .ok()
+    else {
+        return Ok(());
+    };
+    let funded_accounts = fixture.addresses().to_vec();
+    if funded_accounts.is_empty() {
+        return Ok(());
+    }
+    let rpc_url = fixture.endpoint_url();
+    let cfg = executor_evm::EvmConfig {
+        rpc_url: rpc_url.clone(),
+        ..executor_evm::EvmConfig::default()
+    };
+    let provider = executor_evm::build_provider(&cfg)?;
+    let revert_addr = deploy_bytecode(&provider, funded_accounts[0], REVERT_BYTECODE).await;
+    let revert_addr_s = revert_addr.to_string();
+
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let policy_toml = policy_with_contracts(
+        &[31337],
+        &[revert_addr_s.as_str()],
+        &[],
+        &[(revert_addr_s.as_str(), "0x00000000")],
+        "0",
+    );
+    let policy = write_policy(&policy_toml)?;
+    let source = format!(
+        r#"(ctx) => [{{
+            kind: "raw_call",
+            address: "{revert_addr_s}",
+            data: "0x00000000",
+            value: "0"
+        }}]"#
+    );
+    let strategy_id = seed_strategy(&db_path, "verification_sim_revert", &source)?;
+    let mut proc = spawn_server_with_policy_rpc_and_signer(&db_path, policy.path(), rpc_url.as_str()).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("error envelope");
+    assert_eq!(err["code"].as_i64(), Some(-32017));
+    assert_eq!(err["data"]["kind"].as_str(), Some("simulation_failure"));
+    assert_eq!(err["data"]["fail_reason"].as_str(), Some("revert"));
+    let run_id = err["data"]["run_id"].as_str().expect("run_id");
+    assert_no_tx_hash(&db_path, run_id)?;
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sandbox_blocks_forbidden_host_access_through_strategy_run() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db_path = dir.path().join("state.db");
+    let db_path_str = db_path.to_string_lossy().to_string();
+    let forbidden_source = r#"
+        (ctx) => {
+            if (typeof globalThis.process !== "undefined") return "BAD process";
+            if (typeof fetch !== "undefined") return "BAD fetch";
+            try { require("fs"); return "BAD require"; } catch (e) {}
+            return "noop";
+        }
+    "#;
+    let strategy_id = seed_strategy(&db_path, "sandbox_host_access", forbidden_source)?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_run",
+        json!({ "strategy_id": strategy_id }),
+    )
+    .await?;
+    let body = extract_json_result(&r);
+    assert_eq!(body["status"].as_str(), Some("succeeded"));
+    assert_eq!(body["outcome"]["kind"].as_str(), Some("noop"));
+    proc.child.kill().await?;
+
+    let dynamic_import_id = seed_strategy(
+        &db_path,
+        "sandbox_dynamic_import",
+        r#"(ctx) => import("fs")"#,
+    )?;
+    let mut proc = spawn_server_with_state(&db_path_str).await?;
+    let _ = initialize(&mut proc).await?;
+    let r = call_tool(
+        &mut proc,
+        3,
+        "strategy_run",
+        json!({ "strategy_id": dynamic_import_id }),
+    )
+    .await?;
+    let err = r.get("error").expect("dynamic import must not load a module");
+    assert_eq!(err["data"]["code"].as_str(), Some("strategy_invalid_output"));
+    let detail = err["data"]["detail"].as_str().unwrap_or_default().to_lowercase();
+    assert!(
+        detail.contains("promise") || detail.contains("import"),
+        "unexpected dynamic import block detail: {detail}"
+    );
+    proc.child.kill().await?;
     Ok(())
 }
 
