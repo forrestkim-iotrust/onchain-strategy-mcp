@@ -1,0 +1,27 @@
+# Local Anvil policy for the checked-in example strategies.
+# Replace the placeholder contract addresses with deployments on chain 31337.
+
+[chains]
+allow = [31337]
+
+[contracts.31337]
+allow = [
+    "0x0000000000000000000000000000000000000001", # ERC20 token placeholder
+    "0x0000000000000000000000000000000000000003", # Counter placeholder
+]
+
+[selectors."31337:0x0000000000000000000000000000000000000001"]
+allow = ["0x095ea7b3"] # approve(address,uint256)
+
+[selectors."31337:0x0000000000000000000000000000000000000003"]
+allow = ["0xd09de08a"] # increment()
+
+[native_value.31337]
+max_per_action = "0"
+
+[erc20_spend."31337:0x0000000000000000000000000000000000000001"]
+max_per_run = "1000000000000000000"
+
+[raw_call]
+allow_global = false
+allow = []
