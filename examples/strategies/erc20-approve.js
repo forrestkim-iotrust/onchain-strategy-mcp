@@ -1,14 +1,15 @@
-// Local Anvil ERC20 approve example.
-// Replace TOKEN_ADDRESS and SPENDER_ADDRESS with addresses deployed on chain 31337.
+// Local Anvil ERC20 approve-shaped example.
+// Replace TOKEN_ADDRESS and SPENDER_ADDRESS with a local token or test contract
+// that accepts approve(address,uint256) on chain 31337.
 
-const TOKEN_ADDRESS = "0x0000000000000000000000000000000000000001";
-const SPENDER_ADDRESS = "0x0000000000000000000000000000000000000002";
-const APPROVE_AMOUNT = "1000000000000000000";
-
-(ctx) => [
+((TOKEN_ADDRESS, SPENDER_ADDRESS, APPROVE_AMOUNT) => (ctx) => [
     ctx.actions.erc20Approve({
         token: TOKEN_ADDRESS,
         spender: SPENDER_ADDRESS,
         amount: APPROVE_AMOUNT,
     }),
-]
+])(
+    "0x0000000000000000000000000000000000000001",
+    "0x0000000000000000000000000000000000000002",
+    "0",
+)

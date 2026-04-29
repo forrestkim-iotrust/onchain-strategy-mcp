@@ -14,7 +14,7 @@ allow = [
 allow = ["0x095ea7b3"] # approve(address,uint256)
 
 [selectors."31337:0x0000000000000000000000000000000000000003"]
-allow = ["0x72d2dea3"] # increment()
+allow = ["0xd09de08a"] # increment()
 
 [native_value.31337]
 max_per_action = "0"
