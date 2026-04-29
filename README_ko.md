@@ -1,257 +1,84 @@
 # onchain-strategy-mcp
 
-에이전트가 온체인 전략 프로그램을 만들고, 실행하고, 관리할 수 있게 해주는 MCP 전략 런타임입니다.
+AI agent가 로컬 EVM 자동화 전략을 작성, 실행, 감사할 수 있게 해주는 MCP 런타임입니다.
 
-## 이 프로젝트는 무엇인가
+## 이 런타임이 하는 일
 
-`onchain-strategy-mcp`는 제품 화면이 아니라 전략 런타임입니다.
+`onchain-strategy-mcp`는 local-first MCP 런타임입니다. 에이전트는 샌드박스된 JavaScript 전략을 등록하고, 런타임을 통해 실행하며, prose 로그가 아니라 구조화된 리포트를 받습니다.
 
-이 런타임은 에이전트가 다음을 할 수 있게 만드는 데 목적이 있습니다.
-
-- 전략 생성
-- account 경계에 전략 등록
-- 스케줄 또는 이벤트 기반 실행
-- 감사 가능한 action graph 생성
-- 안전한 실행 또는 외부 실행으로의 위임
-- 이후 상태, 로그, 리포트, receipt 조회
-
-이 저장소는 다음이 아닙니다.
-
-- 트레이딩 앱
-- 지갑 UI
-- 대시보드
-- 클라우드 배포 시스템
-- 전략 마켓플레이스
-
-## 현재 설계 관점
-
-현재 설계는 여섯 가지 기준 위에 서 있습니다.
-
-### 1. 런타임은 앱을 모른다
-
-런타임은 Aave, Uniswap, Safe, Across 같은 앱을 제품 단위로 이해하지 않아야 합니다.
-
-앱은 capability이고, 실행은 primitive입니다.
-
-즉 런타임은 결국 다음만 이해하면 됩니다.
-
-- source
-- transform
-- condition
-- flow
-- action
-- policy
-- execution report
-
-### 2. JavaScript는 전략 DSL이다
-
-전략은 샌드박스된 JavaScript 함수로 작성할 수 있습니다.
-
-하지만 JavaScript가 실행 권한자는 아닙니다. 전략 함수는 `ctx`를 통해 상태를 읽고, 판단하고, 구조화된 action graph를 반환합니다. 실행은 런타임이 담당합니다.
-
-```js
-export async function tick(ctx) {
-  const usdc = await ctx.source.erc20Balance({
-    chainId: 42161,
-    token: "USDC",
-    account: ctx.account.address,
-  });
-
-  if (usdc.gte(100)) {
-    return ctx.sequence([
-      ctx.action.erc20Approve({
-        chainId: 42161,
-        token: "USDC",
-        spender: ctx.cap.aave.pool,
-        amount: "50",
-      }),
-      ctx.action.contractCall({
-        chainId: 42161,
-        to: ctx.cap.aave.pool,
-        abi: "supply(address,uint256,address,uint16)",
-        args: ["USDC", "50", ctx.account.address, 0],
-        reason: "supply idle USDC",
-      }),
-    ]);
-  }
-
-  return ctx.noop("conditions not met");
-}
-```
-
-핵심 경계는 명확합니다.
-
-- 전략 코드는 action을 제안할 수 있다
-- 전략 코드는 직접 서명하거나 브로드캐스트할 수 없다
-- action graph는 policy나 execution 전에 normalized action으로 컴파일되어야 한다
-
-### 3. 런타임은 실행 규율을 책임진다
-
-런타임은 다음을 책임집니다.
-
-- 전략 검증
-- 샌드박스 tick 실행
-- action 정규화
-- 실행 전 시뮬레이션
-- policy 평가
-- 실행 상태 관리
-- journal과 report 저장
-- pause / stop 같은 런타임 제어
-
-반대로 private key custody를 반드시 소유할 필요는 없습니다.
-
-### 4. 실행 운송 수단은 교체 가능해야 한다
-
-기본 철학은 full runtime execution이지만, 서명과 브로드캐스트는 adapter 기반으로 분리 가능해야 합니다.
-
-개념적 실행 모드:
-
-- `managed_execution`
-- `detached_signing`
-- `detached_execution`
-
-즉 런타임은 실행 규율을 책임지되, 모든 transport boundary를 항상 직접 소유할 필요는 없습니다.
-
-실행 모드는 transport ownership입니다. 실행 단계와는 분리합니다.
-
-개념적 실행 단계:
-
-- `observe`
-- `propose`
-- `approve`
-- `execute`
-- `reconcile`
-- `report`
-
-### 5. Account가 실행 경계다
-
-핵심 모델은 account 중심입니다.
+v1 실행 루프는 다음과 같습니다.
 
 ```text
-Account
-  StrategyInstance
-    Execution
-      Action
-```
-
-여기서 account는 단순 wallet 주소가 아닙니다.
-
-account는 다음의 경계입니다.
-
-- signer ref
-- policy
-- budget
-- budget reservation
-- nonce lane
-- execution lock
-- execution mode
-- chain별 주소
-- strategy-local state
-
-### 6. Recipe보다 계약이 먼저다
-
-런타임은 고수준 프로토콜 recipe보다 오래 유지될 수 있는 계약을 먼저 노출해야 합니다.
-
-핵심 계약:
-
-- `TickInputSnapshot`: 전략이 판단할 때 본 입력
-- `NormalizedAction`: action graph에서 컴파일된 policy-ready action
-- `ExecutionEnvelope`: 외부화 가능한 실행 요청
-- `ExternalExecutionResult`: 외부 executor가 보고하는 실행 결과
-
-## 실행 생명주기
-
-모든 action은 같은 파이프라인을 지나야 합니다.
-
-```text
-tick(ctx)
-  -> source reads
-  -> persist tick snapshot
-  -> action graph
-  -> normalize
-  -> simulate
+strategy_register
+  -> strategy_run
+  -> sandboxed JS returns Action[]
+  -> action validation
+  -> EVM simulation
   -> policy check
-  -> budget reservation
-  -> approval request
-  -> sign or externalize
-  -> broadcast or externalize
-  -> watch or ingest result
-  -> persist report
+  -> local hot-wallet signing
+  -> broadcast to configured RPC
+  -> receipt wait
+  -> execution_get or execution://{run_id}
 ```
 
-런타임은 prose-only 로그보다 구조화된 실행 리포트를 우선해야 합니다.
+전략 JavaScript는 `ctx`로 action을 제안할 수 있지만 private key를 받지 않으며 직접 서명, 브로드캐스트, 파일 접근, process API, 임의 네트워크 클라이언트를 사용할 수 없습니다. 런타임은 strategy run, source read, policy/simulation decision, execution action row, receipt, error를 로컬 SQLite state에 기록합니다.
 
-## Primitive 모델
+이 저장소는 hosted custody, 마켓플레이스, 프로토콜 recipe catalog가 아닙니다. 제품 UI나 장기 실행 자동화 daemon이 아니라 로컬 MCP 런타임입니다.
 
-런타임이 작게 유지되려면 조합 가능한 primitive 중심이어야 합니다.
+## 로컬 hot-wallet 안전 모델
 
-개념적 primitive group:
+v1은 non-noop 전략이 승인된 실행 경로에 도달했을 때만 로컬 hot-wallet private key를 사용합니다. 서명 전에는 simulation과 policy check가 반드시 통과해야 합니다.
 
-- `source.*`
-- `transform.*`
-- `condition.*`
-- `flow.*`
-- `action.*`
-- `policy.*`
-- `execution.*`
+Signer config에는 환경 변수 이름만 저장합니다.
 
-`cap:erc20`, `cap:aave` 같은 capability는 action graph를 만드는 helper입니다. 실행 권한자는 아닙니다.
+```toml
+[signer]
+private_key_env = "EXECUTOR_PRIVATE_KEY"
+receipt_timeout_ms = 120000
+```
 
-## 대표 유스케이스
+원문 개인키(raw private key) 값은 `[signer].private_key_env`가 가리키는 operator 환경 변수 안에만 있어야 합니다. 원문 개인키를 `config.example.toml`, runtime config, strategy JavaScript, README 예시, 로그, prompt, issue report에 커밋하거나 출력하지 마세요. 전략 파일에는 public address와 placeholder는 둘 수 있지만 signer secret은 넣지 않습니다.
 
-이 런타임의 목적은 단순히 "트랜잭션 한 번 보내기"보다 넓습니다.
+Policy는 deny-by-default입니다. 로컬 policy는 좁게 유지하세요: 정확한 chain ID, 정확한 contract address, 허용 selector, native value 제한, ERC20 spend 제한, 그리고 꼭 필요하지 않으면 `raw_call` 비활성화.
 
-대표적인 범주:
+## 로컬 Anvil 예제
 
-- observe: 잔고, allowance, 이벤트, 포지션 감시
-- propose: 실행 계획, revoke proposal, Safe proposal 생성
-- execute: gas top-up, idle fund sweep, 작은 managed action
-- reconcile: 비중, 노출도, 잔고 threshold 유지
-- workflow: bridge then act, approve then deposit, external sign then execute
+체크인된 예제는 로컬 Anvil 스타일 fixture에서 runtime loop를 보여줍니다.
 
-## MCP 표면
+- `examples/strategies/erc20-approve.js`는 ERC20 approve action을 만듭니다.
+- `examples/strategies/generic-counter-call.js`는 generic ABI `increment()` contract call을 만듭니다.
+- `examples/policies/local-anvil.toml`은 chain `31337`과 정확한 selector allowlist policy 예시입니다.
+- `config.example.toml`은 secret 없이 local state, EVM RPC, policy, signer section을 보여줍니다.
 
-공개 MCP 표면은 작고 안정적이어야 합니다.
+일반적인 agent/operator 흐름:
 
-현재 개념적 group:
+1. Anvil을 실행하고 strategy/policy 예시의 placeholder address에 맞는 로컬 contract를 배포하거나 대체합니다.
+2. 필요하면 `config.example.toml`을 커밋하지 않는 로컬 config 파일로 복사합니다.
+3. `EXECUTOR_PRIVATE_KEY`는 operator shell 환경 변수에만 설정합니다. 원문 키를 커밋된 파일에 쓰지 않습니다.
+4. 전략 JS를 작성할 때 MCP prompt `write_evm_strategy`를 사용하고, 등록 전 `review_evm_strategy`로 검토합니다.
+5. `examples/strategies/erc20-approve.js` 같은 체크인된 source를 `strategy_register`로 등록합니다.
+6. `strategy_run`으로 실행합니다.
+7. 반환된 run ID를 `execution_get` 또는 `execution://{run_id}` resource로 조회해 receipt-backed action report를 확인합니다.
+8. journal resource에서 source read, validation, simulation, policy, action outcome을 검토합니다.
 
-- `account.*`
-- `strategy.*`
-- `execution.*`
-- `policy.*`
-- `opcode.*`
+예제 검증 테스트는 `examples/strategies/erc20-approve.js`와 `examples/strategies/generic-counter-call.js`를 직접 읽어 실행하므로, 이 파일들은 문서용 snippet이 아니라 실제 runtime input입니다.
 
-먼저 오래 유지될 수 있는 계약을 만들고, 그 다음 편의용 recipe를 올리는 방식이 맞습니다.
+## Verification
 
-## 하지 않을 일
+예제, policy, simulation, sandbox, execution report를 바꾸기 전후에 다음 검증을 실행하세요.
 
-이 저장소는 다음으로 커지지 않아야 합니다.
+```bash
+cargo test -p executor-mcp --features anvil-tests --test verification_examples -- --nocapture
+cargo test -p executor-mcp --test verification_safety
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
-- 랜딩 페이지
-- 대시보드
-- 지갑 온보딩 UX
-- 클라우드 오케스트레이션
-- 분석 제품 화면
-- core runtime 안에 박힌 exchange-specific flow
+검증 suite는 로컬 예제, `verification_examples`, `verification_safety`의 policy/simulation/sandbox 경계, workspace regression, lint 상태를 확인합니다.
 
 ## 문서 안내
 
-- [README.md](./README.md)
-- [FOUNDATIONS_ko.md](./FOUNDATIONS_ko.md)
-- [USE_CASES_ko.md](./USE_CASES_ko.md)
-
-## 현재 상태
-
-이 저장소는 아직 설계 단계입니다.
-
-현재 MVP 방향은 다음과 같습니다.
-
-1. JavaScript 전략 검증 및 등록
-2. 샌드박스된 `tick(ctx)` 실행
-3. `TickInputSnapshot` 저장
-4. structured action graph 반환
-5. `NormalizedAction` 컴파일
-6. EVM action simulation
-7. policy와 account budget enforcement
-8. pluggable signing / broadcasting mode
-9. execution journal과 report 저장
+- [README.md](./README.md) — English overview and usage notes.
+- [AGENTS.md](./AGENTS.md) — agent/operator workflow and command checklist.
+- [FOUNDATIONS_ko.md](./FOUNDATIONS_ko.md) — 프로젝트 foundation notes.
+- [USE_CASES_ko.md](./USE_CASES_ko.md) — use-case notes.

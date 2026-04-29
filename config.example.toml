@@ -1,27 +1,34 @@
-# Phase 1–5 config surface. Future phases will add [policy] tables
-# (Plan 05-03) and [signer] (Phase 6) sections — unknown keys fail
-# `deny_unknown_fields` today, which is intentional: silent drift is harder
-# to debug than an explicit parse error.
+# Local v1 runtime example config.
+# Copy to an untracked local config file before editing operator-specific paths.
+# Keep this file free of raw private keys and production secrets.
 
 [logging]
 level = "info"   # trace | debug | info | warn | error
 
 [state]
 # Path to the SQLite database file. Use ":memory:" for ephemeral testing,
-# or an absolute path for fixed-location deployments. Relative paths are
-# resolved against the process current working directory (Phase 2 / D-03a).
+# or an absolute path for fixed-location local operation. Relative paths are
+# resolved against the process current working directory.
 path = "./state.db"
 
 [evm]
-# Phase 4 D-04: EVM RPC endpoint and per-call timeout.
+# Local Anvil default RPC endpoint and per-call timeout.
 rpc_url = "http://127.0.0.1:8545"
 call_timeout_ms = 1000             # 50..=30_000
 
-# Phase 5 D-14: `from` address used by the simulation adapter
-# (`executor-evm::simulate::simulate_one`). Defaults to anvil account[0]
-# (EIP-55) for devnet ergonomics; PRODUCTION RPCs SHOULD set this to a
-# real address whose balances/allowances match the strategies under test.
-# Validation: lenient EIP-55 — strict checksummed accepted; uniformly-cased
-# 40-hex (all-lower / all-upper / no-alpha) accepted; mixed-case-bad-checksum
-# REJECTED at boot with `EvmError::Config`.
+# Address used by simulation calls. Set this to the same public address as
+# the local hot-wallet account when testing non-noop strategies.
+# This is a public address, not a private key.
 simulation_from = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+[policy]
+# Policy is deny-by-default. Start from examples/policies/local-anvil.toml
+# for local chain 31337 examples, then keep chain/contract/selector limits
+# as narrow as possible for the strategy being run.
+path = "./policy.toml"
+
+[signer]
+# Env-var reference only. Put the raw private key in the operator environment
+# variable named here, never in committed config or strategy JavaScript.
+private_key_env = "EXECUTOR_PRIVATE_KEY"
+receipt_timeout_ms = 120000
