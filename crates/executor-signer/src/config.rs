@@ -21,7 +21,7 @@ impl LocalSignerConfig {
         receipt_timeout_ms: u64,
     ) -> Result<Self, SignerError> {
         let private_key_env = private_key_env.into();
-        if private_key_env.trim().is_empty() {
+        if private_key_env.trim().is_empty() || receipt_timeout_ms == 0 {
             return Err(SignerError::NotConfigured);
         }
         Ok(Self {

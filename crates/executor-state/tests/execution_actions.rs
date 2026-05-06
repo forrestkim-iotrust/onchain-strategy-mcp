@@ -34,8 +34,14 @@ fn execution_actions_roundtrip() {
     let row = &rows[0];
     assert_eq!(row.run_id, run_id);
     assert_eq!(row.action_index, 0);
-    assert_eq!(row.signer_address, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
-    assert_eq!(row.tx_hash.as_deref(), Some("0x1111111111111111111111111111111111111111111111111111111111111111"));
+    assert_eq!(
+        row.signer_address.as_deref(),
+        Some("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266")
+    );
+    assert_eq!(
+        row.tx_hash.as_deref(),
+        Some("0x1111111111111111111111111111111111111111111111111111111111111111")
+    );
     assert_eq!(row.status, "confirmed");
     assert_eq!(row.receipt_status.as_deref(), Some("success"));
     assert_eq!(row.gas_used.as_deref(), Some("21000"));
@@ -89,7 +95,33 @@ fn execution_actions_unique_run_action_index() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].action_index, 0);
-    assert_eq!(rows[0].signer_address, "0xsigner-b");
+    assert_eq!(rows[0].signer_address.as_deref(), Some("0xsigner-b"));
     assert_eq!(rows[0].tx_hash.as_deref(), Some("0xbbb"));
     assert_eq!(rows[0].status, "broadcasted");
+}
+
+#[test]
+fn execution_error_allows_missing_signer_address() {
+    let mut store = fresh_memory_store();
+    let run_id = seed_run(&mut store);
+
+    store
+        .record_execution_error(
+            &run_id,
+            0,
+            None,
+            "signer_not_configured",
+            Some("missing signer"),
+        )
+        .expect("record execution error");
+
+    let rows = store
+        .list_executions_for_run(&run_id)
+        .expect("list executions");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].action_index, 0);
+    assert_eq!(rows[0].signer_address, None);
+    assert_eq!(rows[0].status, "failed");
+    assert_eq!(rows[0].error_kind.as_deref(), Some("signer_not_configured"));
 }

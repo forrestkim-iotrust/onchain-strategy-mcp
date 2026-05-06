@@ -11,8 +11,8 @@ use alloy_primitives::{Address, U256};
 use executor_core::schema::{
     action::Action,
     execution::{
-        ActionDecision, ExecutionActionReport, ExecutionGetResponse, ExecutionIdInput,
-        GateVerdict, JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
+        ActionDecision, ExecutionActionReport, ExecutionGetResponse, ExecutionIdInput, GateVerdict,
+        JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
     },
     policy::PolicyUpdateInput,
     strategy::{
@@ -30,8 +30,8 @@ use executor_policy::{
 };
 use executor_signer::{LocalSignerConfig, LocalSignerHandle};
 use executor_state::{
-    DecisionGate, DecisionVerdict as JournalDecisionVerdict, RegisterOutcome, StateError,
-    ExecutionActionEntry, StateStore, Strategy, StrategySummary,
+    DecisionGate, DecisionVerdict as JournalDecisionVerdict, ExecutionActionEntry, RegisterOutcome,
+    StateError, StateStore, Strategy, StrategySummary,
 };
 use rmcp::{
     ErrorData as McpError,
@@ -575,11 +575,26 @@ impl ExecutorServer {
         };
 
         if approved_normalized.iter().any(Option::is_some) {
-            let signer_config = crate::config::load()
-                .map_err(|e| storage_error(format!("load config for signer: {e}")))?
-                .signer_config()
-                .map_err(|e| storage_error(format!("parse signer config: {e}")))?;
-            let chain_id = self.chain_id().await.map_err(|e| map_evm_error(e, &run_id))?;
+            let signer_config = match crate::config::load().and_then(|cfg| {
+                cfg.signer_config()
+                    .map_err(|e| anyhow::anyhow!("parse signer config: {e}"))
+            }) {
+                Ok(config) => config,
+                Err(_) => {
+                    fail_signer_config_resolution(
+                        &self.state,
+                        &run_id,
+                        &approved_normalized,
+                        "invalid signer configuration",
+                    )
+                    .await?;
+                    unreachable!("fail_signer_config_resolution always returns Err")
+                }
+            };
+            let chain_id = self
+                .chain_id()
+                .await
+                .map_err(|e| map_evm_error(e, &run_id))?;
             execute_approved_actions(
                 &self.state,
                 &run_id,
@@ -714,7 +729,9 @@ pub(crate) async fn build_execution_report(
     .map_err(map_state_error)?;
 
     let Some((run, execution_rows)) = result else {
-        return Err(map_state_error(StateError::NotFound(format!("run {run_id}"))));
+        return Err(map_state_error(StateError::NotFound(format!(
+            "run {run_id}"
+        ))));
     };
 
     let actions: Vec<ExecutionActionReport> = execution_rows
@@ -728,7 +745,7 @@ pub(crate) async fn build_execution_report(
         started_at: run.started_at,
         finished_at: run.finished_at,
         error: run.error,
-        signer_address: actions.first().map(|a| a.signer_address.clone()),
+        signer_address: actions.first().and_then(|a| a.signer_address.clone()),
         actions,
     })
 }
@@ -858,6 +875,34 @@ async fn transition(
     .map_err(map_state_error)
 }
 
+pub async fn fail_signer_config_resolution(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    normalized: &[Option<NormalizedAction>],
+    detail: &'static str,
+) -> Result<(), McpError> {
+    let first_action_index =
+        normalized.iter().position(Option::is_some).ok_or_else(|| {
+            storage_error("signer config resolution failed without executable action")
+        })? as i64;
+    record_execution_error(
+        state,
+        run_id,
+        first_action_index,
+        None,
+        "signer_not_configured",
+        Some(detail),
+    )
+    .await?;
+    record_runtime_error(state, run_id, "signer_not_configured").await?;
+    transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+    Err(strategy_runtime_error(
+        "signer_not_configured",
+        detail,
+        run_id,
+    ))
+}
+
 pub async fn execute_approved_actions(
     state: &Arc<Mutex<StateStore>>,
     run_id: &str,
@@ -901,7 +946,8 @@ pub async fn execute_approved_actions(
         Ok(signer) => signer,
         Err(err) => {
             let kind = err.execution_error_kind();
-            record_execution_error(state, run_id, first_action_index, None, kind, Some(kind)).await?;
+            record_execution_error(state, run_id, first_action_index, None, kind, Some(kind))
+                .await?;
             record_runtime_error(state, run_id, kind).await?;
             transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
             return Err(strategy_runtime_error(kind, kind, run_id));
@@ -918,7 +964,15 @@ pub async fn execute_approved_actions(
             Ok(pending) => pending,
             Err(err) => {
                 let kind = err.execution_error_kind();
-                record_execution_error(state, run_id, idx as i64, Some(&signer_address), kind, Some(kind)).await?;
+                record_execution_error(
+                    state,
+                    run_id,
+                    idx as i64,
+                    Some(&signer_address),
+                    kind,
+                    Some(kind),
+                )
+                .await?;
                 record_runtime_error(state, run_id, kind).await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
                 return Err(strategy_runtime_error(kind, kind, run_id));
@@ -936,7 +990,15 @@ pub async fn execute_approved_actions(
             Ok(receipt) => receipt,
             Err(err) => {
                 let kind = err.execution_error_kind();
-                record_execution_error(state, run_id, idx as i64, Some(&signer_address), kind, Some(kind)).await?;
+                record_execution_error(
+                    state,
+                    run_id,
+                    idx as i64,
+                    Some(&signer_address),
+                    kind,
+                    Some(kind),
+                )
+                .await?;
                 record_runtime_error(state, run_id, kind).await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
                 return Err(strategy_runtime_error(kind, kind, run_id));

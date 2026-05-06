@@ -4,31 +4,39 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: "Phase 05 Plan 05 COMPLETE. Gap closure shipped: anvil-backed simulation_failure stdio proof, policy-denial simulation/skipped journaling, success/denied journal resource assertions, and six-rule policy_violation stdio grid. Workspace 487 tests / clippy clean. Ready for Phase 06."
-last_updated: "2026-04-29T04:45:41.361Z"
-last_activity: 2026-04-29 -- Phase 07 execution started
+last_updated: "2026-05-04T06:47:09.379Z"
+last_activity: 2026-05-04
 progress:
   total_phases: 7
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 24
-  completed_plans: 21
-  percent: 88
+  completed_plans: 24
+  percent: 100
 ---
 
 # Project State
+
+## Deferred Items
+
+Items acknowledged and deferred at milestone v1.0 close on 2026-05-04:
+
+| Category | Item | Status |
+|----------|------|--------|
+| verification | phase-06 live anvil RPC human verification | acknowledged — effectively closed by Phase 7 verification_examples (3 passed end-to-end through signing/broadcast/receipt against an anvil fixture); operators with real keys against real anvil should still verify in their own environment |
 
 ## Project Reference
 
 See: .planning/PROJECT.md (updated 2026-04-24)
 
 **Core value:** AI agent가 EVM 자동화 로직을 실제 온체인 실행으로 바꾸되, 모든 실행은 policy 검사를 거치고 기록으로 남아야 한다.  
-**Current focus:** Phase 07 — examples-tests-and-documentation
+**Current focus:** v1.1 Adoption — distribution, burner UX, Quickstart, dogfood
 
 ## Current Position
 
 Phase: 07 (examples-tests-and-documentation) — EXECUTING
 Plan: 1 of 3
 Status: Executing Phase 07
-Last activity: 2026-04-29 -- Phase 07 execution started
+Last activity: 2026-05-04
 
 Progress: [██████████] 100%
 

@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS execution_actions (
     id             TEXT PRIMARY KEY,
     run_id         TEXT NOT NULL REFERENCES runs(id),
     action_index   INTEGER NOT NULL,
-    signer_address TEXT NOT NULL,
+    signer_address TEXT,
     tx_hash        TEXT,
     status         TEXT NOT NULL,
     receipt_status TEXT,

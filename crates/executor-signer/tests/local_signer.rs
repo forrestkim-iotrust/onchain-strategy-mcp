@@ -66,6 +66,12 @@ fn missing_env_var_name_is_not_configured() {
 }
 
 #[test]
+fn zero_receipt_timeout_is_rejected() {
+    let err = LocalSignerConfig::new("EXECUTOR_PRIVATE_KEY", 0).unwrap_err();
+    assert_eq!(err, SignerError::NotConfigured);
+}
+
+#[test]
 fn configured_env_name_with_absent_var_fails_closed() {
     let env = unique_env("ABSENT");
     let cfg = LocalSignerConfig::new(env.clone(), 120_000).unwrap();

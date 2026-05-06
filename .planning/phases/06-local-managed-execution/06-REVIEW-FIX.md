@@ -1,31 +1,30 @@
 ---
 phase: 06-local-managed-execution
 status: fixed
-findings_in_scope: 3
-fixed: 3
+findings_in_scope: 2
+fixed: 2
 skipped: 0
 iteration: 1
-updated: 2026-04-28
+updated: 2026-04-29
 ---
 
 # Phase 06: Code Review Fix Report
 
 ## Summary
 
-Fixed all critical and warning findings from `06-REVIEW.md`.
+Fixed the current critical and warning findings from `06-REVIEW.md`.
 
 ## Fixes Applied
 
 | Finding | Status | Fix |
 |---------|--------|-----|
-| CR-01 | fixed | `strategy_run` now enters signing only when `approved_normalized.iter().any(Option::is_some)`, avoiding signer/config/chain-id checks for empty action arrays and all-noop arrays. |
-| CR-02 | fixed | Managed execution is now gated by the approved normalized action list instead of the response shape enum. |
-| WR-01 | fixed | Execution error recording now accepts optional signer address and persists it in fallback error rows when available. |
+| CR-01 | fixed | `strategy_run` now maps signer config load/parse failures through `fail_signer_config_resolution`, which records a failed `execution_actions` row, records a runtime journal error, transitions the run to `Failed`, and returns `strategy_runtime_error` with `kind = signer_not_configured`. |
+| WR-01 | fixed | `execution_actions.signer_address`, `ExecutionActionEntry.signer_address`, and `ExecutionActionReport.signer_address` are nullable/optional, so pre-signer failures surface missing signer state as absent instead of an empty-string sentinel. |
+| WR-02 | fixed | `LocalSignerConfig::new` rejects `receipt_timeout_ms = 0`, preventing immediate false receipt-timeout failures from zero-duration config. |
 
 ## Verification
 
-- `cargo test -p executor-mcp strategy_run_returns_actions_for_empty_array`
-- `cargo test -p executor-mcp execution_get`
-- `cargo test -p executor-state execution_actions`
-- `cargo clippy -p executor-state -p executor-mcp --all-targets -- -D warnings`
-- `cargo test` → 507 passed across 52 suites
+- `cargo test -p executor-signer zero_receipt_timeout_is_rejected` — passed
+- `cargo test -p executor-state execution_actions` — passed
+- `cargo test -p executor-mcp --test execution_actions` — passed
+- `cargo test -p executor-signer` — passed

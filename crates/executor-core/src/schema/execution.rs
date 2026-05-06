@@ -149,7 +149,8 @@ pub struct StrategyRunResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ExecutionActionReport {
     pub action_index: u32,
-    pub signer_address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_address: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tx_hash: Option<String>,
     pub status: String,
@@ -166,7 +167,9 @@ pub struct ExecutionActionReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Response for execution_get with persisted Phase 6 execution action rows.")]
+#[schemars(
+    description = "Response for execution_get with persisted Phase 6 execution action rows."
+)]
 pub struct ExecutionGetResponse {
     pub run_id: String,
     pub strategy_id: String,

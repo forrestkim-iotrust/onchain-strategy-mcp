@@ -36,7 +36,10 @@
       "type": "string"
     },
     "signer_address": {
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "status": {
       "type": "string"
@@ -53,7 +56,6 @@
   },
   "required": [
     "action_index",
-    "signer_address",
     "status",
     "recorded_at",
     "updated_at"
