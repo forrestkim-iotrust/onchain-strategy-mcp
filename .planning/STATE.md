@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: executing
-stopped_at: "Phase 05 Plan 05 COMPLETE. Gap closure shipped: anvil-backed simulation_failure stdio proof, policy-denial simulation/skipped journaling, success/denied journal resource assertions, and six-rule policy_violation stdio grid. Workspace 487 tests / clippy clean. Ready for Phase 06."
-last_updated: "2026-05-04T06:47:09.379Z"
-last_activity: 2026-05-04
+milestone: v1.1
+milestone_name: Adoption
+status: planning
+last_updated: "2026-05-06T02:30:29.257Z"
+last_activity: 2026-05-06
 progress:
-  total_phases: 7
-  completed_phases: 7
-  total_plans: 24
-  completed_plans: 24
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -33,12 +32,10 @@ See: .planning/PROJECT.md (updated 2026-04-24)
 
 ## Current Position
 
-Phase: 07 (examples-tests-and-documentation) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 07
-Last activity: 2026-05-04
-
-Progress: [██████████] 100%
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-05-06 — Milestone v1.1 started
 
 ## Performance Metrics
 
