@@ -160,6 +160,18 @@ No. It's a runtime, not an alpha generator. It does what you (or an AI you trust
 
 ---
 
+## Roadmap
+
+What's already working sits in §2 above. What's coming:
+
+- **External oracle triggers & data sourcing.** Fire strategies on Chainlink / Pyth / Redstone price updates, off-chain data feeds, or arbitrary HTTPS webhooks. Lets agents react to *real-world* signals — not just onchain state.
+- **Autonomous integrations with non-AMM venues.** First-class support for Hyperliquid (perps), Polymarket (prediction markets), and similar orderbook / specialized venues. Agents place orders, manage positions, settle markets — all under the same policy gate.
+- **Non-EVM chains.** Solana first, then a clean abstraction for other ecosystems (Move, CosmWasm, Stellar Soroban). Same strategy/policy/journal model, different signer + RPC backend.
+
+These are big swings. Direction matters more than dates — discussion and PRs welcome via [issues](https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues).
+
+---
+
 ## License & credits
 
 Apache 2.0. Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk), [alloy](https://github.com/alloy-rs/alloy), [rquickjs](https://github.com/DelSkayn/rquickjs), and [foundry](https://github.com/foundry-rs/foundry). Everything is local-first — no servers we run, no accounts you create.
