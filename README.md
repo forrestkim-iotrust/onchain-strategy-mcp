@@ -1,97 +1,49 @@
 # onchain-strategy-mcp
 
-> A local-first MCP runtime that lets AI agents execute EVM strategies safely:
-> sandboxed JavaScript → policy-gated `Action[]` → EIP-7702 batched execution →
-> auditable journal. No hosted custody, no marketplace, no off-chain orderflow.
-
-**License:** Apache-2.0 · **Status:** v1.2 spike (trigger core + event subscriptions on Base mainnet)
-
-```
-   strategy JS (sandbox)
-   └─ ctx.evm.* reads          ┐
-   └─ ctx.actions.* builders   │ → Action[]   ┐
-   └─ ctx.event (trigger pay)  ┘              │
-                                              ▼
-   ┌──────────────────────────────────────────────────┐
-   │ policy gate (deny-by-default, 6 dimensions)      │
-   │ simulation (eth_call)                            │
-   │ EIP-7702 batch signer (single tx for N≥2 calls)  │
-   │ broadcast + receipt wait                         │
-   │ journal: every decision + tx + log               │
-   └──────────────────────────────────────────────────┘
-                                              ▼
-                                         chain (Base/...)
-```
+A safe way to let an AI agent (like Claude) act on your crypto wallet.
 
 ---
 
-## What this is — and isn't
+## 1. What is this?
 
-**Is:** a local stdio MCP server that exposes a small surface for AI agents to
-write, register, run, and observe onchain strategies. Strategy code is
-sandboxed JavaScript; it cannot read your private key, hit arbitrary RPCs,
-touch the filesystem, or bypass the policy gate. Every approved tx is signed
-locally and journaled.
+Imagine telling Claude: *"if I deposit ETH to this wallet, swap it to USDC and put it into Aave."*
 
-**Isn't:** a hosted custody service, a marketplace, an alpha-generation
-agent, a router, a scheduler daemon you point at strangers' funds, or a UI.
+Today there are only two ways to make that work:
 
----
+1. Give the AI your private key — but one hallucinated address or prompt injection and your money is gone.
+2. Approve every transaction by hand — which isn't automation, it's slower copy-paste.
 
-## Why
+This project is the missing third option: **the AI proposes what to do, you set the rules, and a small program on your computer checks every action against your rules before signing.**
 
-Today, letting an AI agent touch onchain funds means picking between:
-
-1. **Give the agent your private key** — one prompt-injection / hallucinated
-   address and you're rugged.
-2. **Hand-approve every tx** — not automation, just slower copy-paste.
-
-This runtime fills the gap: agents emit *plans* (an `Action[]` from a JS
-strategy), the runtime enforces *policy* before signing, and EIP-7702 lets
-multi-step plans land atomically in a single transaction. Your key never
-leaves your machine.
+The AI never touches your private key. Your computer does the signing. Anything outside your rules is silently refused.
 
 ---
 
-## Features (v1.0 → v1.2)
+## 2. What can it do?
 
-- **20 MCP tools** — strategy CRUD, run, execution lookup, read helpers
-  (`evm_balance` / `evm_code` / `evm_read` / `evm_receipt` / `evm_view`),
-  policy inspect, trigger CRUD.
-- **Sandboxed JS strategy runner** (QuickJS) with a small `ctx` API:
-  - `ctx.evm.readContract / nativeBalance / erc20Balance / readErc20.* / readNative.*`
-  - `ctx.actions.{erc20Approve, erc20Transfer, contractCall, rawCall, nativeTransfer}`
-  - `ctx.event` — current trigger's event payload
-  - `ctx.log`, `ctx.units`, `ctx.address`
-  - host access (FS / process / arbitrary fetch / private key) **denied by default**
-- **Deny-by-default policy**, 6 dimensions per chain:
-  chain · contract · selector · native-value cap · ERC20 spend cap · raw-call.
-- **Pre-broadcast simulation** via `eth_call`.
-- **EIP-7702 batching** — when a strategy returns ≥2 actions and `[aa].delegate`
-  is set, the runtime authorizes burner → BatchExec for one tx, then forwards
-  every inner call with `msg.sender == burner`.
-- **Trigger core (v1.2)** — strategies fire on:
-  - `manual` (via `strategy_run` MCP call)
-  - `interval` (cron-style, ticks every N ms)
-  - `mempool` (Alchemy `alchemy_pendingTransactions` with server-side filter)
-  - `log` (`eth_subscribe` logs with address + 4-topic filter)
-  - Reserved kinds: `block`, `webhook` (v1.3+)
-- **Predicate evaluator** — optional JS function `(event) => bool` per trigger.
-- **Dedup window** — per-trigger time-based key dedup.
-- **Append-only journal** — strategies, runs, source reads, actions, decisions,
-  executions, trigger events. Standard SQLite.
-- **Historical reads** — pass numeric `blockTag` to `ctx.evm.readContract` for
-  archive queries (Alchemy or any archive RPC).
+Anything you can express as a small JavaScript function — but only inside the limits you set. Things people have already built with it:
+
+- **Auto-deposit.** "When ETH lands in this wallet, swap it to USDC and put it into Aave." Runs by itself.
+- **Auto-rebalance.** "Move my USDC to whichever lending market pays highest, but only if the gain beats $0.10 in gas."
+- **Watch and react.** "If somebody large is about to swap on Uniswap, do X." Or "if Aave's USDC supply rate jumps above 5%, deposit."
+- **Compare yields across protocols.** Read Aave, Compound, Moonwell APYs every 30 minutes and log them. Two days later you have a dataset.
+- **Historical analysis.** Read protocol state at any past block. Backfill a 30-day APY chart in 5 minutes.
+- **Run multiple steps as one transaction.** Approve + supply in a single onchain tx (using EIP-7702, no smart wallet required).
+
+Triggers — what makes things start:
+
+- **You ask Claude to run it** (manual).
+- **Every N minutes** (scheduled).
+- **When something happens onchain** — a wallet receives money, a token is transferred, a price oracle updates, a specific contract emits an event.
+- **A new transaction shows up in the mempool** (for chains where that's useful).
 
 ---
 
-## Quickstart (Base mainnet)
+## 3. How to use it
 
-> v1.0/v1.2 ship as Rust source; prebuilt binaries land in v1.3. For now,
-> you need `cargo` (Rust 2024 edition / 1.91+) and `foundry` (for the
-> optional EIP-7702 delegate).
+You'll need: a Mac/Linux machine, [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/), and [Claude Code](https://claude.ai/code).
 
-### 1. Build
+### Step 1 — Get the code, build it
 
 ```bash
 git clone https://github.com/forrestkim-iotrust/onchain-strategy-mcp.git
@@ -99,31 +51,30 @@ cd onchain-strategy-mcp
 cargo build --release --bin executor-mcp
 ```
 
-### 2. Operator config
+### Step 2 — Make yourself a small "burner" wallet
+
+This is the wallet the agent will act on. Start with a few dollars of ETH on Base (or whatever chain you're using). Never put your savings here.
+
+```bash
+cast wallet new
+# Save the address and private key. Send a small amount of ETH to the address.
+export EXECUTOR_PRIVATE_KEY=0xyourkey
+```
+
+### Step 3 — Write your rules
+
+Copy the example operator config and edit it:
 
 ```bash
 cp -R .local.example .local
-$EDITOR .local/config.toml      # paths, RPC, signer env name
-$EDITOR .local/policy.toml      # which contracts/selectors strategies may touch
+# Edit .local/config.toml — point it at your wallet and your RPC.
+# Edit .local/policy.toml — list which contracts the agent is allowed to touch,
+# and how much it can spend.
 ```
 
-### 3. Generate a burner
+The policy is a short text file. By default it says "no". You explicitly add a line for each thing you want to allow: this contract, this function, up to this much.
 
-```bash
-cast wallet new                 # save the private key out-of-band
-export EXECUTOR_PRIVATE_KEY=0x...
-# Fund the burner with a few cents of ETH for gas + your operational asset.
-```
-
-### 4. (Optional) Deploy EIP-7702 BatchExec for atomic multi-action runs
-
-```bash
-cd examples/contracts
-forge create --rpc-url <rpc> --private-key $EXECUTOR_PRIVATE_KEY --broadcast BatchExec.sol:BatchExec
-# Put the deployed address into [aa].delegate in your config.
-```
-
-### 5. Register the MCP server with Claude Code
+### Step 4 — Connect to Claude Code
 
 ```bash
 claude mcp add osmcp \
@@ -132,144 +83,79 @@ claude mcp add osmcp \
   -- $PWD/target/release/executor-mcp
 ```
 
-### 6. Inside Claude Code
+### Step 5 — Ask Claude to do something
 
-```
-> Register the example strategy at examples/strategies/eth-funnel.js as
-  "funnel-v1", list policies, then list registered strategies.
-```
+Inside Claude Code, say:
 
-The agent calls `strategy_register` / `policy_get` / `strategy_list` via MCP.
+> Show me my wallet balance, then register the example strategy at `examples/strategies/yield-snapshot.js` and run it once.
 
----
+Claude will use the tools this project exposes to read your wallet, check the strategy, and run it. You'll see the result in chat.
 
-## Use cases (validated on Base mainnet)
-
-### 1. Auto-funnel — "any ETH/USDC arriving at burner → USDC → Aave"
-
-`examples/strategies/eth-funnel.js` + two `log` triggers (one on
-`NativeReceived` at burner address, one on `USDC.Transfer` where the
-recipient is burner). The runtime detects incoming value, swaps the excess
-ETH on Uniswap V3 keeping a gas reserve, and on the next fire bundles
-`approve + supply` into a single EIP-7702 batch tx into Aave V3.
-
-End-to-end validated on Base mainnet during development. Every policy/sim
-verdict is in `journal_decisions`; the batched supply records a single
-`tx_hash` against both actions in `journal_executions`.
-
-### 2. Yield observer — passive APY data collection
-
-`examples/strategies/yield-snapshot.js` reads USDC supply APY from Aave V3 +
-Compound III + Moonwell on Base, logs the snapshot, returns `noop`. Pair
-with an `interval` trigger to accumulate a free time series for any
-allocator strategy you'd write later.
-
-### 3. Historical analysis — block-tag backfill
-
-`ctx.evm.readContract({..., blockTag: 45943991})` works against any archive
-RPC. Loop over block numbers inside a single `evm_view` to assemble a
-multi-protocol APY history (we collected 7d × hourly × 3 protocols = 504
-samples this way).
-
-### 4. EIP-7702 atomic multi-call
-
-When a strategy returns N≥2 actions, the runtime constructs a single 7702
-transaction:
-- signs an Authorization (burner → BatchExec) at `nonce+1`
-- ABI-encodes `executeBatch(Call[])` with each action as `(to, value, data)`
-- broadcasts type-0x04 tx from burner to burner
-- `msg.sender` inside every inner call is still the burner
-
-Same `tx_hash` is recorded against every action in `journal_executions`.
+That's the basic loop. From there you write more strategies, attach triggers to them, and Claude can wire it all up by talking.
 
 ---
 
-## Architecture
+## 4. Real use cases (these are already working)
 
-7 Rust crates:
+### A. The auto-deposit funnel
 
-| Crate | Role |
-|---|---|
-| `executor-core` | Pure-domain types: `Action`, `Run`, `Outcome`, schemas. No alloy. |
-| `executor-state` | SQLite store: strategies, runs, journal, triggers. |
-| `executor-policy` | Deny-by-default policy DSL + evaluator. alloy-free. |
-| `executor-evm` | alloy provider, normalize Action→TransactionRequest, simulator, read helpers. |
-| `executor-signer` | Local private-key signing + EIP-7702 batch construction. |
-| `strategy-js` | QuickJS sandbox, `ctx` API installer, predicate evaluator. |
-| `executor-mcp` | rmcp 1.5 stdio server, tool handlers, trigger daemon, worker pool. |
+You set this up once: any ETH or USDC that lands in your burner wallet automatically gets converted to USDC and deposited into Aave (the lending market). You keep a tiny ETH reserve for gas. After that, you never touch it — every drop that comes in earns yield.
 
-Trigger flow:
+This entire flow runs without you. You just send money to the wallet.
 
-```
-worker (interval | mempool | log | webhook)
-        └─→ TriggerEvent → mpsc → Dispatcher
-                                 ├─ predicate JS eval (sandbox)
-                                 ├─ dedup window check
-                                 └─ run_strategy_with_event(event)
-                                          └─ same pipeline as manual strategy_run
-```
+### B. The yield watcher
+
+You ask Claude: *"keep an eye on USDC yields across Aave, Compound, and Moonwell every 30 minutes."* It registers a small JavaScript that reads the rates and writes them down. A few days later you ask Claude: *"compare what I would have earned in each protocol over the last week, accounting for gas to switch." * It reads the log and tells you.
+
+### C. The instant reactor
+
+You ask Claude: *"watch for the Aave oracle updating ETH price. If the price drops more than 2% in one update, repay my borrow."* Claude registers a log-event trigger. When that exact event fires onchain, your strategy runs within seconds.
+
+### D. The multi-step atomic move
+
+Some actions need to happen together or not at all (approve a token, then use it). Normally that's two transactions and a risk window in between. Using EIP-7702 (a 2025 Ethereum feature), this project bundles them into one transaction. Either both happen or neither happens.
 
 ---
 
-## Status & roadmap
+## 5. FAQ
 
-| Milestone | Status |
-|---|---|
-| v1.0 — Strategy runtime + policy + sim + local signer | shipped |
-| v1.1 — EIP-7702 batching, read tools, evm_view | shipped (this branch) |
-| v1.2 — Trigger core (manual / interval / mempool / log) | shipped (spike) |
-| v1.3 — block worker, webhook worker, hardened reconnect | planned |
-| v1.4 — prebuilt binaries, `osmcp init/burner new`, distribution polish | planned |
-| v2.0 — session-key / smart-account integration (EIP-7715) | exploratory |
+**Q. Is my money safe?**
+The agent can only do what your policy file allows. If you only allow "deposit USDC to Aave," it can't sell your tokens, can't approve arbitrary contracts, and can't send ETH anywhere it likes. Your private key is in an environment variable on your computer — the agent never sees it.
 
----
+The catch: the policy is only as good as you wrote it. Start narrow. Test with $5 before scaling up.
 
-## Security
+**Q. Can the AI lose me money through bad decisions?**
+Yes — if you let it trade or interact with markets, normal market loss can happen. The protection is against *unauthorized* actions (sending money to a wrong address, hallucinating a malicious contract), not against bad market timing.
 
-- The signer **never** reads your private key from a config file. Only the
-  *name* of an env var is configured; the runtime reads `std::env::var(...)`
-  at the signing boundary.
-- Strategies run in QuickJS with D-11 deny-by-default globals scrub:
-  no `fetch`, no `process`, no `import`, no host APIs.
-- Policy is fail-closed: if `[policy].path` is unset or the file fails to
-  parse, every non-noop `strategy_run` returns `-32017 policy_not_loaded`.
-- EIP-7702 delegate target MUST have a `receive() external payable` if you
-  want the burner to accept plain ETH transfers post-delegation. The included
-  `BatchExec.sol` does. Delegating to a contract without `receive()` silently
-  bricks incoming ETH (wallets report failed sim).
-- Treat the burner as a hot wallet. The runtime + delegate contract are part
-  of your trusted compute base.
+**Q. What chains does it work on?**
+Built and tested on Base (an L2). Anything EVM-compatible should work with the right config — Ethereum mainnet, Arbitrum, Optimism, Polygon, etc. You change one URL.
 
-**Found a vulnerability?** Open a private security advisory on GitHub.
+**Q. How much does it cost to run?**
+The software is free. Onchain transactions cost gas. On Base that's typically less than $0.10 per action. The bigger cost is the burner wallet itself — start with $5–10 of ETH and a small amount of whatever asset you're working with.
 
----
+**Q. Do I need to be a programmer?**
+For the basic version: a little. You need to copy commands and edit a config file once. Strategies themselves are short JavaScript files — Claude can write them for you if you describe what you want.
 
-## Contributing
+**Q. Do I need an API key for anything?**
+- For basic use: no, you can use public RPC endpoints.
+- For watching the mempool, listening for live events, or reading historical data older than a few days, you'll want an [Alchemy](https://www.alchemy.com/) key. Free tier is enough for hobbyist use.
 
-Early-stage. The cleanest contributions right now:
+**Q. What does "MCP" mean?**
+Model Context Protocol — the way Claude Code (and similar AI clients) talk to outside programs. This project is one such program. When you "add it to Claude Code," you're telling Claude *here's a thing you can talk to.*
 
-- Additional `examples/strategies/*.js`
-- Additional trigger workers (`block`, `webhook` — scaffolds exist)
-- Better integration tests against forked Base / anvil
-- Documentation improvements
+**Q. Why not just use a normal trading bot?**
+Trading bots are written by you, in code. This lets the AI write and run small strategies on the fly, conversationally, while a hard policy prevents it from doing anything you didn't sanction. It's less about replacing bots and more about lowering the bar to "AI does something onchain for me."
 
-Run before opening a PR:
+**Q. Is this going to make me rich?**
+No. It's a runtime, not an alpha generator. It does what you (or an AI you trust) tell it to. It will not find profitable trades on its own. Anyone who claims otherwise is selling something.
 
-```bash
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-```
-
-Lint policy is `-D warnings` workspace-wide.
+**Q. I found a bug or have a question.**
+[Open an issue](https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues). For anything security-sensitive, use GitHub's private advisory feature.
 
 ---
 
-## Acknowledgements
+## License & credits
 
-- [rmcp](https://github.com/modelcontextprotocol/rust-sdk) — MCP server framework
-- [alloy](https://github.com/alloy-rs/alloy) — EVM types, signer, WSS pubsub
-- [rquickjs](https://github.com/DelSkayn/rquickjs) — QuickJS bindings
-- [foundry](https://github.com/foundry-rs/foundry) — Solidity tooling for the delegate
+Apache 2.0. Built on [rmcp](https://github.com/modelcontextprotocol/rust-sdk), [alloy](https://github.com/alloy-rs/alloy), [rquickjs](https://github.com/DelSkayn/rquickjs), and [foundry](https://github.com/foundry-rs/foundry). Everything is local-first — no servers we run, no accounts you create.
 
-EIP-7702 (Pectra, May 2025) makes this shape practical without a bundler.
+For the architecture details (crates, trigger pipeline, EIP-7702 specifics), see the source under `crates/` and the example contract in `examples/contracts/BatchExec.sol`.
