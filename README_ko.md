@@ -135,6 +135,7 @@ Model Context Protocol — Claude Code (랑 비슷한 AI 클라이언트)가 외
 - **외부 오라클 트리거 + 데이터 소싱.** Chainlink / Pyth / Redstone 가격 업데이트, 오프체인 데이터 피드, 임의 HTTPS 웹훅으로 strategy 발화. 에이전트가 온체인 상태뿐 아니라 *현실 세계* 신호에도 반응할 수 있게.
 - **WaaS (Wallet-as-a-Service) 통합.** Privy, Turnkey, Coinbase MPC 같은 에이전트 전용 지갑 솔루션을 1급으로 연결. 권한 분리(세션 키, 계정별 정책, 키 로테이션, 복구)를 지갑 레이어가 책임지게 — burner + 로컬 정책은 1인 운영자용, WaaS는 팀·프로덕션·멀티테넌트용.
 - **AMM 아닌 거래소 통합.** Hyperliquid (perps), Polymarket (예측시장) 같은 오더북·전문 거래소 1급 지원. 에이전트가 주문, 포지션 관리, 시장 결제까지.
+- **크로스체인 실행 + 브릿지 통합.** Across 같은 canonical 브릿지 어댑터, 그리고 strategy 파일 하나로 여러 체인을 가로지르는 흐름 표현 가능 (예: *Base Aave에서 인출 → USDC를 Arbitrum으로 브릿지 → 거기 Aave에 다시 예치*). EIP-7702 batch처럼 원자적이지 않은 만큼, 런타임이 각 단계를 분리된 커밋 단위로 처리하면서 매 경계마다 명시적 fallback 의미(재시도, 환불 경로, 중단)를 부여.
 - **non-EVM 체인.** Solana 먼저, 다른 생태계 (Move, CosmWasm, Stellar Soroban)를 위한 추상화. 같은 strategy / policy / journal 모델, signer와 RPC 백엔드만 다르게.
 
 날짜보다 방향이 중요한 과제들이에요. [issue](https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues)로 토론·PR 환영합니다.
