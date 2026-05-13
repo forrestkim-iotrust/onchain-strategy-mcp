@@ -51,6 +51,10 @@ pub struct RuntimeContext {
     /// calls. Drained in [`RuntimeContext::flush`] alongside logs and the
     /// strategy_source marker.
     evm_reads: Vec<EvmReadRecord>,
+    /// v1.2 Trigger Core: optional trigger event payload. `None` for
+    /// manually-invoked strategies; `Some(payload)` for trigger-fired
+    /// strategies. Surfaced as `ctx.event` (null when None).
+    event: Option<serde_json::Value>,
 }
 
 /// One `ctx.evm.*` call's journal payload (Phase 4 D-13).
@@ -79,7 +83,16 @@ impl RuntimeContext {
             provider: None,
             evm_config: EvmConfig::default(),
             evm_reads: Vec::new(),
+            event: None,
         }
+    }
+
+    /// v1.2 Trigger Core: attach the trigger event payload. Builder-style;
+    /// mutates and returns the same context so the strategy_run handler can
+    /// chain after `new`/`with_evm`.
+    pub fn with_event(mut self, event: serde_json::Value) -> Self {
+        self.event = Some(event);
+        self
     }
 
     /// Phase 4: attach a lazy `Arc<DynProvider>` and the typed
@@ -172,5 +185,8 @@ impl CtxHost for RuntimeContext {
             target,
             payload_json: payload,
         });
+    }
+    fn event(&self) -> Option<&serde_json::Value> {
+        self.event.as_ref()
     }
 }

@@ -63,6 +63,13 @@ pub trait CtxHost {
     /// still satisfy the trait. `RuntimeContext` overrides to push into a
     /// drain buffer flushed alongside log records.
     fn record_evm_read(&mut self, _target: String, _payload: serde_json::Value) {}
+
+    /// v1.2 Trigger Core: optional trigger event payload. Strategies invoked
+    /// by manual trigger / external MCP call get `None`. Strategies invoked
+    /// by interval/block/log/mempool triggers get `Some(payload)`.
+    fn event(&self) -> Option<&serde_json::Value> {
+        None
+    }
 }
 
 /// In-memory `CtxHost` implementation used by Phase-3 unit tests and as the
@@ -73,6 +80,9 @@ pub struct CtxStub {
     pub strategy_name: String,
     pub run_id: String,
     pub logs: Vec<String>,
+    /// v1.2 Trigger Core: optional trigger event payload. Tests opt in by
+    /// setting `Some(...)`; default `None` leaves `ctx.event === null`.
+    pub event: Option<serde_json::Value>,
 }
 
 impl CtxHost for CtxStub {
@@ -92,6 +102,9 @@ impl CtxHost for CtxStub {
     }
     fn append_log(&mut self, message: String) {
         self.logs.push(message);
+    }
+    fn event(&self) -> Option<&serde_json::Value> {
+        self.event.as_ref()
     }
 }
 
@@ -177,6 +190,9 @@ impl Sandbox {
         let provider_clone: Option<std::sync::Arc<executor_evm::DynProvider>> =
             host.provider().cloned();
         let evm_cfg_clone: executor_evm::EvmConfig = host.evm_config().clone();
+        // v1.2 Trigger Core: snapshot the optional trigger event payload so
+        // the closure below can install `ctx.event` (null when None).
+        let event_snapshot: Option<serde_json::Value> = host.event().cloned();
 
         let result = ctx.with(|c| -> Result<serde_json::Value, RuntimeError> {
             // 4a. D-04 ctx surface — real injection (replaces the 03-01 stub).
@@ -470,6 +486,24 @@ impl Sandbox {
                 .set("address", address_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
+            // v1.2 Trigger Core: install `ctx.event`. When the host carries
+            // a trigger payload it's projected into a JS value (Object /
+            // Array / primitive) via `json_to_qjs_value`; otherwise `null`.
+            // Strategies invoked manually observe `ctx.event === null`;
+            // strategies invoked by interval/block/log/mempool triggers
+            // observe the payload object. Installed at the same site as the
+            // other `ctx.*` sub-objects (BEFORE FORBIDDEN_GLOBALS_SCRUB and
+            // the `__ctx` global set — HR-01 ordering preserved).
+            let event_js_val: rquickjs::Value = match event_snapshot.as_ref() {
+                Some(v) => json_to_qjs_value(&c, v).map_err(|detail| {
+                    RuntimeError::EngineInit(format!("ctx.event install: {detail}"))
+                })?,
+                None => rquickjs::Value::new_null(c.clone()),
+            };
+            ctx_obj
+                .set("event", event_js_val)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
             // 4a-prime. D-11 scrub MUST run BEFORE host bindings are installed.
             // The Promise intrinsic ships `queueMicrotask` on globalThis; remove
             // it so the forbidden-globals regression suite holds. The list below
@@ -568,6 +602,86 @@ impl Sandbox {
                 Err(RuntimeError::Timeout)
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// v1.2 Trigger Core: evaluate a predicate JS function
+    /// `(event) => bool` in an isolated sandbox under the same wall-clock /
+    /// heap / stack budgets as [`Sandbox::execute`]. The predicate is pure:
+    /// no `ctx`, no actions, no evm bindings — just the event payload.
+    ///
+    /// Returns `Ok(false)` defensively when:
+    ///   - the predicate throws
+    ///   - the predicate returns a non-boolean
+    ///   - the evaluation hits timeout / OOM / stack overflow
+    ///
+    /// Returns `Err(RuntimeError::EngineInit(...))` only when the engine
+    /// itself fails to initialize (extremely rare — host-level OOM).
+    ///
+    /// Caller wraps in `tokio::task::spawn_blocking` — rquickjs `Runtime`
+    /// is `!Sync`.
+    pub fn evaluate_predicate(
+        source: &str,
+        event: &serde_json::Value,
+    ) -> Result<bool, RuntimeError> {
+        let rt = Runtime::new()
+            .map_err(|e| RuntimeError::EngineInit(format!("Runtime::new: {e}")))?;
+        rt.set_memory_limit(MEMORY_LIMIT_BYTES);
+        rt.set_gc_threshold(GC_THRESHOLD_BYTES);
+        rt.set_max_stack_size(MAX_STACK_BYTES);
+
+        let deadline = Instant::now() + Duration::from_millis(WALL_CLOCK_MS);
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let timed_out_clone = timed_out.clone();
+        rt.set_interrupt_handler(Some(Box::new(move || {
+            if Instant::now() >= deadline {
+                timed_out_clone.store(true, Ordering::SeqCst);
+                true
+            } else {
+                false
+            }
+        })));
+
+        let ctx = Context::builder()
+            .with::<intrinsic::All>()
+            .build(&rt)
+            .map_err(|e| RuntimeError::EngineInit(format!("Context::builder: {e}")))?;
+
+        let result: Result<bool, RuntimeError> =
+            ctx.with(|c| -> Result<bool, RuntimeError> {
+                // Install __event onto globalThis (a single binding — no ctx
+                // surface, no actions, no evm; predicates are pure & fast).
+                let event_val = json_to_qjs_value(&c, event).map_err(|detail| {
+                    RuntimeError::EngineInit(format!("predicate event install: {detail}"))
+                })?;
+                c.globals()
+                    .set("__event", event_val)
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+                // D-11 scrub for parity with execute() — predicates shouldn't
+                // see console/fetch/setTimeout either.
+                c.eval::<(), _>(FORBIDDEN_GLOBALS_SCRUB.as_bytes().to_vec())
+                    .catch(&c)
+                    .map_err(|caught| caught_to_runtime_error(caught, &timed_out))?;
+
+                // Wrap so non-bool returns coerce to false via `=== true`.
+                let wrapped = format!(
+                    "(() => {{ const __fn = ({src}); const r = __fn(__event); return r === true; }})()",
+                    src = source
+                );
+                let value: Coerced<bool> = c
+                    .eval::<Coerced<bool>, _>(wrapped.into_bytes())
+                    .catch(&c)
+                    .map_err(|caught| caught_to_runtime_error(caught, &timed_out))?;
+                Ok(value.0)
+            });
+
+        match result {
+            Ok(b) => Ok(b),
+            // Defensive: throws, timeouts, OOM, stack overflow, non-bool
+            // returns all collapse to `Ok(false)`. Only engine-init errors
+            // (which surface from outside `ctx.with`) propagate as Err.
+            Err(_) => Ok(false),
         }
     }
 }

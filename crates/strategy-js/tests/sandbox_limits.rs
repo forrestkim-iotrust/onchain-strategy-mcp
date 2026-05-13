@@ -11,6 +11,7 @@ fn run(source: &str) -> Result<serde_json::Value, RuntimeError> {
         strategy_name: "test".into(),
         run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         logs: Vec::new(),
+        event: None,
     };
     Sandbox::execute(source, &mut host)
 }

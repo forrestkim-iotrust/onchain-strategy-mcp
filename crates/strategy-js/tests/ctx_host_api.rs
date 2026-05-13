@@ -13,6 +13,7 @@ fn make_host() -> CtxStub {
         strategy_name: "arb".into(),
         run_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
         logs: Vec::new(),
+        event: None,
     }
 }
 
@@ -119,6 +120,7 @@ fn ctx_object_shape_matches_d04() {
     let mut expected = vec![
         "actions".to_string(),
         "address".to_string(), // Phase 4 D-11: ctx.address.* sub-namespace (04-04).
+        "event".to_string(),   // v1.2 Trigger Core: ctx.event (null when no trigger).
         "evm".to_string(),     // Phase 4 D-04: ctx.evm.* sub-namespace.
         "log".to_string(),
         "now".to_string(),
