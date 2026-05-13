@@ -2,11 +2,16 @@
 //! Signer boundary for Phase 6 local managed execution.
 
 pub mod config;
+pub mod delegate;
 pub mod error;
 pub mod keychain;
 pub mod local;
 
 pub use config::{LocalSignerConfig, SignerBackend};
+pub use delegate::{
+    ARACHNID_DEPLOYER, BATCH_EXEC_INIT_CODE, BATCH_EXEC_INIT_CODE_HASH, DEPLOY_SALT,
+    DEPLOY_SALT_PREIMAGE, deploy_calldata, predicted_delegate_address,
+};
 pub use error::SignerError;
 pub use keychain::{KEYCHAIN_SERVICE, generate_burner, load_from_keychain, store_in_keychain};
 pub use local::{LocalExecutionReceipt, LocalPendingExecution, LocalReceiptStatus, LocalSignerHandle};
