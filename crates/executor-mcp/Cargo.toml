@@ -37,6 +37,7 @@ toml.workspace = true
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 hex = "0.4"
+clap = { workspace = true }
 alloy-primitives = "1"
 # v1.2 Stream E (mempool worker): alloy is now a non-optional dep here so the
 # trigger worker can open an Alchemy WSS subscription via the `pubsub` +
