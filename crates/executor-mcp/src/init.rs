@@ -27,7 +27,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use executor_signer::{KEYCHAIN_SERVICE, generate_burner, store_in_keychain};
+use executor_signer::{
+    KEYCHAIN_SERVICE, generate_burner, predicted_delegate_address, store_in_keychain,
+};
 
 /// Embedded `.local.example/config.toml` — kept in lockstep at build time.
 const CONFIG_TEMPLATE: &str = include_str!("../../../.local.example/config.toml");
@@ -97,6 +99,18 @@ pub fn run(opts: InitOptions) -> Result<()> {
     println!();
     println!("Fund the burner address with a small amount of ETH on Base before running");
     println!("any non-read-only strategy.");
+    println!();
+
+    let delegate_addr = predicted_delegate_address();
+    println!("EIP-7702 batching (optional, one-time per chain):");
+    println!("  predicted delegate : {delegate_addr}");
+    println!(
+        "  When you're ready to run 7702 batches, deploy the delegate (free; one-time per chain):"
+    );
+    println!("    executor-mcp deploy-delegate --rpc-url <your-rpc>");
+    println!(
+        "  Or skip — the runtime stays a one-tx-at-a-time executor until you do."
+    );
     println!();
 
     let claude_cmd = "claude mcp add osmcp -- npx onchain-strategy-mcp serve";
