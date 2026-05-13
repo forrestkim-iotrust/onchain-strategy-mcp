@@ -8,16 +8,21 @@ A safe way to let an AI agent (like Claude) act on your crypto wallet.
 
 ## 1. What is this?
 
-Imagine telling Claude: *"if I deposit ETH to this wallet, swap it to USDC and put it into Aave."*
+**A local runtime that lets an AI agent (like Claude) actually *do* things onchain — not just write code about it.**
 
-Today there are only two ways to make that work:
+Today, when you ask Claude something like *"swap some ETH for USDC and deposit it into Aave,"* the best it can do is write a Python script and tell you to run it. You set up the RPC, manage the key, handle gas, write logging, debug edge cases. Every iteration is friction. Every meaningful action requires you to be the operator.
 
-1. Give the AI your private key — but one hallucinated address or prompt injection and your money is gone.
-2. Approve every transaction by hand — which isn't automation, it's slower copy-paste.
+This project removes that gap. The AI writes a short JavaScript strategy that describes the *intent*. A small program running quietly on your laptop handles everything else:
 
-This project is the missing third option: **the AI proposes what to do, you set the rules, and a small program on your computer checks every action against your rules before signing.**
+- Connects to the chain
+- Simulates first
+- Checks each action against the policy you wrote (which contracts, which functions, what limits)
+- Signs locally — your private key never leaves your machine
+- Broadcasts, waits for the receipt, writes every decision to a local journal
 
-The AI never touches your private key. Your computer does the signing. Anything outside your rules is silently refused.
+The AI can also subscribe to onchain events ("when this token transfer hits, run that strategy") for genuine live automation.
+
+Put another way: **the AI becomes a developer that ships and operates code inside your machine**, and you hold the policy lock.
 
 ---
 
