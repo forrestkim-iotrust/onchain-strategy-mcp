@@ -60,9 +60,17 @@ pub struct ExecutorServer {
     /// because future `policy_update` (v2) will swap the value while
     /// `strategy_run` reads concurrently.
     pub(crate) policy: Arc<RwLock<Option<LoadedPolicy>>>,
-    /// v1.2 spike: optional EIP-7702 delegate. When `Some`, multi-action runs
+    /// v1.1 spike: optional EIP-7702 delegate. When `Some`, multi-action runs
     /// are bundled into one tx via `BatchExec.executeBatch`.
     pub(crate) aa_delegate: Option<alloy_primitives::Address>,
+    /// v1.2 Trigger Core (Stream D): worker pool table — one `JoinHandle`
+    /// per active background worker, keyed by trigger id.
+    pub(crate) trigger_pool: Arc<Mutex<crate::triggers::pool::WorkerPool>>,
+    /// v1.2 Trigger Core (Stream D): MPSC sender shared with each spawned
+    /// worker and with the MCP `strategy_run` tool when it synthesizes a
+    /// manual event. Backpressure is per-worker `try_send`.
+    pub(crate) trigger_events_tx:
+        tokio::sync::mpsc::Sender<crate::triggers::event::TriggerEvent>,
 }
 
 impl ExecutorServer {
@@ -83,6 +91,11 @@ impl ExecutorServer {
     pub fn new_with_config(state_cfg: &StateConfig, evm_config: &EvmConfig) -> Result<Self> {
         let store = StateStore::open(std::path::Path::new(&state_cfg.path))
             .map_err(|e| anyhow::anyhow!("opening state store at {}: {e}", state_cfg.path))?;
+        // v1.2 Trigger Core: channel + empty pool are created eagerly so the
+        // synchronous (non-Arc) constructors stay usable. `from_config` is the
+        // only entry point that actually wires the dispatcher task + spawns
+        // pre-existing enabled triggers.
+        let (trigger_events_tx, _rx) = tokio::sync::mpsc::channel(1024);
         Ok(Self {
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
@@ -92,6 +105,8 @@ impl ExecutorServer {
             chain_id_cell: Arc::new(tokio::sync::OnceCell::new()),
             policy: Arc::new(RwLock::new(None)),
             aa_delegate: None,
+            trigger_pool: Arc::new(Mutex::new(crate::triggers::pool::WorkerPool::new())),
+            trigger_events_tx,
         })
     }
 
@@ -131,8 +146,8 @@ impl ExecutorServer {
             }
         };
         srv.policy = Arc::new(RwLock::new(loaded));
-        // v1.2 spike: optional [aa].delegate. Parsed via lenient EIP-55
-        // (same as evm.simulation_from); errors are logged but never block boot.
+        // v1.1 spike: optional [aa].delegate. Parsed via lenient EIP-55;
+        // errors are logged but never block boot.
         if let Some(raw) = full_cfg.aa.delegate.as_deref() {
             match raw.parse::<alloy_primitives::Address>() {
                 Ok(addr) => {
@@ -149,11 +164,89 @@ impl ExecutorServer {
 
     /// Convenience: build from a full [`Config`] (Phase 4 entry point + Phase
     /// 5 policy load).
-    pub fn from_config(cfg: &Config) -> Result<Self> {
+    ///
+    /// v1.2 Trigger Core (Stream D): returns `Arc<Self>` because the trigger
+    /// dispatcher holds a `Weak<ExecutorServer>` to call back into the
+    /// strategy-run pipeline. The bare `new_*` constructors still return
+    /// `Self` for the test suite, which doesn't need the daemon.
+    pub fn from_config(cfg: &Config) -> Result<Arc<Self>> {
         let evm_config = cfg
             .evm_config()
             .map_err(|e| anyhow::anyhow!("parsing [evm] config: {}", e.detail_for_log()))?;
-        Self::new_with_full_config(&cfg.state, &evm_config, cfg)
+        let mut server = Self::new_with_full_config(&cfg.state, &evm_config, cfg)?;
+        // Replace the placeholder channel with a real one whose receiver feeds
+        // the dispatcher we're about to spawn.
+        let (tx, rx) = tokio::sync::mpsc::channel(1024);
+        server.trigger_events_tx = tx.clone();
+        let arc = Arc::new(server);
+        // Spawn dispatcher with Weak so a dropped server lets the dispatcher
+        // exit cleanly.
+        let dispatcher = crate::triggers::dispatcher::Dispatcher {
+            state: arc.state.clone(),
+            server: Arc::downgrade(&arc),
+        };
+        tokio::spawn(dispatcher.run(rx));
+        // Load enabled triggers and spawn workers for each. Storage errors
+        // are logged but non-fatal — boot proceeds.
+        let filter = executor_core::schema::trigger::TriggerListFilter {
+            kind: None,
+            enabled: Some(true),
+            strategy_id: None,
+        };
+        // Use try_lock — `arc` is brand new and no other task can hold these
+        // mutexes yet. Avoids `blocking_lock` which panics inside a tokio
+        // runtime.
+        let triggers = {
+            let store = arc
+                .state
+                .try_lock()
+                .expect("fresh state mutex not contended at boot");
+            store.list_triggers(Some(&filter))
+        };
+        match triggers {
+            Ok(list) => {
+                let mut pool = arc
+                    .trigger_pool
+                    .try_lock()
+                    .expect("fresh trigger_pool mutex not contended at boot");
+                // list_triggers returns TriggerSummary; reload full Trigger
+                // rows via get_trigger so the pool sees config_json/predicate.
+                let store = arc
+                    .state
+                    .try_lock()
+                    .expect("fresh state mutex not contended at boot");
+                for summary in &list {
+                    match store.get_trigger(&summary.id) {
+                        Ok(Some(trigger)) => {
+                            if let Err(e) = pool.spawn(&trigger, tx.clone()) {
+                                tracing::warn!(
+                                    trigger_id = %trigger.id,
+                                    error = %e,
+                                    "failed to spawn worker at boot",
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                trigger_id = %summary.id,
+                                "trigger summary present but row vanished",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                trigger_id = %summary.id,
+                                error = %e,
+                                "failed to load trigger row at boot",
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to list triggers at boot");
+            }
+        }
+        Ok(arc)
     }
 
     /// Lazy-init the alloy provider. First call constructs; subsequent

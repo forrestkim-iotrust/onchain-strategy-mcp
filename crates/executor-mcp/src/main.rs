@@ -17,7 +17,11 @@ async fn main() -> Result<()> {
     );
     // Phase 4: build with full Config so [evm] section is honored. Provider
     // itself is lazy — first ctx.evm.* call constructs it.
-    let service = ExecutorServer::from_config(&cfg)?.serve(stdio()).await?;
+    let server = ExecutorServer::from_config(&cfg)?;
+    // `ExecutorServer: Clone` — inner Arc fields are shared. Pass an owned
+    // clone to rmcp's `serve` (which takes Self by value) while the original
+    // Arc keeps the dispatcher's Weak upgrade-able.
+    let service = (*server).clone().serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }

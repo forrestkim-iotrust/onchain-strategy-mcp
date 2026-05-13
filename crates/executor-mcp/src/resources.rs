@@ -87,6 +87,18 @@ pub(crate) async fn list_resource_templates_impl(
                 "Populated in Phase 3 (returns source_reads + actions + logs for the run).",
                 "application/json",
             ),
+            make_template(
+                "trigger://{trigger_id}",
+                "trigger",
+                "v1.2 Trigger Core: returns the full Trigger row (kind, config_json, predicate, enabled, ...).",
+                "application/json",
+            ),
+            make_template(
+                "trigger-events://{trigger_id}",
+                "trigger-events",
+                "v1.2 Trigger Core: most recent 100 trigger events (fired, skipped, dedup-rejected) for the trigger.",
+                "application/json",
+            ),
         ],
     })
 }
@@ -110,6 +122,14 @@ pub(crate) async fn read_resource_impl(
     if let Some(run_id) = uri.strip_prefix("execution://") {
         let run_id = run_id.to_string();
         return read_execution(uri, run_id, state).await;
+    }
+    if let Some(tid) = uri.strip_prefix("trigger-events://") {
+        let tid = tid.to_string();
+        return read_trigger_events(uri, tid, state).await;
+    }
+    if let Some(tid) = uri.strip_prefix("trigger://") {
+        let tid = tid.to_string();
+        return read_trigger(uri, tid, state).await;
     }
     Err(McpError::resource_not_found(
         format!("unsupported resource URI: {uri}"),
@@ -278,5 +298,55 @@ async fn read_journal(
         .map_err(|e| storage_error(format!("serialize journal: {e}")))?;
     Ok(ReadResourceResult::new(vec![
         ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
+async fn read_trigger(
+    uri: String,
+    id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    let id_owned = id.clone();
+    let row = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.get_trigger(&id_owned)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    match row {
+        None => Err(McpError::resource_not_found(
+            format!("trigger {uri} not found"),
+            Some(json!({ "uri": uri })),
+        )),
+        Some(t) => {
+            let body = serde_json::to_string(&t)
+                .map_err(|e| storage_error(format!("serialize trigger: {e}")))?;
+            Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(body, uri).with_mime_type("application/json"),
+            ]))
+        }
+    }
+}
+
+async fn read_trigger_events(
+    uri: String,
+    id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    let id_owned = id.clone();
+    let events = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.list_trigger_events(&id_owned, 100)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let body = serde_json::to_string(&json!({ "events": events }))
+        .map_err(|e| storage_error(format!("serialize trigger events: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body, uri).with_mime_type("application/json"),
     ]))
 }
