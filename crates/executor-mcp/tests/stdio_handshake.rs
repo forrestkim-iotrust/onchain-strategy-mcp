@@ -245,12 +245,20 @@ async fn resources_surface_matches_contract() -> Result<()> {
         template_uris.contains(&"trigger-events://{trigger_id}"),
         "missing trigger-events template; got {template_uris:?}"
     );
-    assert_eq!(
-        templates.len(),
-        5,
-        "expected exactly 5 resource templates (3 base + 2 trigger), got {}",
-        templates.len()
-    );
+    // v1.3 self-documenting surface: examples + docs templates.
+    for required in [
+        "examples://strategies",
+        "examples://strategies/{name}",
+        "examples://contracts/{name}",
+        "docs://policy-model",
+        "docs://eip-7702",
+        "docs://trigger-model",
+    ] {
+        assert!(
+            template_uris.contains(&required),
+            "missing self-doc template {required}; got {template_uris:?}"
+        );
+    }
 
     // resources/read → resource_not_found (-32002) with data.uri echoed.
     // Plan 02-02 narrows the assertion: a non-hex id surfaces as
@@ -279,7 +287,7 @@ async fn prompts_surface_matches_contract() -> Result<()> {
     let mut proc = spawn_server().await?;
     let _ = initialize(&mut proc).await?;
 
-    // prompts/list → 2 prompts with arguments schemas
+    // prompts/list → authoring pair + 4 self-documenting prompts (v1.3).
     send(
         &mut proc,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/list" }),
@@ -291,20 +299,19 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         .iter()
         .map(|p| p["name"].as_str().unwrap_or_default())
         .collect();
-    assert!(
-        names.contains(&"write_evm_strategy"),
-        "missing write_evm_strategy; got {names:?}"
-    );
-    assert!(
-        names.contains(&"review_evm_strategy"),
-        "missing review_evm_strategy; got {names:?}"
-    );
-    assert_eq!(
-        prompts.len(),
-        2,
-        "expected exactly 2 prompts, got {}",
-        prompts.len()
-    );
+    for required in [
+        "write_evm_strategy",
+        "review_evm_strategy",
+        "getting_started",
+        "trigger_patterns",
+        "example_strategies",
+        "common_pitfalls",
+    ] {
+        assert!(
+            names.contains(&required),
+            "missing prompt {required}; got {names:?}"
+        );
+    }
     for p in prompts {
         assert!(
             p.get("description").is_some(),
@@ -313,7 +320,7 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         );
     }
 
-    // prompts/get write_evm_strategy → placeholder PromptMessage referencing Phase 7
+    // prompts/get write_evm_strategy → guided authoring body referencing ctx API.
     send(
         &mut proc,
         json!({
@@ -330,11 +337,11 @@ async fn prompts_surface_matches_contract() -> Result<()> {
     );
     let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
     assert!(
-        text.contains("Phase 7") || text.contains("body will be finalized"),
-        "placeholder marker missing from write_evm_strategy body: {text}"
+        text.contains("test intent") && text.contains("ctx.actions"),
+        "authoring body did not echo intent + ctx API: {text}"
     );
 
-    // prompts/get review_evm_strategy → placeholder PromptMessage referencing Phase 7
+    // prompts/get review_evm_strategy → review body referencing the strategy id.
     send(
         &mut proc,
         json!({
@@ -351,8 +358,27 @@ async fn prompts_surface_matches_contract() -> Result<()> {
     );
     let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
     assert!(
-        text.contains("Phase 7") || text.contains("body will be finalized"),
-        "placeholder marker missing from review_evm_strategy body: {text}"
+        text.contains("s-1") && text.contains("policy_get"),
+        "review body did not reference id + policy_get: {text}"
+    );
+
+    // prompts/get getting_started → must return non-trivial orientation body.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 6, "method": "prompts/get",
+            "params": { "name": "getting_started", "arguments": {} }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let messages = r["result"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.len() > 200 && text.contains("strategy_list"),
+        "getting_started body too short or missing strategy_list reference"
     );
 
     proc.child.kill().await?;

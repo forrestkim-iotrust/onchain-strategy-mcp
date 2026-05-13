@@ -59,6 +59,10 @@ claude mcp add osmcp -- npx onchain-strategy-mcp serve
 
 That's it. Open Claude Code and:
 
+> Load the `getting_started` prompt and walk me through this MCP.
+
+The server is self-documenting — its `instructions`, prompts, and embedded `examples://` / `docs://` resources tell the agent every feature it has. Or, to jump straight to a known example:
+
 > Register the example strategy at `examples/strategies/yield-snapshot.js`, run it once, and show me the result.
 
 Claude calls the MCP tools, the runtime executes, and you see the journaled outcome in chat. From there: write more strategies, attach triggers, build flows by talking.
@@ -100,10 +104,6 @@ Ask Claude: *"when ETH or USDC arrives at my burner, auto-convert to USDC and su
 ### B. The yield comparator
 
 Ask Claude: *"compare USDC supply APY across Aave, Compound, and Moonwell on Base, hourly for the past 30 days."* It writes a short view, walks past blocks via archive RPC, and hands back a table in seconds — the data already exists onchain.
-
-Follow up: *"now watch this and ping me if Moonwell crosses 5%."* That's a separate command — Claude attaches a periodic check (or an onchain event trigger) so future changes don't slip past.
-
-Same runtime, two modes: **history is one call, live monitoring is a trigger.**
 
 ### C. The instant reactor
 
@@ -151,6 +151,7 @@ What's next:
 
 - **Self-documenting MCP session.** The server's `instructions`, prompts, and resource templates ship populated — examples, trigger patterns, action shapes, common pitfalls — so a fresh Claude Code session already *knows* what it can do. No feature should be unreachable just because the agent didn't know it existed.
 - **Product homepage.** A simple landing site that explains what this is, shows the headline use cases, and walks newcomers through install in a browser — copy-pasteable commands, screenshots of a real Claude Code session, links to examples. Lowers the "wait, what does this actually do?" barrier before someone touches a terminal.
+- **Out-of-band notifications.** A `ctx.notify({channel, message})` strategy API plus first-class adapters for Telegram, Discord, ntfy.sh, and generic webhooks. Triggers fire in the background regardless of whether you're at the keyboard; today the strategy can only journal locally. With this, a strategy can wake *you* up — not just write a log entry the agent surfaces next time you ask.
 - **External oracle triggers & data sourcing.** Fire strategies on Chainlink / Pyth / Redstone price updates, off-chain data feeds, or arbitrary HTTPS webhooks. Lets agents react to *real-world* signals — not just onchain state.
 - **WaaS (Wallet-as-a-Service) integration.** First-class adapters for Privy, Turnkey, Coinbase MPC, and similar agent-wallet providers. Pushes permissioning (session keys, account-level policies, rotation, recovery) into the wallet layer where it scales — burner + local policy stays for solo operators, WaaS for teams / production / multi-tenant.
 - **Non-AMM venue integrations.** First-class support for Hyperliquid (perps), Polymarket (prediction markets), and similar orderbook / specialized venues. Agents place, manage, settle.
