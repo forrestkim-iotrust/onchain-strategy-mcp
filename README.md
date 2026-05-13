@@ -1,3 +1,5 @@
+<p align="right"><b>English</b> · <a href="./README_ko.md">한국어</a></p>
+
 # onchain-strategy-mcp
 
 A safe way to let an AI agent (like Claude) act on your crypto wallet.

@@ -20,10 +20,9 @@ OVERVIEW.html
 PRODUCT-REVIEW.html
 Vibe-Trading/
 
-# ─── Internal planning artifacts ───────────────────────────────────
-# .planning/ top-level docs (PROJECT.md, ROADMAP.md, STATE.md) stay public.
-# Per-phase scratch + worktree noise is excluded.
-.planning/phases/
+# ─── Internal planning artifacts — fully private ──────────────────
+# All GSD planning artifacts stay local; not useful to external readers.
+.planning/
 .claude/worktrees/
 
 # ─── Foundry caches at repo root ───────────────────────────────────
