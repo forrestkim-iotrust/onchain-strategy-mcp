@@ -67,17 +67,34 @@ pub struct AaSection {
     pub delegate: Option<String>,
 }
 
-/// `[signer]` section — stores a non-secret environment-variable reference.
+/// `[signer]` section — stores a non-secret environment-variable reference
+/// (Phase 6) plus the v1.3 keychain backend selector.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SignerSection {
     pub private_key_env: Option<String>,
     #[serde(default = "default_receipt_timeout_ms")]
     pub receipt_timeout_ms: u64,
+    /// v1.3: backend selector — `"keychain"` or `"env"`. Defaults to
+    /// `"env"` to preserve Phase 6 behaviour for existing configs.
+    #[serde(default = "default_signer_backend")]
+    pub backend: String,
+    /// v1.3: keychain account / key id (when `backend = "keychain"`).
+    /// Defaults to `"default"` per the naming contract.
+    #[serde(default = "default_signer_key_id")]
+    pub key_id: String,
 }
 
 fn default_receipt_timeout_ms() -> u64 {
     120_000
+}
+
+fn default_signer_backend() -> String {
+    "env".into()
+}
+
+fn default_signer_key_id() -> String {
+    "default".into()
 }
 
 impl Default for SignerSection {
@@ -85,6 +102,8 @@ impl Default for SignerSection {
         Self {
             private_key_env: None,
             receipt_timeout_ms: default_receipt_timeout_ms(),
+            backend: default_signer_backend(),
+            key_id: default_signer_key_id(),
         }
     }
 }
@@ -190,11 +209,29 @@ impl Config {
     }
 
     /// Build a non-secret local signer config from `[signer]`, if configured.
+    ///
+    /// v1.3 dispatch:
+    /// - `backend = "env"` (or absent): legacy path — requires `private_key_env`.
+    /// - `backend = "keychain"`: uses `key_id` (default `"default"`).
     pub fn signer_config(&self) -> Result<Option<LocalSignerConfig>, SignerError> {
-        let Some(env) = self.signer.private_key_env.as_deref() else {
-            return Ok(None);
-        };
-        LocalSignerConfig::new(env.to_string(), self.signer.receipt_timeout_ms).map(Some)
+        match self.signer.backend.as_str() {
+            "keychain" => executor_signer::LocalSignerConfig::new_keychain(
+                self.signer.key_id.clone(),
+                self.signer.receipt_timeout_ms,
+            )
+            .map(Some),
+            "env" => {
+                let Some(env) = self.signer.private_key_env.as_deref() else {
+                    return Ok(None);
+                };
+                LocalSignerConfig::new(env.to_string(), self.signer.receipt_timeout_ms).map(Some)
+            }
+            other => Err(SignerError::Config {
+                detail: format!(
+                    "unknown [signer].backend = {other:?} (expected \"keychain\" or \"env\")"
+                ),
+            }),
+        }
     }
 
     /// Plan 05-03 / D-15: load + parse + validate the policy file at
