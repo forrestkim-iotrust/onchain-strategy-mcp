@@ -16,3 +16,4 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 reqwest = "0.13"
+keyring = { workspace = true }

@@ -27,6 +27,14 @@ pub enum SignerError {
     /// Other non-secret signer configuration issue.
     #[error("local signer config error: {detail}")]
     Config { detail: String },
+    /// v1.3: keychain entry not found for the configured (service, key_id).
+    #[error(
+        "keychain entry not found for service={service} account={key_id} — re-run `npx onchain-strategy-mcp init`"
+    )]
+    KeychainNotFound { service: String, key_id: String },
+    /// v1.3: OS keychain backend returned an error (locked, libsecret missing, etc.).
+    #[error("keychain backend error: {detail}")]
+    KeychainBackend { detail: String },
 }
 
 impl SignerError {
@@ -41,6 +49,8 @@ impl SignerError {
             Self::ReceiptMissing => "receipt_missing",
             Self::ReceiptFailed => "receipt_failed",
             Self::Config { .. } => "signer_not_configured",
+            Self::KeychainNotFound { .. } => "signer_not_configured",
+            Self::KeychainBackend { .. } => "signer_not_configured",
         }
     }
 }

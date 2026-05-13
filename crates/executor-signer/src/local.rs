@@ -13,7 +13,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::{SolCall, sol};
 use reqwest::Url;
 
-use crate::{LocalSignerConfig, SignerError};
+use crate::{LocalSignerConfig, SignerError, config::SignerBackend};
 
 sol! {
     /// BatchExec.executeBatch — EIP-7702 delegate target signature.
@@ -79,6 +79,28 @@ impl LocalSignerHandle {
             signer,
             signer_address,
         })
+    }
+
+    /// v1.3: dispatch resolution by configured backend.
+    ///
+    /// `Env` preserves the Phase 6 path; `Keychain` reads from the OS
+    /// keychain (`crate::keychain::load_from_keychain`).
+    pub fn resolve(config: &LocalSignerConfig, chain_id: u64) -> Result<Self, SignerError> {
+        match config.backend {
+            SignerBackend::Env => Self::from_env(config, chain_id),
+            SignerBackend::Keychain => crate::keychain::load_from_keychain(config, chain_id),
+        }
+    }
+
+    /// Internal constructor — wraps an already-built alloy signer.
+    /// Used by the keychain backend; not part of the public surface.
+    #[doc(hidden)]
+    pub fn __from_alloy_signer(signer: PrivateKeySigner) -> Self {
+        let signer_address = signer.address();
+        Self {
+            signer,
+            signer_address,
+        }
     }
 
     #[doc(hidden)]
