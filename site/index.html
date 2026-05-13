@@ -1,0 +1,327 @@
+<!doctype html>
+<!--
+  onchain-strategy-mcp homepage (English).
+  Static. No build step. Open this file directly with file:// to preview.
+
+  GitHub Pages: Settings → Pages → Source: main branch, /site folder.
+  Live URL: https://forrestkim-iotrust.github.io/onchain-strategy-mcp/
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>onchain-strategy-mcp — give an AI agent hands and eyes onchain</title>
+<meta name="description" content="A local runtime that lets Claude (or any MCP client) execute onchain strategies — sign, broadcast, wait for receipts, react to events, and bundle multi-step actions with EIP-7702.">
+<meta property="og:title" content="onchain-strategy-mcp">
+<meta property="og:description" content="A local runtime that gives an AI agent hands and eyes onchain.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="./styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2314171a'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='18' font-weight='700' text-anchor='middle' fill='%23d97757'%3E%3E%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="./index.html"><span class="dot">&gt;</span> onchain-strategy-mcp</a>
+    <nav class="nav" aria-label="Primary">
+      <a href="#what" class="hide-sm">What</a>
+      <a href="#build" class="hide-sm">Build</a>
+      <a href="#install">Install</a>
+      <a href="#faq" class="hide-sm">FAQ</a>
+      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a>
+      <span class="lang" aria-label="Language">
+        <b>EN</b> · <a href="./ko/index.html" hreflang="ko">KO</a>
+      </span>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap">
+    <h1>Give an AI agent hands and eyes onchain.</h1>
+    <p class="lede">
+      A local runtime that takes Claude's onchain ideas and <strong>actually runs them</strong> —
+      signs locally, broadcasts, waits for receipts, reacts to events, and bundles multi-step
+      actions into a single atomic EIP-7702 transaction.
+    </p>
+
+    <div class="codeblock hero-cmd" data-copy>
+      <button class="copy-btn" type="button" aria-label="Copy install command">COPY</button>
+<pre><span class="prompt">$ </span>npx onchain-strategy-mcp init</pre>
+    </div>
+
+    <ul class="req">
+      <li>needs: Node 18+</li>
+      <li>needs: Claude Code</li>
+      <li>Mac / Linux</li>
+      <li>no Rust, no Foundry</li>
+    </ul>
+
+    <div class="cta-row">
+      <a class="btn" href="#install">Install</a>
+      <a class="btn secondary" href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a>
+    </div>
+  </div>
+</section>
+
+<section id="what">
+  <div class="wrap">
+    <span class="eyebrow">What it does</span>
+    <h2>The AI doesn't propose code anymore. It operates it.</h2>
+    <p style="max-width:60ch;color:var(--fg-muted)">
+      When you ask Claude today to <em>"deposit my USDC into Aave,"</em> you get back a Python snippet and
+      "now you run it." Everything operational falls on you — RPC, keys, gas, simulation, receipts.
+      This runtime takes over the operator role.
+    </p>
+
+    <div class="grid">
+      <div class="item">
+        <span class="num">01</span>
+        <h3>Connect, simulate, sign, broadcast</h3>
+        <p>Strategies run inside a sandboxed JS runtime. The runtime opens the chain, simulates each step, signs locally, broadcasts, and waits for receipts.</p>
+      </div>
+      <div class="item">
+        <span class="num">02</span>
+        <h3>Journal every decision</h3>
+        <p>Source reads, actions, and logs land in a local SQLite journal. Replayable, auditable, yours.</p>
+      </div>
+      <div class="item">
+        <span class="num">03</span>
+        <h3>React to onchain events live</h3>
+        <p>Attach <code>log</code>, <code>mempool</code>, <code>interval</code>, or <code>manual</code> triggers. Strategies fire within seconds of a matching event.</p>
+      </div>
+      <div class="item">
+        <span class="num">04</span>
+        <h3>Atomic multi-step (EIP-7702)</h3>
+        <p>Return <code>[approve, supply]</code> and the runtime bundles them into one transaction. Both land or neither does — no risk window between approve and use.</p>
+      </div>
+    </div>
+
+    <table class="t-triggers">
+      <caption style="text-align:left;font-size:0.85rem;color:var(--fg-faint);margin-bottom:var(--s1)">Trigger modes available out of the box</caption>
+      <thead><tr><th>Mode</th><th>Fires when</th></tr></thead>
+      <tbody>
+        <tr><td><code>manual</code></td><td>You (or Claude) ask it to run</td></tr>
+        <tr><td><code>interval</code></td><td>Every N ms — cron-style</td></tr>
+        <tr><td><code>log</code></td><td>A matching onchain log appears in a confirmed block</td></tr>
+        <tr><td><code>mempool</code></td><td>A matching pending tx hits the watched node (Alchemy WSS)</td></tr>
+        <tr><td>Reserved</td><td><code>block</code>, <code>webhook</code> — wired in v1.3</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="build">
+  <div class="wrap">
+    <span class="eyebrow">What you can build</span>
+    <h2>Things people have already shipped.</h2>
+
+    <div class="scenario">
+      <h3>A. The auto-deposit funnel</h3>
+      <blockquote class="ask">when ETH or USDC arrives at my burner, auto-convert to USDC and supply it to Aave — keep ~$0.10 worth of ETH for gas.</blockquote>
+      <p>Claude registers the strategy plus two log triggers, and the funnel runs itself from there. Every drop hitting the wallet starts earning yield. Your only job is to send funds to the address.</p>
+    </div>
+
+    <div class="scenario">
+      <h3>B. The yield comparator</h3>
+      <blockquote class="ask">compare USDC supply APY across Aave, Compound, and Moonwell on Base, hourly for the past 30 days.</blockquote>
+      <p>It writes a short view, walks past blocks via archive RPC, and hands back a table in seconds — the data already exists onchain.</p>
+      <blockquote class="ask">now watch this and ping me if Moonwell crosses 5%.</blockquote>
+      <p>Same runtime, two modes: <strong>history is one call, live monitoring is a trigger.</strong></p>
+    </div>
+
+    <div class="scenario">
+      <h3>C. The instant reactor</h3>
+      <blockquote class="ask">watch the Aave oracle for ETH price updates. If price drops more than 2% in one update, repay my borrow.</blockquote>
+      <p>Claude attaches a log-event trigger. When the event fires onchain, the strategy runs within seconds.</p>
+    </div>
+
+    <div class="scenario">
+      <h3>D. Atomic multi-step</h3>
+      <blockquote class="ask">supply 0.1 USDC from my burner to Aave.</blockquote>
+      <p>Claude returns <code>[approve, supply]</code> as two actions; the runtime detects the multi-step plan and bundles them into a single EIP-7702 transaction automatically. Both land together or neither does.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <span class="eyebrow">How it works</span>
+    <h2>One conversational loop. Four moving parts.</h2>
+
+    <div class="diagram" role="img" aria-label="Your prompt to Claude to MCP tools to policy gate to onchain">
+      <div class="step"><b>your prompt</b><span>in Claude Code</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>Claude</b><span>plans &amp; calls tools</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>MCP runtime</b><span>simulate · sign · journal</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>policy gate</b><span>deny-by-default</span></div>
+      <div class="arrow">→</div>
+      <div class="step"><b>onchain</b><span>broadcast · receipt</span></div>
+    </div>
+    <p style="color:var(--fg-muted);max-width:62ch">
+      Strategies are short JavaScript functions returning <code>Action[]</code> (or <code>"noop"</code>).
+      Anything outside the policy DSL — wrong chain, unlisted contract, over-cap spend — is refused
+      before signing.
+    </p>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <span class="eyebrow">Install</span>
+    <h2>Two commands. Under a minute.</h2>
+    <p style="color:var(--fg-muted);max-width:62ch">
+      You'll need: a Mac or Linux machine,
+      <a href="https://nodejs.org/">Node.js 18+</a>, and
+      <a href="https://claude.ai/code">Claude Code</a>. No Rust, no Foundry.
+    </p>
+
+    <div class="codeblock" data-copy>
+      <button class="copy-btn" type="button" aria-label="Copy install commands">COPY</button>
+<pre><span class="comment"># 1. One-line install (downloads the prebuilt binary, generates a burner wallet
+#    stored in your OS keychain, scaffolds .local/config.toml + .local/policy.toml)</span>
+<span class="prompt">$ </span>npx onchain-strategy-mcp init
+
+<span class="comment"># 2. Register with Claude Code (init prints this exact line for you)</span>
+<span class="prompt">$ </span>claude mcp add osmcp -- npx onchain-strategy-mcp serve</pre>
+    </div>
+
+    <p style="color:var(--fg-muted);max-width:62ch">
+      That's it. Open Claude Code and:
+    </p>
+    <blockquote class="ask" style="max-width:62ch">Register the example strategy at <code>examples/strategies/yield-snapshot.js</code>, run it once, and show me the result.</blockquote>
+    <p style="color:var(--fg-muted);max-width:62ch">
+      Claude calls the MCP tools, the runtime executes, and you see the journaled outcome in chat.
+      From there: write more strategies, attach triggers, build flows by talking.
+    </p>
+
+    <details class="advanced">
+      <summary>Building from source (advanced)</summary>
+      <p style="color:var(--fg-muted)">If you'd rather build the Rust binary yourself instead of using the prebuilt one:</p>
+      <div class="codeblock" data-copy>
+        <button class="copy-btn" type="button" aria-label="Copy build-from-source commands">COPY</button>
+<pre><span class="prompt">$ </span>git clone https://github.com/forrestkim-iotrust/onchain-strategy-mcp.git
+<span class="prompt">$ </span>cd onchain-strategy-mcp
+<span class="prompt">$ </span>cargo build --release --bin executor-mcp
+
+<span class="prompt">$ </span>cast wallet new                       <span class="comment"># generate a burner; small amounts only</span>
+<span class="prompt">$ </span>export EXECUTOR_PRIVATE_KEY=0xyourkey
+
+<span class="prompt">$ </span>cp -R .local.example .local
+<span class="prompt">$ </span>$EDITOR .local/config.toml            <span class="comment"># RPC + signer env name</span>
+<span class="prompt">$ </span>$EDITOR .local/policy.toml            <span class="comment"># agent permissions</span>
+
+<span class="prompt">$ </span>claude mcp add osmcp \
+    -e EXECUTOR_CONFIG=$PWD/.local/config.toml \
+    -e EXECUTOR_PRIVATE_KEY=$EXECUTOR_PRIVATE_KEY \
+    -- $PWD/target/release/executor-mcp</pre>
+      </div>
+      <p style="color:var(--fg-muted)">Requires <a href="https://rustup.rs/">Rust</a> and (optionally) <a href="https://book.getfoundry.sh/">Foundry</a> for <code>cast</code>.</p>
+    </details>
+  </div>
+</section>
+
+<section id="faq" class="faq">
+  <div class="wrap">
+    <span class="eyebrow">FAQ</span>
+    <h2>Short answers.</h2>
+
+    <details>
+      <summary>What chains does it support?</summary>
+      <p>Built and tested on Base (an L2). Any EVM-compatible chain works with a config tweak — Ethereum mainnet, Arbitrum, Optimism, Polygon, etc. Solana and other non-EVM chains are on the roadmap.</p>
+    </details>
+
+    <details>
+      <summary>What does it cost to run?</summary>
+      <p>The software is free. Onchain transactions cost gas — on Base, typically under $0.10 per action. The bigger cost is the wallet itself: start with $5–10 of ETH and a small amount of whatever asset you want to work with.</p>
+    </details>
+
+    <details>
+      <summary>Do I need to be a programmer?</summary>
+      <p>A little. You'll copy commands and edit a config file once. Strategies themselves are short JavaScript functions, which Claude will write from your plain-language description.</p>
+    </details>
+
+    <details>
+      <summary>Do I need any API keys?</summary>
+      <p>Basic use: no, public RPC works fine. For mempool watching, live event subscriptions, or historical data older than a few days, you'll want an <a href="https://www.alchemy.com/">Alchemy</a> key. Free tier is enough.</p>
+    </details>
+
+    <details>
+      <summary>What is "MCP"?</summary>
+      <p>Model Context Protocol — the standard way Claude Code (and similar AI clients) talk to outside programs. This project is one of those programs. Adding it to Claude Code is essentially telling Claude <em>"here's a thing you can talk to."</em></p>
+    </details>
+
+    <details>
+      <summary>How does the policy/safety model work?</summary>
+      <p>The runtime ships with a deny-by-default policy DSL (allowed chains, contracts, function selectors, native-value caps, ERC20 spend caps). Anything outside the policy is refused before signing. This is the simple baseline; richer permissioning (session keys, agent wallets) is on the roadmap.</p>
+    </details>
+
+    <details>
+      <summary>Where do I report bugs or ask questions?</summary>
+      <p><a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues">Open an issue</a>. Use GitHub's private security advisory feature for anything security-sensitive.</p>
+    </details>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <span class="eyebrow">Roadmap</span>
+    <h2>What's next.</h2>
+    <ul class="roadmap-list">
+      <li>
+        <span class="tag shipped">shipped · v1.3</span>
+        <span><strong>One-line install for Claude Code.</strong> <code>npx onchain-strategy-mcp init</code> scaffolds the burner (OS keychain), config, and policy. Deterministic CREATE2 BatchExec address so 7702 batching works on any chain.</span>
+      </li>
+      <li>
+        <span class="tag">next</span>
+        <span><strong>Self-documenting MCP session.</strong> The server's instructions, prompts, and resource templates ship populated — examples, trigger patterns, action shapes, common pitfalls — so a fresh Claude Code session already knows what it can do.</span>
+      </li>
+      <li>
+        <span class="tag">next</span>
+        <span><strong>External oracle triggers.</strong> Fire strategies on Chainlink / Pyth / Redstone price updates, off-chain feeds, or HTTPS webhooks. Agents react to real-world signals, not just onchain state.</span>
+      </li>
+      <li>
+        <span class="tag">next</span>
+        <span><strong>WaaS integration.</strong> First-class adapters for Privy, Turnkey, Coinbase MPC — push permissioning into the wallet layer for teams and production.</span>
+      </li>
+    </ul>
+    <p style="color:var(--fg-muted)"><a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp#roadmap">Full roadmap on GitHub →</a></p>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="left">Apache 2.0 · Local-first — no servers we run, no accounts you create.</div>
+    <div>
+      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a> ·
+      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues">Issues</a> ·
+      <a href="./ko/index.html">한국어</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Vanilla copy buttons. Progressive enhancement — works fine if JS disabled.
+document.querySelectorAll('.codeblock[data-copy]').forEach(function (block) {
+  var btn = block.querySelector('.copy-btn');
+  var pre = block.querySelector('pre');
+  if (!btn || !pre) return;
+  btn.addEventListener('click', function () {
+    var text = pre.innerText.replace(/^\$\s?/gm, '').trim();
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = 'COPIED';
+      btn.classList.add('copied');
+      setTimeout(function () { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 1400);
+    });
+  });
+});
+</script>
+
+</body>
+</html>
