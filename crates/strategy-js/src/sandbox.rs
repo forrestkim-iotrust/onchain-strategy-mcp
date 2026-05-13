@@ -1481,7 +1481,12 @@ fn parse_block_tag(v: &rquickjs::Value<'_>) -> Result<executor_evm::read::BlockT
         match s.as_str() {
             "latest" => Ok(BlockTag::Latest),
             "pending" => Ok(BlockTag::Pending),
-            other => Err(format!("blockTag string must be 'latest'|'pending', got {other:?}")),
+            // Accept decimal numeric strings (agents often pass block numbers
+            // as strings to avoid JS Number precision concerns past 2^53).
+            other => other
+                .parse::<u64>()
+                .map(BlockTag::Number)
+                .map_err(|_| format!("blockTag string must be 'latest'|'pending'|<decimal number>, got {other:?}")),
         }
     } else if let Some(n) = v.as_int() {
         if n < 0 {

@@ -1,11 +1,34 @@
+# Rust build
 /target
 
 # Runtime state files (Phase 2): SQLite DB plus WAL/shm sidecars created
-# whenever the MCP server boots in the current working directory. These are
-# never source-controlled — agents either pass an explicit `[state].path` via
-# config or accept the cwd-relative default `./state.db`.
+# whenever the MCP server boots in the current working directory.
 state.db
 state.db-shm
 state.db-wal
 .gitnexus
 .gstack/
+
+# ─── Operator-local runtime — NEVER commit ─────────────────────────
+# Contains config.toml (RPC keys, burner pointer, policy paths),
+# strategy sources, forge artifacts, and any operator-specific state.
+# A `.local.example/` scaffold may be provided for first-run setup.
+.local/
+
+# ─── Author-side scratch / drafts ──────────────────────────────────
+OVERVIEW.html
+PRODUCT-REVIEW.html
+Vibe-Trading/
+
+# ─── Internal planning artifacts ───────────────────────────────────
+# .planning/ top-level docs (PROJECT.md, ROADMAP.md, STATE.md) stay public.
+# Per-phase scratch + worktree noise is excluded.
+.planning/phases/
+.claude/worktrees/
+
+# ─── Foundry caches at repo root ───────────────────────────────────
+cache/
+out/
+
+# OS noise
+.DS_Store

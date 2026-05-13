@@ -1,0 +1,27 @@
+# Example deny-by-default policy.
+# Replace addresses with whatever your strategies should touch.
+
+[chains]
+allow = [8453]  # Base mainnet
+
+[contracts.8453]
+allow = [
+    # "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # USDC (Base)
+    # "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5",  # Aave V3 Pool (Base)
+]
+
+# Per-contract selector allowlist. Anything not listed is rejected.
+# [selectors."8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"]
+# allow = ["0x095ea7b3"]  # approve(address,uint256)
+
+[native_value.8453]
+# Cap raw ETH value per single action, in wei. 0 = no native value allowed.
+max_per_action = "0"
+
+# Cap cumulative ERC20 spend per run.
+# [erc20_spend."8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"]
+# max_per_run = "10000000"  # 10 USDC (6 decimals)
+
+[raw_call]
+allow_global = false
+allow = []

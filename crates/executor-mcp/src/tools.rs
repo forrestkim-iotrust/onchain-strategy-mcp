@@ -868,6 +868,23 @@ impl ExecutorServer {
             TriggerRegisterOutcome::Created(t) => (t, false),
             TriggerRegisterOutcome::AlreadyExists(t) => (t, true),
         };
+        // Live spawn: if newly registered AND enabled AND non-manual kind, start
+        // the worker now so the user doesn't need to restart the daemon.
+        if !already_exists
+            && trigger.enabled
+            && trigger.kind != executor_core::schema::trigger::TriggerKind::Manual
+        {
+            let mut pool = self.trigger_pool.lock().await;
+            if let Err(e) = pool.spawn(
+                &trigger,
+                self.trigger_events_tx.clone(),
+                &self.mempool_wss_url,
+            ) {
+                tracing::warn!(trigger_id = %trigger.id, kind = %trigger.kind.as_wire(), error = %e, "live-spawn failed; worker will start on next daemon boot");
+            } else {
+                tracing::info!(trigger_id = %trigger.id, kind = %trigger.kind.as_wire(), "trigger live-spawned");
+            }
+        }
         let body = serde_json::json!({
             "trigger_id": trigger.id,
             "created_at": trigger.created_at,

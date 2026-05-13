@@ -1,0 +1,44 @@
+# Operator runtime config — copy this entire `.local.example/` directory to
+# `.local/` and edit. `.local/` is gitignored.
+#
+#   cp -R .local.example .local
+#   $EDITOR .local/config.toml
+
+[logging]
+level = "info"
+
+[state]
+# Absolute path recommended — MCP server's CWD may differ from project root.
+path = "/REPLACE/WITH/ABSOLUTE/PATH/state.db"
+
+[evm]
+# Public Base RPC works for `latest` reads + broadcasts; for HISTORICAL block
+# reads (yield-snapshot backfill, etc.) you need an archive provider like
+# Alchemy:
+#   https://base-mainnet.g.alchemy.com/v2/<YOUR_KEY>
+rpc_url = "https://mainnet.base.org"
+call_timeout_ms = 8000
+# Address used in eth_call from-field during simulation. For non-noop
+# strategies, set to your burner address (EIP-55 checksummed).
+simulation_from = "0x0000000000000000000000000000000000000000"
+
+[policy]
+path = "/REPLACE/WITH/ABSOLUTE/PATH/.local/policy.toml"
+
+[signer]
+# Env-var NAME only (never the raw key value).
+private_key_env = "EXECUTOR_PRIVATE_KEY"
+receipt_timeout_ms = 120000
+
+[aa]
+# OPTIONAL. EIP-7702 delegate contract for multi-action batching.
+# Deploy `examples/contracts/BatchExec.sol` to your chain first and put the
+# deployed address here. When set AND a strategy returns >=2 actions, runs
+# bundle into a single 7702 transaction.
+# delegate = "0xYourBatchExecAddress"
+
+[trigger]
+# OPTIONAL. Required for `kind = "mempool"` or `kind = "log"` triggers.
+# Alchemy WSS endpoint for Base:
+#   wss://base-mainnet.g.alchemy.com/v2/<YOUR_KEY>
+# mempool_wss_url = "wss://..."

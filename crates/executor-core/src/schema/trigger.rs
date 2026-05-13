@@ -7,8 +7,20 @@
 //! When streams merge, the contents of this file are the contract; differences
 //! should be resolved in favor of Stream A's version.
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
+
+/// schemars schema generator for free-form JSON object fields (config payloads
+/// where the inner shape depends on the trigger kind). Without this, schemars
+/// emits `true`/empty schema for `serde_json::Value`, which strict JSON-Schema
+/// validators (e.g. Claude Code's MCP client) reject.
+fn free_form_object_schema(_: &mut SchemaGenerator) -> Schema {
+    serde_json::from_value(serde_json::json!({
+        "type": "object",
+        "additionalProperties": true,
+    }))
+    .expect("static free-form object schema")
+}
 
 /// Trigger source kinds. v1.2 spike ships `manual` + `interval`; remaining
 /// kinds reserve their wire strings so v1.3+ workers can land without
@@ -54,6 +66,7 @@ impl TriggerKind {
 pub struct RegisterTriggerInput {
     pub strategy_id: String,
     pub kind: TriggerKind,
+    #[schemars(schema_with = "free_form_object_schema")]
     pub config: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
