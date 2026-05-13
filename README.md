@@ -78,11 +78,11 @@ Claude calls the MCP tools, the runtime executes, and you see the journaled outc
 
 ---
 
-## 4. Real scenarios (these are already working)
+## 4. Real scenarios
 
 ### A. The auto-deposit funnel
 
-Set this up once: any ETH or USDC arriving at the wallet is automatically converted to USDC and supplied into Aave. A small ETH reserve stays for gas. After that, you do nothing — every drop that hits the wallet starts earning yield. Your only job is to send funds to the address.
+Ask Claude: *"when ETH or USDC arrives at my burner, auto-convert to USDC and supply it to Aave — keep ~$0.10 worth of ETH for gas."* Claude registers the strategy plus two log triggers, and the funnel runs itself from there. Every drop hitting the wallet starts earning yield. Your only job is to send funds to the address.
 
 ### B. The yield comparator
 
@@ -98,7 +98,7 @@ Ask Claude: *"watch the Aave oracle for ETH price updates. If price drops more t
 
 ### D. Atomic multi-step
 
-Some flows must happen together or not at all (approve, then use). Normally that's two transactions and a risk window between them. EIP-7702 (Ethereum, 2025) lets this runtime bundle them into a single transaction — both happen or neither happens.
+Ask Claude: *"supply 0.1 USDC from my burner to Aave."* Claude returns `[approve, supply]` as two actions; the runtime detects the multi-step plan and bundles them into a single EIP-7702 transaction automatically. Both land together or neither does — no risk window between the approve and the use.
 
 ---
 
