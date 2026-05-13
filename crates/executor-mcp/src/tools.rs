@@ -20,6 +20,7 @@ use executor_core::schema::{
         StrategyListItem, StrategyListResponse, StrategyRegisterInput, StrategyRegisterResponse,
         StrategyRunInput,
     },
+    trigger::{RegisterTriggerInput, TriggerKind, TriggerListFilter},
 };
 use executor_evm::{
     NormalizedAction, NormalizedActionKind, SimulationFailReason, SimulationOutcome,
@@ -31,7 +32,7 @@ use executor_policy::{
 use executor_signer::{LocalSignerConfig, LocalSignerHandle};
 use executor_state::{
     DecisionGate, DecisionVerdict as JournalDecisionVerdict, ExecutionActionEntry, RegisterOutcome,
-    StateError, StateStore, Strategy, StrategySummary,
+    StateError, StateStore, Strategy, StrategySummary, TriggerRegisterOutcome,
 };
 use rmcp::{
     ErrorData as McpError,
@@ -65,6 +66,33 @@ use crate::{
 pub struct StrategyListInput {
     #[serde(default)]
     pub include_deleted: Option<bool>,
+}
+
+// ─────────── v1.2 Trigger Core inline input types ───────────
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerIdInput {
+    pub trigger_id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerListInput {
+    #[serde(default)]
+    pub kind: Option<TriggerKind>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub strategy_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerEventsInput {
+    pub trigger_id: String,
+    #[serde(default)]
+    pub limit: Option<u64>,
 }
 
 // ─────────── v1.1 read tools (no policy, no journal — pure observation) ────
@@ -319,6 +347,46 @@ impl ExecutorServer {
         // STEP 1: validate input format (D-09).
         validate_strategy_id_format(&input.strategy_id).map_err(invalid_params)?;
 
+        // v1.2 Trigger Core (Stream D): delegate to the shared
+        // `run_strategy_with_event` pipeline. The MCP tool surfaces `event = None`;
+        // the trigger dispatcher passes `Some(payload)` so strategies can read
+        // `ctx.event`.
+        let (run_id, outcome) = self
+            .run_strategy_with_event(&input.strategy_id, None)
+            .await?;
+
+        // Re-read the run row to populate the response envelope.
+        let state = self.state.clone();
+        let rid_for_get = run_id.clone();
+        let run = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.get_run(&rid_for_get)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?
+        .ok_or_else(|| storage_error("run row vanished between insert and get"))?;
+
+        json_result(&StrategyRunResponse {
+            run_id: run.id,
+            strategy_id: run.strategy_id,
+            status: run.status,
+            started_at: run.started_at,
+            finished_at: run.finished_at.unwrap_or_default(),
+            outcome,
+        })
+    }
+
+    /// v1.2 Trigger Core (Stream D): full strategy-run pipeline parameterised
+    /// on an optional trigger event payload. The `#[tool] strategy_run`
+    /// wrapper calls this with `event = None`; the trigger dispatcher calls
+    /// this with `Some(payload)` so strategies can read `ctx.event` (Stream B).
+    /// Returns `(run_id, outcome)`. NOT a `#[tool]` — invoked only in-process.
+    pub(crate) async fn run_strategy_with_event(
+        &self,
+        strategy_id: &str,
+        event: Option<serde_json::Value>,
+    ) -> Result<(String, StrategyOutcome), McpError> {
         // STEP B (early — D-15 fail-closed): snapshot the policy. Cloning here
         // keeps the RwLock guard out of the spawn_blocking / .await boundary
         // (D-15d mutex hygiene). Defer the `None → policy_not_loaded` decision
@@ -327,7 +395,7 @@ impl ExecutorServer {
 
         // STEP 2: load strategy + check soft-delete.
         let state = self.state.clone();
-        let sid_for_load = input.strategy_id.clone();
+        let sid_for_load = strategy_id.to_string();
         let strategy: Strategy = tokio::task::spawn_blocking(move || {
             let store = state.blocking_lock();
             store.get_strategy_by_id(&sid_for_load)
@@ -337,8 +405,7 @@ impl ExecutorServer {
         .map_err(map_state_error)?
         .ok_or_else(|| {
             map_state_error(StateError::NotFound(format!(
-                "strategy {}",
-                input.strategy_id
+                "strategy {strategy_id}"
             )))
         })?;
         if strategy.deleted_at.is_some() {
@@ -384,6 +451,7 @@ impl ExecutorServer {
         let sid_for_ctx = strategy.id.clone();
         let sname_for_ctx = strategy.name.clone();
         let rid_for_ctx = run_id.clone();
+        let event_for_ctx = event.clone();
         let exec_result: Result<serde_json::Value, RuntimeError> =
             tokio::task::spawn_blocking(move || -> Result<serde_json::Value, RuntimeError> {
                 let mut runtime_ctx = RuntimeContext::new(
@@ -394,6 +462,9 @@ impl ExecutorServer {
                     RuntimeContext::default_clock(),
                 )
                 .with_evm(evm_provider, evm_config);
+                if let Some(ev) = event_for_ctx {
+                    runtime_ctx = runtime_ctx.with_event(ev);
+                }
                 let r = Sandbox::execute(&source, &mut runtime_ctx);
                 if let Err(flush_err) = runtime_ctx.flush() {
                     tracing::warn!(?flush_err, "RuntimeContext::flush failed after execute");
@@ -732,26 +803,7 @@ impl ExecutorServer {
         )
         .await?;
 
-        // STEP 9: re-read run row, build response.
-        let state = self.state.clone();
-        let rid_for_get = run_id.clone();
-        let run = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.get_run(&rid_for_get)
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?
-        .ok_or_else(|| storage_error("run row vanished between insert and get"))?;
-
-        json_result(&StrategyRunResponse {
-            run_id: run.id,
-            strategy_id: run.strategy_id,
-            status: run.status,
-            started_at: run.started_at,
-            finished_at: run.finished_at.unwrap_or_default(),
-            outcome,
-        })
+        Ok((run_id, outcome))
     }
 
     #[tool(
@@ -791,6 +843,174 @@ impl ExecutorServer {
         let body_str = serde_json::to_string(&body)
             .map_err(|e| storage_error(format!("policy_get encode: {e}")))?;
         Ok(CallToolResult::success(vec![Content::text(body_str)]))
+    }
+
+    // ─────────── TRIGGER TOOLS (v1.2 spike) ───────────
+
+    #[tool(
+        name = "trigger_register",
+        description = "Register a trigger bound to a strategy. Content-addressed (same strategy_id + kind + config + predicate yields the same trigger_id; returns `already_exists: true`). Workers are spawned by the daemon (Stream D)."
+    )]
+    async fn trigger_register(
+        &self,
+        Parameters(input): Parameters<RegisterTriggerInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let state = self.state.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut store = state.blocking_lock();
+            store.register_trigger(input)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        let (trigger, already_exists) = match outcome {
+            TriggerRegisterOutcome::Created(t) => (t, false),
+            TriggerRegisterOutcome::AlreadyExists(t) => (t, true),
+        };
+        let body = serde_json::json!({
+            "trigger_id": trigger.id,
+            "created_at": trigger.created_at,
+            "already_exists": already_exists,
+        });
+        json_result(&body)
+    }
+
+    #[tool(
+        name = "trigger_list",
+        description = "List registered triggers. Optional filters: `kind`, `enabled`, `strategy_id`."
+    )]
+    async fn trigger_list(
+        &self,
+        Parameters(input): Parameters<TriggerListInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let filter = TriggerListFilter {
+            kind: input.kind,
+            enabled: input.enabled,
+            strategy_id: input.strategy_id,
+        };
+        let state = self.state.clone();
+        let summaries = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_triggers(Some(&filter))
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        json_result(&serde_json::json!({ "triggers": summaries }))
+    }
+
+    #[tool(
+        name = "trigger_get",
+        description = "Get a trigger by id. Returns the full Trigger row including `config_json` and `predicate`."
+    )]
+    async fn trigger_get(
+        &self,
+        Parameters(input): Parameters<TriggerIdInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = input.trigger_id.clone();
+        let state = self.state.clone();
+        let row = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.get_trigger(&id)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        match row {
+            None => Err(map_state_error(StateError::NotFound(format!(
+                "trigger {}",
+                input.trigger_id
+            )))),
+            Some(t) => json_result(&t),
+        }
+    }
+
+    #[tool(
+        name = "trigger_delete",
+        description = "Hard-delete a trigger and its event history. Idempotent (returns `deleted: false` if the trigger was already absent)."
+    )]
+    async fn trigger_delete(
+        &self,
+        Parameters(input): Parameters<TriggerIdInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = input.trigger_id.clone();
+        let state = self.state.clone();
+        let deleted = tokio::task::spawn_blocking(move || {
+            let mut store = state.blocking_lock();
+            store.delete_trigger(&id)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        json_result(&serde_json::json!({ "deleted": deleted }))
+    }
+
+    #[tool(
+        name = "trigger_enable",
+        description = "Enable a trigger. Daemon (Stream D) will resume the worker on the next pool sync."
+    )]
+    async fn trigger_enable(
+        &self,
+        Parameters(input): Parameters<TriggerIdInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = input.trigger_id.clone();
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut store = state.blocking_lock();
+            store.set_trigger_enabled(&id, true)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        json_result(&serde_json::json!({ "enabled": true }))
+    }
+
+    #[tool(
+        name = "trigger_disable",
+        description = "Disable a trigger. Worker is aborted by the daemon (Stream D); CRUD state persists."
+    )]
+    async fn trigger_disable(
+        &self,
+        Parameters(input): Parameters<TriggerIdInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = input.trigger_id.clone();
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut store = state.blocking_lock();
+            store.set_trigger_enabled(&id, false)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        json_result(&serde_json::json!({ "enabled": false }))
+    }
+
+    #[tool(
+        name = "trigger_events",
+        description = "List recorded events for a trigger, most recent first. `limit` defaults to 50 and is capped at 500."
+    )]
+    async fn trigger_events(
+        &self,
+        Parameters(input): Parameters<TriggerEventsInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = input.limit.unwrap_or(50).min(500);
+        if limit == 0 {
+            return Err(invalid_params("limit must be > 0"));
+        }
+        let id = input.trigger_id.clone();
+        let state = self.state.clone();
+        let events = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_trigger_events(&id, limit)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        json_result(&serde_json::json!({ "events": events }))
     }
 
     // ─────────── EVM READ TOOLS (no policy, no journal) ───────────
@@ -1225,6 +1445,7 @@ pub async fn execute_approved_actions(
     // sending N sequential txs. All action rows record the same tx_hash
     // and receipt status.
     let exec_count = normalized.iter().filter(|n| n.is_some()).count();
+    #[allow(clippy::collapsible_if)]
     if let Some(delegate) = aa_delegate {
         if exec_count >= 2 {
             let calls: Vec<(alloy_primitives::Address, alloy_primitives::U256, alloy_primitives::Bytes)> =

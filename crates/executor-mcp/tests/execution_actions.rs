@@ -78,6 +78,7 @@ async fn execution_actions_signer_not_configured_records_execution_action_error(
         None,
         31337,
         &normalized,
+        None,
     )
     .await
     .expect_err("missing signer config fails");
