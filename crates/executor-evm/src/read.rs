@@ -31,6 +31,63 @@ use alloy_primitives::{Address, Bytes};
 use crate::dyn_abi::{dyn_sol_to_js_value, js_value_to_dyn_sol};
 use crate::{EvmConfig, EvmError};
 
+/// v1.1 read helper: native-coin balance. Mirrors `cast balance`.
+pub async fn get_native_balance(
+    provider: Arc<DynProvider>,
+    addr: Address,
+    tag: BlockTag,
+) -> Result<alloy_primitives::U256, EvmError> {
+    let mut call = provider.get_balance(addr);
+    call = match tag {
+        BlockTag::Latest => call,
+        BlockTag::Pending => call.pending(),
+        BlockTag::Number(n) => call.block_id(BlockId::Number(n.into())),
+    };
+    call.await.map_err(|e| EvmError::Transport {
+        detail_for_log: format!("eth_getBalance: {e}"),
+    })
+}
+
+/// v1.1 read helper: bytecode at address. Returns empty bytes for EOA without
+/// 7702 delegation; `0xef0100<delegate>` for delegated EOA.
+pub async fn get_code(
+    provider: Arc<DynProvider>,
+    addr: Address,
+    tag: BlockTag,
+) -> Result<Bytes, EvmError> {
+    let mut call = provider.get_code_at(addr);
+    call = match tag {
+        BlockTag::Latest => call,
+        BlockTag::Pending => call.pending(),
+        BlockTag::Number(n) => call.block_id(BlockId::Number(n.into())),
+    };
+    call.await.map_err(|e| EvmError::Transport {
+        detail_for_log: format!("eth_getCode: {e}"),
+    })
+}
+
+/// v1.1 read helper: tx receipt by hash. `None` = pending or unknown.
+pub async fn get_tx_receipt(
+    provider: Arc<DynProvider>,
+    hash: alloy_primitives::B256,
+) -> Result<Option<serde_json::Value>, EvmError> {
+    let maybe = provider
+        .get_transaction_receipt(hash)
+        .await
+        .map_err(|e| EvmError::Transport {
+            detail_for_log: format!("eth_getTransactionReceipt: {e}"),
+        })?;
+    match maybe {
+        None => Ok(None),
+        Some(r) => serde_json::to_value(r)
+            .map(Some)
+            .map_err(|e| EvmError::Decode {
+                category: std::borrow::Cow::Borrowed("receipt_encode"),
+                detail_for_log: format!("{e}"),
+            }),
+    }
+}
+
 /// Input shape mirroring the JS-facing `ctx.evm.readContract` signature
 /// (Phase 4 D-05). The strategy-js host binding builds this from the JS
 /// argument object and stringifies array-form `abi` to canonical JSON.

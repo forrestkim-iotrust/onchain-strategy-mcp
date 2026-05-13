@@ -1692,6 +1692,7 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "alloy-primitives",
+ "alloy-sol-types",
  "executor-core",
  "reqwest",
  "serde",

@@ -60,6 +60,9 @@ pub struct ExecutorServer {
     /// because future `policy_update` (v2) will swap the value while
     /// `strategy_run` reads concurrently.
     pub(crate) policy: Arc<RwLock<Option<LoadedPolicy>>>,
+    /// v1.2 spike: optional EIP-7702 delegate. When `Some`, multi-action runs
+    /// are bundled into one tx via `BatchExec.executeBatch`.
+    pub(crate) aa_delegate: Option<alloy_primitives::Address>,
 }
 
 impl ExecutorServer {
@@ -88,6 +91,7 @@ impl ExecutorServer {
             evm_provider: Arc::new(tokio::sync::OnceCell::new()),
             chain_id_cell: Arc::new(tokio::sync::OnceCell::new()),
             policy: Arc::new(RwLock::new(None)),
+            aa_delegate: None,
         })
     }
 
@@ -127,6 +131,19 @@ impl ExecutorServer {
             }
         };
         srv.policy = Arc::new(RwLock::new(loaded));
+        // v1.2 spike: optional [aa].delegate. Parsed via lenient EIP-55
+        // (same as evm.simulation_from); errors are logged but never block boot.
+        if let Some(raw) = full_cfg.aa.delegate.as_deref() {
+            match raw.parse::<alloy_primitives::Address>() {
+                Ok(addr) => {
+                    tracing::info!(delegate = %addr, "aa delegate loaded — multi-action runs will bundle via EIP-7702");
+                    srv.aa_delegate = Some(addr);
+                }
+                Err(e) => {
+                    tracing::error!(raw = %raw, error = %e, "aa.delegate parse failed — multi-action runs will use per-action path");
+                }
+            }
+        }
         Ok(srv)
     }
 

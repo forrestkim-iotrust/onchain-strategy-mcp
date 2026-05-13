@@ -67,6 +67,94 @@ pub struct StrategyListInput {
     pub include_deleted: Option<bool>,
 }
 
+// ─────────── v1.1 read tools (no policy, no journal — pure observation) ────
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvmBalanceInput {
+    /// EOA or contract address to inspect.
+    pub address: String,
+    /// Block tag — "latest" (default), "pending", or decimal block number.
+    #[serde(default)]
+    pub block: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvmCodeInput {
+    pub address: String,
+    #[serde(default)]
+    pub block: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvmReceiptInput {
+    /// Transaction hash (0x-prefixed 32-byte hex).
+    pub tx_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvmReadInput {
+    pub address: String,
+    /// ABI JSON array — must contain the function fragment.
+    pub abi: serde_json::Value,
+    pub function: String,
+    #[serde(default)]
+    pub args: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub block: Option<String>,
+}
+
+/// `evm_view` input — ad-hoc JS function evaluated in a read-only sandbox.
+///
+/// The source must evaluate to `(ctx) => any` (D-05 Shape-B). Unlike
+/// `strategy_run`, the return value is NOT validated as `Action[]` — it's
+/// passed through as JSON. No policy, no journaling, no signer.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct EvmViewInput {
+    /// JavaScript source — same shape as a strategy. Max 256 KiB.
+    pub source: String,
+}
+
+/// Minimal `CtxHost` for `evm_view`. Has the EVM provider but does not
+/// journal (no run_id, no DB writes). `append_log` collects log lines for
+/// inclusion in the response.
+struct ViewHost {
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    evm_config: executor_evm::EvmConfig,
+    logs: Vec<String>,
+}
+
+impl strategy_js::CtxHost for ViewHost {
+    fn strategy_id(&self) -> &str { "view" }
+    fn strategy_name(&self) -> &str { "view" }
+    fn run_id(&self) -> &str { "view" }
+    fn now_millis(&self) -> i64 { 0 }
+    fn append_log(&mut self, m: String) { self.logs.push(m); }
+    fn provider(&self) -> Option<&std::sync::Arc<executor_evm::DynProvider>> {
+        self.provider.as_ref()
+    }
+    fn evm_config(&self) -> &executor_evm::EvmConfig {
+        &self.evm_config
+    }
+}
+
+fn parse_block_tag(s: Option<&str>) -> Result<executor_evm::BlockTag, McpError> {
+    use executor_evm::BlockTag;
+    match s {
+        None => Ok(BlockTag::Latest),
+        Some("latest") | Some("") => Ok(BlockTag::Latest),
+        Some("pending") => Ok(BlockTag::Pending),
+        Some(other) => other
+            .parse::<u64>()
+            .map(BlockTag::Number)
+            .map_err(|_| invalid_params(format!("invalid block tag: {other}"))),
+    }
+}
+
 #[tool_router(vis = "pub(crate)")]
 impl ExecutorServer {
     // ─────────── STRATEGY TOOLS (Phase 2 — storage-backed) ───────────
@@ -493,11 +581,37 @@ impl ExecutorServer {
                     }
 
                     approved_normalized = normalized.clone();
+                    // v1.2 spike: when EIP-7702 batching is active, per-action
+                    // simulation against current chain state is incorrect (state
+                    // changes from earlier actions are not visible). Skip the
+                    // per-action sim loop; the batched tx itself will surface
+                    // any revert at broadcast time. Stateful batch-sim is a
+                    // follow-up (eth_simulateV1).
+                    let aa_batch_active = self.aa_delegate.is_some()
+                        && normalized.iter().filter(|n| n.is_some()).count() >= 2;
                     let mut decision_pos = 0usize;
                     for (idx, normalized_action) in normalized.iter().enumerate() {
                         let Some(na) = normalized_action else {
                             continue;
                         };
+                        if aa_batch_active {
+                            record_decision_row(
+                                &self.state,
+                                &run_id,
+                                idx as i64,
+                                DecisionGate::Simulation,
+                                JournalDecisionVerdict::Skipped,
+                                None,
+                                Some("simulation skipped: EIP-7702 batch bundling"),
+                                None,
+                            )
+                            .await?;
+                            if let Some(d) = decisions.get_mut(decision_pos) {
+                                d.simulation = GateVerdict::Skipped;
+                            }
+                            decision_pos += 1;
+                            continue;
+                        }
                         let sim = simulate_one_latest(
                             provider.clone(),
                             &self.evm_config,
@@ -602,6 +716,7 @@ impl ExecutorServer {
                 signer_config.as_ref(),
                 chain_id,
                 &approved_normalized,
+                self.aa_delegate,
             )
             .await?;
         }
@@ -676,6 +791,154 @@ impl ExecutorServer {
         let body_str = serde_json::to_string(&body)
             .map_err(|e| storage_error(format!("policy_get encode: {e}")))?;
         Ok(CallToolResult::success(vec![Content::text(body_str)]))
+    }
+
+    // ─────────── EVM READ TOOLS (no policy, no journal) ───────────
+
+    #[tool(
+        name = "evm_balance",
+        description = "Read the native-coin balance of an address. Returns a decimal string (wei)."
+    )]
+    async fn evm_balance(
+        &self,
+        Parameters(input): Parameters<EvmBalanceInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let addr = input
+            .address
+            .parse::<Address>()
+            .map_err(|e| invalid_params(format!("address parse: {e}")))?;
+        let provider = self
+            .evm_provider()
+            .await
+            .map_err(|e| storage_error(format!("provider: {e}")))?;
+        let tag = parse_block_tag(input.block.as_deref())?;
+        let bal = executor_evm::get_native_balance(provider, addr, tag)
+            .await
+            .map_err(|e| map_evm_error(e, "evm_balance"))?;
+        let body = serde_json::json!({
+            "address": format!("{:?}", addr),
+            "balance": bal.to_string(),
+            "block": input.block.unwrap_or_else(|| "latest".into()),
+        });
+        json_result(&body)
+    }
+
+    #[tool(
+        name = "evm_code",
+        description = "Read contract bytecode at an address. Returns `\"0x\"` for EOAs without 7702 delegation, or `0xef0100<delegate>` for EIP-7702 EOAs."
+    )]
+    async fn evm_code(
+        &self,
+        Parameters(input): Parameters<EvmCodeInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let addr = input
+            .address
+            .parse::<Address>()
+            .map_err(|e| invalid_params(format!("address parse: {e}")))?;
+        let provider = self
+            .evm_provider()
+            .await
+            .map_err(|e| storage_error(format!("provider: {e}")))?;
+        let tag = parse_block_tag(input.block.as_deref())?;
+        let code = executor_evm::get_code(provider, addr, tag)
+            .await
+            .map_err(|e| map_evm_error(e, "evm_code"))?;
+        let hex = format!("0x{}", alloy_primitives::hex::encode(code));
+        let body = serde_json::json!({
+            "address": format!("{:?}", addr),
+            "code": hex,
+            "block": input.block.unwrap_or_else(|| "latest".into()),
+        });
+        json_result(&body)
+    }
+
+    #[tool(
+        name = "evm_receipt",
+        description = "Fetch a transaction receipt by hash. Returns `{found: false}` when the tx is unknown or still pending."
+    )]
+    async fn evm_receipt(
+        &self,
+        Parameters(input): Parameters<EvmReceiptInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let hash = input
+            .tx_hash
+            .parse::<alloy_primitives::B256>()
+            .map_err(|e| invalid_params(format!("tx_hash parse: {e}")))?;
+        let provider = self
+            .evm_provider()
+            .await
+            .map_err(|e| storage_error(format!("provider: {e}")))?;
+        let body = match executor_evm::get_tx_receipt(provider, hash)
+            .await
+            .map_err(|e| map_evm_error(e, "evm_receipt"))?
+        {
+            None => serde_json::json!({ "found": false, "tx_hash": format!("0x{:x}", hash) }),
+            Some(r) => serde_json::json!({ "found": true, "receipt": r }),
+        };
+        json_result(&body)
+    }
+
+    #[tool(
+        name = "evm_view",
+        description = "Run an ad-hoc JavaScript view function in the same sandbox as strategies. Source must evaluate to `(ctx) => any`. Return value is passed through as JSON. NO policy, NO journaling, NO signer — read-only observation. Use for portfolio/position snapshots, multi-asset summaries."
+    )]
+    async fn evm_view(
+        &self,
+        Parameters(input): Parameters<EvmViewInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let provider = match self.evm_provider().await {
+            Ok(p) => Some(p),
+            Err(e) => return Err(map_evm_error(e, "evm_view")),
+        };
+        let evm_config = self.evm_config.clone();
+        let source = input.source;
+        let exec_result: Result<(serde_json::Value, Vec<String>), RuntimeError> =
+            tokio::task::spawn_blocking(move || {
+                let mut host = ViewHost {
+                    provider,
+                    evm_config,
+                    logs: Vec::new(),
+                };
+                let value = Sandbox::execute(&source, &mut host)?;
+                Ok((value, host.logs))
+            })
+            .await
+            .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?;
+        let (value, logs) = exec_result.map_err(|e| map_runtime_error(e, "view"))?;
+        let body = serde_json::json!({
+            "result": value,
+            "logs": logs,
+        });
+        json_result(&body)
+    }
+
+    #[tool(
+        name = "evm_read",
+        description = "Read a contract function via eth_call. Accepts the same ABI shape as `ctx.evm.readContract` inside strategies. Returns the decoded output as JSON."
+    )]
+    async fn evm_read(
+        &self,
+        Parameters(input): Parameters<EvmReadInput>,
+    ) -> Result<CallToolResult, McpError> {
+        let provider = self
+            .evm_provider()
+            .await
+            .map_err(|e| storage_error(format!("provider: {e}")))?;
+        let tag = parse_block_tag(input.block.as_deref())?;
+        let abi_json = serde_json::to_string(&input.abi)
+            .map_err(|e| invalid_params(format!("abi serialize: {e}")))?;
+        let req = executor_evm::ReadContractInput {
+            address: input.address,
+            abi_json,
+            function: input.function,
+            args: input.args,
+            block_tag: tag,
+        };
+        let decoded = executor_evm::read_contract(provider, &self.evm_config, req)
+            .await
+            .map_err(|e| map_evm_error(e, "evm_read"))?;
+        let body = serde_json::json!({ "result": decoded });
+        json_result(&body)
     }
 }
 
@@ -910,6 +1173,7 @@ pub async fn execute_approved_actions(
     signer_config: Option<&LocalSignerConfig>,
     chain_id: u64,
     normalized: &[Option<NormalizedAction>],
+    aa_delegate: Option<alloy_primitives::Address>,
 ) -> Result<(), McpError> {
     if normalized.iter().all(Option::is_none) {
         return Ok(());
@@ -956,6 +1220,111 @@ pub async fn execute_approved_actions(
     let signer_address = signer.signer_address_string();
     let receipt_timeout = std::time::Duration::from_millis(signer_config.receipt_timeout_ms);
 
+    // v1.2 spike: EIP-7702 batch path. When delegate is configured AND
+    // there are >=2 executable actions, bundle them into one tx instead of
+    // sending N sequential txs. All action rows record the same tx_hash
+    // and receipt status.
+    let exec_count = normalized.iter().filter(|n| n.is_some()).count();
+    if let Some(delegate) = aa_delegate {
+        if exec_count >= 2 {
+            let calls: Vec<(alloy_primitives::Address, alloy_primitives::U256, alloy_primitives::Bytes)> =
+                normalized
+                    .iter()
+                    .filter_map(|n| n.as_ref())
+                    .map(|na| {
+                        let to = na
+                            .tx
+                            .to
+                            .as_ref()
+                            .and_then(|k| k.to().copied())
+                            .unwrap_or_default();
+                        let value = na.tx.value.unwrap_or_default();
+                        let data = na
+                            .tx
+                            .input
+                            .input
+                            .clone()
+                            .or_else(|| na.tx.input.data.clone())
+                            .unwrap_or_default();
+                        (to, value, data)
+                    })
+                    .collect();
+            let pending = match signer.send_7702_batch(rpc_url, delegate, calls).await {
+                Ok(pending) => pending,
+                Err(err) => {
+                    let kind = err.execution_error_kind();
+                    record_execution_error(
+                        state,
+                        run_id,
+                        first_action_index,
+                        Some(&signer_address),
+                        kind,
+                        Some(kind),
+                    )
+                    .await?;
+                    record_runtime_error(state, run_id, kind).await?;
+                    transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+                    return Err(strategy_runtime_error(kind, kind, run_id));
+                }
+            };
+            let tx_hash = pending.tx_hash.to_string();
+            for (idx, na) in normalized.iter().enumerate() {
+                if na.is_none() {
+                    continue;
+                }
+                record_execution_broadcast(state, run_id, idx as i64, &signer_address, &tx_hash)
+                    .await?;
+            }
+            let receipt = match signer.wait_for_receipt(pending, receipt_timeout).await {
+                Ok(receipt) => receipt,
+                Err(err) => {
+                    let kind = err.execution_error_kind();
+                    record_execution_error(
+                        state,
+                        run_id,
+                        first_action_index,
+                        Some(&signer_address),
+                        kind,
+                        Some(kind),
+                    )
+                    .await?;
+                    record_runtime_error(state, run_id, kind).await?;
+                    transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+                    return Err(strategy_runtime_error(kind, kind, run_id));
+                }
+            };
+            for (idx, na) in normalized.iter().enumerate() {
+                if na.is_none() {
+                    continue;
+                }
+                record_execution_receipt_success(
+                    state,
+                    run_id,
+                    idx as i64,
+                    receipt.receipt_status.as_str(),
+                    &receipt.gas_used,
+                )
+                .await?;
+            }
+            if receipt.receipt_status == executor_signer::LocalReceiptStatus::Reverted {
+                record_execution_error(
+                    state,
+                    run_id,
+                    first_action_index,
+                    Some(&signer_address),
+                    "receipt_failed",
+                    Some("reverted"),
+                )
+                .await?;
+                record_runtime_error(state, run_id, "receipt_failed").await?;
+                transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+                return Err(strategy_runtime_error("receipt_failed", "reverted", run_id));
+            }
+            return Ok(());
+        }
+    }
+
+    let _ = chain_id; // (used implicitly by signer construction above)
     for (idx, normalized_action) in normalized.iter().enumerate() {
         let Some(na) = normalized_action else {
             continue;

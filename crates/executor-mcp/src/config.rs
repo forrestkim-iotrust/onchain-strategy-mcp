@@ -37,6 +37,20 @@ pub struct Config {
     /// at the signing boundary; config parsing never reads private-key values.
     #[serde(default)]
     pub signer: SignerSection,
+    /// v1.2 spike: EIP-7702 account abstraction. When `delegate` is set,
+    /// strategy_run bundles multi-action runs into a single 7702 batch tx.
+    #[serde(default)]
+    pub aa: AaSection,
+}
+
+/// `[aa]` section — EIP-7702 account abstraction config. Optional.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AaSection {
+    /// BatchExec contract address. When set AND a run has >=2 actions,
+    /// strategy_run sends ONE EIP-7702 transaction delegating burner to
+    /// this contract and calling executeBatch(calls) instead of N sequential txs.
+    pub delegate: Option<String>,
 }
 
 /// `[signer]` section — stores a non-secret environment-variable reference.

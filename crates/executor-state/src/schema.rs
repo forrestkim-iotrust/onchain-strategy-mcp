@@ -116,6 +116,36 @@ CREATE TABLE IF NOT EXISTS execution_actions (
     UNIQUE (run_id, action_index)
 );
 CREATE INDEX IF NOT EXISTS idx_execution_actions_run_id ON execution_actions(run_id);
+
+-- v1.2 Trigger Core: unified trigger registry + event log.
+-- `id` is content-addressed: hex(sha256(strategy_id || kind || config_json || predicate_js)).
+-- Same source ⇒ same id ⇒ idempotent register.
+CREATE TABLE IF NOT EXISTS triggers (
+    id              TEXT PRIMARY KEY,
+    strategy_id     TEXT NOT NULL REFERENCES strategies(id),
+    kind            TEXT NOT NULL,
+    config_json     TEXT NOT NULL,
+    predicate_js    TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    last_fired_at   TEXT,
+    created_at      TEXT NOT NULL,
+    dedup_window_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_triggers_strategy_id ON triggers(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_triggers_enabled_kind ON triggers(enabled, kind);
+
+CREATE TABLE IF NOT EXISTS trigger_events (
+    id              TEXT PRIMARY KEY,
+    trigger_id      TEXT NOT NULL REFERENCES triggers(id),
+    event_json      TEXT,
+    fired_at        TEXT NOT NULL,
+    run_id          TEXT,
+    dedup_key       TEXT,
+    skipped_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_trigger_events_trigger_id ON trigger_events(trigger_id);
+CREATE INDEX IF NOT EXISTS idx_trigger_events_dedup
+    ON trigger_events(trigger_id, dedup_key, fired_at);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {

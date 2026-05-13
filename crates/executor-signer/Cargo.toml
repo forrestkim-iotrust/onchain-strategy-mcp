@@ -8,8 +8,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-alloy = { version = "2.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls", "signer-local"] }
+alloy = { version = "2.0", default-features = false, features = ["provider-http", "rpc-types-eth", "reqwest-rustls-tls", "signer-local", "eips"] }
 alloy-primitives = "1"
+alloy-sol-types = "1"
 executor-core = { path = "../executor-core" }
 serde = { workspace = true }
 thiserror = { workspace = true }

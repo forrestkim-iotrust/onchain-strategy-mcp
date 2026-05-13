@@ -1,0 +1,32 @@
+# Base mainnet (chain 8453) minimal policy for first mainnet dogfood.
+# Covers BOTH: (A) USDC approve+supply to Aave V3 Pool, (B) native self-transfer.
+# Tight by design — burner-only, micro amounts.
+
+[chains]
+allow = [8453]
+
+[contracts.8453]
+allow = [
+    "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", # USDC (native Base)
+    "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5", # Aave V3 Pool (Base)
+]
+
+# USDC: allow approve() only.
+[selectors."8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"]
+allow = ["0x095ea7b3"] # approve(address,uint256)
+
+# Aave V3 Pool: allow supply() only.
+[selectors."8453:0xA238Dd80C259a72e81d7e4664a9801593F98d1c5"]
+allow = ["0x617ba037"] # supply(address,uint256,address,uint16)
+
+# Native value: cap self-transfer at 0.0001 ETH (matches funded amount).
+[native_value.8453]
+max_per_action = "100000000000000"
+
+# USDC spend cap per run: 0.1 USDC (6 decimals).
+[erc20_spend."8453:0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"]
+max_per_run = "100000"
+
+[raw_call]
+allow_global = false
+allow = []

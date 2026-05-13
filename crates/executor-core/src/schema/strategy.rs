@@ -50,6 +50,7 @@ pub use StrategyRunInput as StrategyRunOnceInput;
 /// `strategy_id` or the human-friendly `name` (active strategies only).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged, deny_unknown_fields)]
+#[schemars(extend("type" = "object"))]
 pub enum StrategyGetInput {
     ById { strategy_id: String },
     ByName { name: String },

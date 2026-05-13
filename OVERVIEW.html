@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>onchain-strategy-mcp — Project Overview</title>
+<style>
+  :root { color-scheme: light dark; --fg:#111; --muted:#6b7280; --bd:#e5e7eb; --bg:#fff; --accent:#1d4ed8; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e5e7eb; --muted:#9ca3af; --bd:#27272a; --bg:#0a0a0a; --accent:#60a5fa; } }
+  * { box-sizing: border-box; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; max-width: 1040px; margin: 2rem auto; padding: 0 1.25rem; line-height: 1.55; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 1.9rem; margin: 0 0 .25rem; letter-spacing: -.01em; }
+  h2 { font-size: 1.15rem; margin: 2rem 0 .6rem; border-bottom: 1px solid var(--bd); padding-bottom: .35rem; }
+  h3 { font-size: 1rem; margin: 1.2rem 0 .4rem; }
+  .sub { color: var(--muted); margin-bottom: 1.25rem; }
+  .grid { display: grid; gap: 1rem; }
+  .g3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+  .g2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  @media (max-width: 760px) { .g3, .g2 { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--bd); border-radius: 10px; padding: .85rem 1rem; background: var(--bg); }
+  .num { font-size: 1.6rem; font-weight: 700; line-height: 1.1; }
+  .lbl { color: var(--muted); font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; }
+  table { width: 100%; border-collapse: collapse; margin: .5rem 0 1rem; }
+  th, td { text-align: left; padding: .5rem .55rem; border-bottom: 1px solid var(--bd); vertical-align: top; font-size: .92rem; }
+  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  code { background: rgba(127,127,127,.14); padding: .08rem .35rem; border-radius: 4px; font-size: .88em; }
+  .badge { display: inline-block; padding: .12rem .55rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+  .b-done { background:#d1fae5; color:#065f46; }
+  .b-prog { background:#fef3c7; color:#854d0e; }
+  .b-todo { background:#e5e7eb; color:#374151; }
+  .b-plan { background:#dbeafe; color:#1e40af; }
+  ul { padding-left: 1.15rem; margin: .35rem 0; }
+  li { margin: .2rem 0; }
+  .pill { display:inline-block; border:1px solid var(--bd); border-radius:6px; padding:.05rem .4rem; margin-right:.25rem; font-size:.78rem; color: var(--muted); }
+  .progress { background: var(--bd); border-radius: 999px; height: 8px; overflow: hidden; margin: .35rem 0 .15rem; }
+  .progress > div { background: var(--accent); height: 100%; }
+  .quote { border-left: 3px solid var(--accent); padding: .35rem .8rem; color: var(--muted); margin: .5rem 0; }
+</style>
+</head>
+<body>
+
+<h1>onchain-strategy-mcp</h1>
+<div class="sub">
+  외부 AI agent가 작성한 EVM 자동화 전략을 안전하게 실행하는 local-first MCP 런타임.
+  <br/>
+  <span class="pill">Rust 2024</span><span class="pill">rmcp 1.5 stdio</span><span class="pill">QuickJS sandbox</span><span class="pill">alloy</span><span class="pill">SQLite journal</span>
+</div>
+
+<div class="grid g3">
+  <div class="card"><div class="lbl">Milestone</div><div class="num">v1.1</div>Adoption — distribution / burner UX / dogfood</div>
+  <div class="card"><div class="lbl">v1.0 상태</div><div class="num"><span class="badge b-done">Shipped</span></div>2026-05-04</div>
+  <div class="card"><div class="lbl">Tests</div><div class="num">512</div>workspace tests · clippy clean</div>
+</div>
+
+<div class="quote">
+  "Agent는 trade를 찾고, 런타임은 wallet 권한을 통제한다."<br/>
+  전략·venue·bridge·route는 agent의 책임. 런타임은 검증 → 시뮬 → policy → 로컬 서명 → 브로드캐스트 → receipt → journal.
+</div>
+
+<h2>경계 (무엇이 아닌가)</h2>
+<ul>
+  <li><b>아니다:</b> dashboard, marketplace, hosted custody, 지갑 제품, alpha generation agent</li>
+  <li><b>이다:</b> 외부 agent가 EVM 위에서 plan을 안전하게 실행할 수 있게 하는 execution 레이어</li>
+  <li>v1 wallet 경계: burner-only (session wallet / Safe / smart-account 통합은 deferred)</li>
+</ul>
+
+<h2>v1.0 MVP — Shipped</h2>
+<table>
+  <thead><tr><th>#</th><th>Phase</th><th>Plans</th><th>완료</th><th>비고</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>MCP Runtime Surface</td><td>3/3</td><td>2026-04-24</td><td>rmcp 1.5 stdio: 8 tools · 3 resource templates · 2 prompts</td></tr>
+    <tr><td>2</td><td>Strategy State and Journal</td><td>3/3</td><td>2026-04-26</td><td>SQLite store + run lifecycle</td></tr>
+    <tr><td>3</td><td>JavaScript Strategy Runner</td><td>3/3</td><td>2026-04-27</td><td>QuickJS sandbox · D-11 intrinsic scrub · timeout/oom/stack/exception</td></tr>
+    <tr><td>4</td><td>EVM Context and Actions</td><td>4/4</td><td>2026-04-27</td><td>ctx.evm.readContract · ERC20/native helpers · 5 Action variants · ctx.units / ctx.address</td></tr>
+    <tr><td>5</td><td>Simulation and Policy Gate</td><td>5/5</td><td>2026-04-28</td><td>simulate → deny-by-default policy · 6-차원 정책 stdio grid · STJ-05 journaling</td></tr>
+    <tr><td>6</td><td>Local Managed Execution</td><td>3/3</td><td>2026-04-29</td><td>local signer · broadcast · receipt/status</td></tr>
+    <tr><td>7</td><td>Examples, Tests, Documentation</td><td>3/3 + UAT 5/5</td><td>2026-05-04</td><td>anvil examples · safety regression · README / AGENTS / config.example</td></tr>
+  </tbody>
+</table>
+
+<h2>v1.1 Adoption — Current Milestone</h2>
+<div class="sub">
+  목표: <i>"AI로 에이전트 트레이딩 해보고 싶은데…"</i>로 시작하는 사람이 <b>5분 안에 첫 receipt</b>를 본다.
+</div>
+
+<div class="grid g2">
+
+  <div class="card">
+    <div class="lbl">Phase 8 · <span class="badge b-plan">Planning</span></div>
+    <h3>Distribution + Burner UX</h3>
+    <ul>
+      <li>GitHub Releases 프리빌트 + 체크섬 install 스크립트</li>
+      <li><code>claude mcp add</code> 원라이너</li>
+      <li><code>osmcp init</code> · <code>osmcp burner new</code></li>
+      <li>OS keychain or 0600 keystore · BURNER.md 위협모델</li>
+    </ul>
+    <span class="pill">DIST-01..04</span><span class="pill">BUR-01..04</span>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Phase 9 · <span class="badge b-todo">Not started</span></div>
+    <h3>Real-network starter strategies</h3>
+    <ul>
+      <li>Base/OP Sepolia testnet self-transfer</li>
+      <li>매칭 testnet policy</li>
+      <li>Base/Arbitrum 메인넷 burner policy 템플릿 (USDC/WETH allowlist, raw_call disabled)</li>
+    </ul>
+    <span class="pill">NET-01..04</span>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Phase 10 · <span class="badge b-todo">Not started</span></div>
+    <h3>Quickstart + Demo</h3>
+    <ul>
+      <li>README 5-분 Quickstart 재작성</li>
+      <li>anvil은 <code>docs/LOCAL-DEV.md</code>로 이동</li>
+      <li>≤ 90s Claude Code 자연어 데모 임베드</li>
+    </ul>
+    <span class="pill">QSD-01..04</span>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Phase 11 · <span class="badge b-todo">Not started</span></div>
+    <h3>Dogfood + Run-2 / Show-1</h3>
+    <ul>
+      <li>Claude Code 유저 5명 install 플레이북</li>
+      <li>72시간 Run-2 · Show-1 추적</li>
+      <li>GO/NO-GO 결정문 (Run-2 ≥ 2 AND Show-1 ≥ 1 → v2 시작)</li>
+    </ul>
+    <span class="pill">DOG-01..03</span>
+  </div>
+
+</div>
+
+<h2>Architecture (v1.0)</h2>
+<table>
+  <thead><tr><th>Crate</th><th>책임</th></tr></thead>
+  <tbody>
+    <tr><td><code>executor-core</code></td><td>순수 도메인 — Action/Run/Outcome 타입. 외부 dep 없음.</td></tr>
+    <tr><td><code>executor-state</code></td><td>SQLite store · run lifecycle · journal_* 테이블.</td></tr>
+    <tr><td><code>executor-policy</code></td><td>deny-by-default policy gate · ABI 인코딩 검증. alloy-free.</td></tr>
+    <tr><td><code>executor-evm</code></td><td>alloy Provider · generic read/call · ERC20/native helper.</td></tr>
+    <tr><td><code>executor-signer</code></td><td>로컬 hot-wallet 서명 · 브로드캐스트 · receipt.</td></tr>
+    <tr><td><code>executor-mcp</code></td><td>rmcp 1.5 stdio 서버 · 8 tools · 3 resource templates · 2 prompts.</td></tr>
+    <tr><td><code>strategy-js</code></td><td>QuickJS sandbox · ctx API · 호스트 access 차단.</td></tr>
+  </tbody>
+</table>
+
+<h2>실행 경계 (한 줄)</h2>
+<div class="quote">
+  <code>JS 전략 → Action[] → validate → simulate → policy → sign → broadcast → receipt → journal</code>
+</div>
+
+<h2>Deferred</h2>
+<table>
+  <tbody>
+    <tr><td>Execution</td><td>External signer / detached execution</td></tr>
+    <tr><td>Runtime</td><td>Scheduler / reconcile loops</td></tr>
+    <tr><td>DX</td><td>TypeScript compiler</td></tr>
+    <tr><td>Product</td><td>Dashboard / marketplace</td></tr>
+    <tr><td>Wallet</td><td>Session wallet / Safe / smart-account</td></tr>
+  </tbody>
+</table>
+
+<h2>Distribution Strategy</h2>
+<ul>
+  <li>1차 GTM: <b>Claude Code MCP install</b> · time-to-first-run &lt; 5분</li>
+  <li>첫 사용자: 본인 주변 사람 (Run-2 / Show-1 측정)</li>
+  <li>포지셔닝: HKUDS/Vibe-Trading 같은 research·backtest·sim 도구의 <b>다운스트림 실행 런타임</b></li>
+</ul>
+
+<div class="sub" style="margin-top:2rem; font-size:.85rem;">
+  Snapshot 2026-05-13 · source: <code>.planning/STATE.md</code>, <code>.planning/ROADMAP.md</code>, <code>.planning/PROJECT.md</code>
+</div>
+
+</body>
+</html>

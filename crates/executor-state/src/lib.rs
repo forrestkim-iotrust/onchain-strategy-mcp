@@ -16,6 +16,7 @@ pub mod runs;
 pub mod schema;
 pub mod store;
 pub mod strategies;
+pub mod triggers;
 
 pub use error::StateError;
 pub use executions::ExecutionActionEntry;
@@ -25,3 +26,4 @@ pub use journal::{
 pub use runs::{Run, RunRepo};
 pub use store::StateStore;
 pub use strategies::{RegisterOutcome, Strategy, StrategySummary};
+pub use triggers::hash_trigger;
