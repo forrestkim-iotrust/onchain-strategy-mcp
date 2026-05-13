@@ -132,6 +132,8 @@ The runtime ships with a deny-by-default policy DSL (allowed chains, contracts, 
 
 What's working sits in §2 above. What's next:
 
+- **One-line install for Claude Code.** `npx onchain-strategy-mcp` registers the MCP server, fetches the prebuilt binary for your OS, runs an `osmcp init` that scaffolds a burner wallet (keystore in the OS keychain), a starter config, and a starter policy. No `cargo build`, no manual `claude mcp add`.
+- **Self-documenting MCP session.** The server's `instructions`, prompts, and resource templates ship populated — examples, trigger patterns, action shapes, common pitfalls — so a fresh Claude Code session already *knows* what it can do. No feature should be unreachable just because the agent didn't know it existed.
 - **External oracle triggers & data sourcing.** Fire strategies on Chainlink / Pyth / Redstone price updates, off-chain data feeds, or arbitrary HTTPS webhooks. Lets agents react to *real-world* signals — not just onchain state.
 - **WaaS (Wallet-as-a-Service) integration.** First-class adapters for Privy, Turnkey, Coinbase MPC, and similar agent-wallet providers. Pushes permissioning (session keys, account-level policies, rotation, recovery) into the wallet layer where it scales — burner + local policy stays for solo operators, WaaS for teams / production / multi-tenant.
 - **Non-AMM venue integrations.** First-class support for Hyperliquid (perps), Polymarket (prediction markets), and similar orderbook / specialized venues. Agents place, manage, settle.

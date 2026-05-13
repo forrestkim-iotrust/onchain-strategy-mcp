@@ -132,6 +132,8 @@ Model Context Protocol — Claude Code (랑 비슷한 AI 클라이언트)가 외
 
 지금 되는 건 위 §2에 있고, 앞으로 만들 것:
 
+- **Claude Code 한 줄 설치.** `npx onchain-strategy-mcp` 한 줄로 MCP 서버 등록 + OS에 맞는 prebuilt binary 다운로드 + `osmcp init` 자동 실행 (burner 지갑 OS 키체인에 생성, 시작용 config·policy 스캐폴드까지). `cargo build` 없이, `claude mcp add` 수동 입력 없이.
+- **Self-documenting MCP 세션.** 서버의 `instructions`, prompts, resource template를 풍부하게 채워서 — 예시, 트리거 패턴, action shape, 흔한 함정까지 — 새 Claude Code 세션이 *처음부터* 뭘 할 수 있는지 자기가 압니다. "기능 있는 줄 몰라서 못 쓰는" 게 없게.
 - **외부 오라클 트리거 + 데이터 소싱.** Chainlink / Pyth / Redstone 가격 업데이트, 오프체인 데이터 피드, 임의 HTTPS 웹훅으로 strategy 발화. 에이전트가 온체인 상태뿐 아니라 *현실 세계* 신호에도 반응할 수 있게.
 - **WaaS (Wallet-as-a-Service) 통합.** Privy, Turnkey, Coinbase MPC 같은 에이전트 전용 지갑 솔루션을 1급으로 연결. 권한 분리(세션 키, 계정별 정책, 키 로테이션, 복구)를 지갑 레이어가 책임지게 — burner + 로컬 정책은 1인 운영자용, WaaS는 팀·프로덕션·멀티테넌트용.
 - **AMM 아닌 거래소 통합.** Hyperliquid (perps), Polymarket (예측시장) 같은 오더북·전문 거래소 1급 지원. 에이전트가 주문, 포지션 관리, 시장 결제까지.
