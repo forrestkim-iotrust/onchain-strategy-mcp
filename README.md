@@ -143,11 +143,14 @@ The runtime ships with a deny-by-default policy DSL (allowed chains, contracts, 
 
 ## Roadmap
 
-What's working sits in §2 above. What's next:
+What's working sits in §2 above. What's shipped recently:
 
-- **One-line install for Claude Code.** `npx onchain-strategy-mcp` registers the MCP server, fetches the prebuilt binary for your OS, runs an `osmcp init` that scaffolds a burner wallet (keystore in the OS keychain), a starter config, and a starter policy. No `cargo build`, no manual `claude mcp add`.
-- **Product homepage.** A simple landing site that explains what this is, shows the headline use cases, and walks newcomers through install in a browser — copy-pasteable commands, screenshots of a real Claude Code session, links to examples. Lowers the "wait, what does this actually do?" barrier before someone touches a terminal.
+- ✅ **One-line install for Claude Code** *(v1.3)* — `npx onchain-strategy-mcp init` scaffolds the burner (OS keychain), config, and policy. Deterministic CREATE2 BatchExec address so 7702 batching works on any chain with one optional `deploy-delegate` call. No `cargo build`, no `cast`, no `claude mcp add` by hand.
+
+What's next:
+
 - **Self-documenting MCP session.** The server's `instructions`, prompts, and resource templates ship populated — examples, trigger patterns, action shapes, common pitfalls — so a fresh Claude Code session already *knows* what it can do. No feature should be unreachable just because the agent didn't know it existed.
+- **Product homepage.** A simple landing site that explains what this is, shows the headline use cases, and walks newcomers through install in a browser — copy-pasteable commands, screenshots of a real Claude Code session, links to examples. Lowers the "wait, what does this actually do?" barrier before someone touches a terminal.
 - **External oracle triggers & data sourcing.** Fire strategies on Chainlink / Pyth / Redstone price updates, off-chain data feeds, or arbitrary HTTPS webhooks. Lets agents react to *real-world* signals — not just onchain state.
 - **WaaS (Wallet-as-a-Service) integration.** First-class adapters for Privy, Turnkey, Coinbase MPC, and similar agent-wallet providers. Pushes permissioning (session keys, account-level policies, rotation, recovery) into the wallet layer where it scales — burner + local policy stays for solo operators, WaaS for teams / production / multi-tenant.
 - **Non-AMM venue integrations.** First-class support for Hyperliquid (perps), Polymarket (prediction markets), and similar orderbook / specialized venues. Agents place, manage, settle.
