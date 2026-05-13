@@ -117,9 +117,7 @@ CREATE TABLE IF NOT EXISTS execution_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_actions_run_id ON execution_actions(run_id);
 
--- v1.2 Trigger Core: unified trigger registry + event log.
--- `id` is content-addressed: hex(sha256(strategy_id || kind || config_json || predicate_js)).
--- Same source ⇒ same id ⇒ idempotent register.
+-- v1.2 Trigger Core: triggers + trigger_events tables.
 CREATE TABLE IF NOT EXISTS triggers (
     id              TEXT PRIMARY KEY,
     strategy_id     TEXT NOT NULL REFERENCES strategies(id),

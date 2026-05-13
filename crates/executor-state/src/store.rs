@@ -10,7 +10,10 @@
 //! (`partial_index_behaviour.rs`, `foreign_keys_enforced`). Production code
 //! must go through the typed façade methods.
 
-use crate::{error::StateError, executions, runs, schema, strategies};
+use crate::{error::StateError, executions, runs, schema, strategies, triggers};
+use executor_core::schema::trigger::{
+    RegisterTriggerInput, Trigger, TriggerEvent, TriggerListFilter, TriggerSummary,
+};
 use executor_core::schema::execution::RunStatus;
 use rusqlite::Connection;
 use std::path::Path;
@@ -330,5 +333,68 @@ impl StateStore {
         run_id: &str,
     ) -> Result<Vec<executions::ExecutionActionEntry>, StateError> {
         executions::list_executions_for_run(&self.conn, run_id)
+    }
+
+    // ---- Trigger façade (v1.2 Trigger Core) ----
+
+    pub fn register_trigger(
+        &mut self,
+        input: RegisterTriggerInput,
+    ) -> Result<triggers::TriggerRegisterOutcome, StateError> {
+        triggers::register(&self.conn, input)
+    }
+
+    pub fn list_triggers(
+        &self,
+        filter: Option<&TriggerListFilter>,
+    ) -> Result<Vec<TriggerSummary>, StateError> {
+        triggers::list(&self.conn, filter)
+    }
+
+    pub fn get_trigger(&self, id: &str) -> Result<Option<Trigger>, StateError> {
+        triggers::get_by_id(&self.conn, id)
+    }
+
+    pub fn delete_trigger(&mut self, id: &str) -> Result<bool, StateError> {
+        triggers::delete(&self.conn, id)
+    }
+
+    pub fn set_trigger_enabled(&mut self, id: &str, enabled: bool) -> Result<(), StateError> {
+        triggers::set_enabled(&self.conn, id, enabled)
+    }
+
+    pub fn record_trigger_event(
+        &mut self,
+        trigger_id: &str,
+        event_json: Option<&str>,
+        run_id: Option<&str>,
+        dedup_key: Option<&str>,
+        skipped_reason: Option<&str>,
+    ) -> Result<TriggerEvent, StateError> {
+        triggers::record_event(
+            &self.conn,
+            trigger_id,
+            event_json,
+            run_id,
+            dedup_key,
+            skipped_reason,
+        )
+    }
+
+    pub fn list_trigger_events(
+        &self,
+        trigger_id: &str,
+        limit: u64,
+    ) -> Result<Vec<TriggerEvent>, StateError> {
+        triggers::list_events(&self.conn, trigger_id, limit)
+    }
+
+    pub fn check_trigger_dedup(
+        &self,
+        trigger_id: &str,
+        dedup_key: &str,
+        window_ms: u64,
+    ) -> Result<bool, StateError> {
+        triggers::check_dedup(&self.conn, trigger_id, dedup_key, window_ms)
     }
 }

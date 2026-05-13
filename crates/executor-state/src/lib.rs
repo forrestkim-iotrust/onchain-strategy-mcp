@@ -26,4 +26,4 @@ pub use journal::{
 pub use runs::{Run, RunRepo};
 pub use store::StateStore;
 pub use strategies::{RegisterOutcome, Strategy, StrategySummary};
-pub use triggers::hash_trigger;
+pub use triggers::TriggerRegisterOutcome;
