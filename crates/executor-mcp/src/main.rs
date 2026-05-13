@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use executor_mcp::{ExecutorServer, config, init, logging};
+use executor_mcp::{ExecutorServer, config, deploy_delegate, init, logging};
 use rmcp::{ServiceExt, transport::stdio};
 
 /// v1.3: clap-based CLI. Default with no subcommand keeps Phase 1's
@@ -33,6 +33,20 @@ enum Command {
     /// Run the stdio MCP server (default behaviour when no subcommand
     /// is given).
     Serve,
+    /// Deploy the BatchExec EIP-7702 delegate via CREATE2 (one-time, per
+    /// chain). The contract address is deterministic — everyone on the
+    /// chain shares the same predicted address.
+    DeployDelegate {
+        /// RPC URL. Falls back to `[evm].rpc_url` from config when omitted.
+        #[arg(long)]
+        rpc_url: Option<String>,
+        /// Override the chain id. Derived from the RPC when omitted.
+        #[arg(long)]
+        chain_id: Option<u64>,
+        /// Check predicted address + deployer presence without broadcasting.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -45,6 +59,15 @@ fn main() -> Result<()> {
         }) => init::run(init::InitOptions {
             force,
             non_interactive,
+        }),
+        Some(Command::DeployDelegate {
+            rpc_url,
+            chain_id,
+            dry_run,
+        }) => deploy_delegate::run(deploy_delegate::DeployOptions {
+            rpc_url,
+            chain_id,
+            dry_run,
         }),
         Some(Command::Serve) | None => run_serve(),
     }

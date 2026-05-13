@@ -14,6 +14,7 @@
 //!   the `ServerHandler` block in `server`.
 
 pub mod config;
+pub mod deploy_delegate;
 pub mod errors;
 pub mod init;
 pub mod logging;
