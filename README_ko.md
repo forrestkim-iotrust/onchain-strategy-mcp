@@ -59,6 +59,10 @@ claude mcp add osmcp -- npx onchain-strategy-mcp serve
 
 끝. Claude Code 열고:
 
+> `getting_started` 프롬프트 로드해서 이 MCP 한 번 쭉 안내해줘.
+
+서버가 스스로 문서화됩니다 — `instructions`, prompts, 그리고 내장된 `examples://` / `docs://` 리소스가 에이전트한테 이 런타임이 할 수 있는 모든 걸 알려줍니다. 아니면 바로 예시로 들어가려면:
+
 > `examples/strategies/yield-snapshot.js` 등록해서 한 번 돌리고 결과 보여줘.
 
 Claude가 MCP 도구로 strategy 등록·실행하고, journal에 남은 결과가 채팅에 그대로 나옵니다. 여기서부터는 strategy 더 짜고, 트리거 붙이고, 흐름을 말로 다 조립하면 됩니다.

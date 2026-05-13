@@ -59,6 +59,10 @@ claude mcp add osmcp -- npx onchain-strategy-mcp serve
 
 That's it. Open Claude Code and:
 
+> Load the `getting_started` prompt and walk me through this MCP.
+
+The server is self-documenting — its `instructions`, prompts, and embedded `examples://` / `docs://` resources tell the agent every feature it has. Or, to jump straight to a known example:
+
 > Register the example strategy at `examples/strategies/yield-snapshot.js`, run it once, and show me the result.
 
 Claude calls the MCP tools, the runtime executes, and you see the journaled outcome in chat. From there: write more strategies, attach triggers, build flows by talking.
