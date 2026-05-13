@@ -1443,7 +1443,7 @@ pub async fn execute_approved_actions(
         }
     };
 
-    let signer = match LocalSignerHandle::from_env(signer_config, chain_id) {
+    let signer = match LocalSignerHandle::resolve(signer_config, chain_id) {
         Ok(signer) => signer,
         Err(err) => {
             let kind = err.execution_error_kind();
