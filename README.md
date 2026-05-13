@@ -103,9 +103,13 @@ You set this up once: any ETH or USDC that lands in your burner wallet automatic
 
 This entire flow runs without you. You just send money to the wallet.
 
-### B. The yield watcher
+### B. The yield comparator
 
-You ask Claude: *"keep an eye on USDC yields across Aave, Compound, and Moonwell every 30 minutes."* It registers a small JavaScript that reads the rates and writes them down. A few days later you ask Claude: *"compare what I would have earned in each protocol over the last week, accounting for gas to switch." * It reads the log and tells you.
+You ask Claude: *"compare USDC supply yields across Aave, Compound, and Moonwell on Base — show me the last 30 days, hourly."* Claude writes a small JavaScript view, reads each protocol's rate at past blocks via archive RPC, and hands you back a table in seconds. No waiting, no setup — the data already exists onchain.
+
+Then you say: *"now keep watching it forward and notify me if Moonwell jumps above 5%."* That's a separate command — Claude attaches a periodic check (or an onchain event trigger) so future moves don't get missed.
+
+Two pieces, same runtime: **history is one call**, **live monitoring is a trigger**. You decide which you need.
 
 ### C. The instant reactor
 
