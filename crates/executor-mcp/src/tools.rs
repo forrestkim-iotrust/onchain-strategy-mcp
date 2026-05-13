@@ -788,6 +788,7 @@ impl ExecutorServer {
                 chain_id,
                 &approved_normalized,
                 self.aa_delegate,
+                Some(&self.aa_delegate_verified),
             )
             .await?;
         }
@@ -1403,6 +1404,7 @@ pub async fn fail_signer_config_resolution(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_approved_actions(
     state: &Arc<Mutex<StateStore>>,
     run_id: &str,
@@ -1411,6 +1413,7 @@ pub async fn execute_approved_actions(
     chain_id: u64,
     normalized: &[Option<NormalizedAction>],
     aa_delegate: Option<alloy_primitives::Address>,
+    aa_delegate_verified: Option<&Arc<tokio::sync::OnceCell<bool>>>,
 ) -> Result<(), McpError> {
     if normalized.iter().all(Option::is_none) {
         return Ok(());
@@ -1487,6 +1490,43 @@ pub async fn execute_approved_actions(
                         (to, value, data)
                     })
                     .collect();
+            // v1.3: lazy delegate-code preflight. First batch attempt per
+            // server lifetime verifies code exists at the (possibly auto-
+            // resolved) delegate. Memoized in `aa_delegate_verified`.
+            if let Some(cell) = aa_delegate_verified {
+                let verified = cell
+                    .get_or_try_init(|| async {
+                        check_delegate_code(rpc_url, delegate)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await;
+                match verified {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let kind = "delegate_not_deployed";
+                        let detail = format!(
+                            "BatchExec delegate not deployed at {delegate} on chain {chain_id}. Run `executor-mcp deploy-delegate --rpc-url <url>` once — the contract is permissionless to deploy and everyone on this chain will share the same address."
+                        );
+                        record_execution_error(
+                            state,
+                            run_id,
+                            first_action_index,
+                            Some(&signer_address),
+                            kind,
+                            Some(&detail),
+                        )
+                        .await?;
+                        record_runtime_error(state, run_id, &detail).await?;
+                        transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
+                        return Err(strategy_runtime_error(kind, detail, run_id));
+                    }
+                    Err(_e) => {
+                        // Transient RPC error — fall through and let the
+                        // broadcast surface a more specific error.
+                    }
+                }
+            }
             let pending = match signer.send_7702_batch(rpc_url, delegate, calls).await {
                 Ok(pending) => pending,
                 Err(err) => {
@@ -1635,6 +1675,25 @@ pub async fn execute_approved_actions(
         }
     }
     Ok(())
+}
+
+/// v1.3: check that the 7702 delegate contract has been deployed. Returns
+/// `Ok(true)` when `eth_getCode(delegate)` returns non-empty bytes; `Ok(false)`
+/// when the address has no code; `Err(_)` on RPC transport failures (so the
+/// surrounding `OnceCell` doesn't memoize transient errors).
+async fn check_delegate_code(
+    rpc_url: &str,
+    delegate: alloy_primitives::Address,
+) -> Result<bool, String> {
+    use alloy::providers::{Provider, ProviderBuilder};
+    use alloy::transports::http::reqwest::Url;
+    let url = Url::parse(rpc_url).map_err(|e| format!("parsing rpc_url: {e}"))?;
+    let provider = ProviderBuilder::new().connect_http(url);
+    let code = provider
+        .get_code_at(delegate)
+        .await
+        .map_err(|e| format!("eth_getCode({delegate}): {e}"))?;
+    Ok(!code.is_empty())
 }
 
 async fn record_execution_broadcast(

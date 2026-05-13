@@ -31,10 +31,13 @@ private_key_env = "EXECUTOR_PRIVATE_KEY"
 receipt_timeout_ms = 120000
 
 [aa]
-# OPTIONAL. EIP-7702 delegate contract for multi-action batching.
-# Deploy `examples/contracts/BatchExec.sol` to your chain first and put the
-# deployed address here. When set AND a strategy returns >=2 actions, runs
-# bundle into a single 7702 transaction.
+# OPTIONAL OVERRIDE. The EIP-7702 BatchExec delegate is auto-resolved via
+# CREATE2 — every install on a given chain shares the same address
+# (`executor_signer::predicted_delegate_address`, currently
+# 0x821fd81668823a3c5a65e95ced5f050ee54a4f53). Deploy it once per chain with:
+#   executor-mcp deploy-delegate --rpc-url <your-rpc>
+# Only set `delegate` here to point at a DIFFERENT contract (custom build,
+# audit fork, etc.) — leaving it commented uses the predicted address.
 # delegate = "0xYourBatchExecAddress"
 
 [trigger]

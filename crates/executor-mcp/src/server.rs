@@ -62,7 +62,17 @@ pub struct ExecutorServer {
     pub(crate) policy: Arc<RwLock<Option<LoadedPolicy>>>,
     /// v1.1 spike: optional EIP-7702 delegate. When `Some`, multi-action runs
     /// are bundled into one tx via `BatchExec.executeBatch`.
+    ///
+    /// v1.3: defaults to [`executor_signer::predicted_delegate_address`] when
+    /// `[aa].delegate` is unset. The runtime checks `eth_getCode` at first
+    /// batch attempt (memoized in [`Self::aa_delegate_verified`]) to fail
+    /// fast with a structured error if the contract isn't deployed yet.
     pub(crate) aa_delegate: Option<alloy_primitives::Address>,
+    /// v1.3: memoized result of the first `eth_getCode(aa_delegate)` check
+    /// per server lifetime. `true` ⇒ batching is safe; `false` ⇒ delegate
+    /// is missing and the agent must run `executor-mcp deploy-delegate`.
+    /// `OnceCell` does not memoize errors, so transient RPC failures retry.
+    pub(crate) aa_delegate_verified: Arc<tokio::sync::OnceCell<bool>>,
     /// v1.2 Stream E (mempool worker): shared WSS endpoint for
     /// `kind = mempool` triggers. `None` → mempool workers are skipped
     /// (warn-logged) at spawn time. Loaded from `[trigger].mempool_wss_url`.
@@ -109,6 +119,7 @@ impl ExecutorServer {
             chain_id_cell: Arc::new(tokio::sync::OnceCell::new()),
             policy: Arc::new(RwLock::new(None)),
             aa_delegate: None,
+            aa_delegate_verified: Arc::new(tokio::sync::OnceCell::new()),
             mempool_wss_url: None,
             trigger_pool: Arc::new(Mutex::new(crate::triggers::pool::WorkerPool::new())),
             trigger_events_tx,
@@ -156,15 +167,37 @@ impl ExecutorServer {
         // v1.2 Stream E: shared mempool WSS endpoint. Stored as-is; workers
         // validate it on connect (transient errors → reconnect with backoff).
         srv.mempool_wss_url = full_cfg.trigger.mempool_wss_url.clone();
-        if let Some(raw) = full_cfg.aa.delegate.as_deref() {
-            match raw.parse::<alloy_primitives::Address>() {
+        // v1.3: resolution order —
+        //   1. `[aa].delegate` explicit override wins.
+        //   2. Else, fall back to the CREATE2-predicted BatchExec address
+        //      (`executor_signer::predicted_delegate_address`). The runtime
+        //      verifies code-at-address lazily on first 7702 batch attempt
+        //      (see `tools::execute_approved_actions`).
+        match full_cfg.aa.delegate.as_deref() {
+            Some(raw) => match raw.parse::<alloy_primitives::Address>() {
                 Ok(addr) => {
-                    tracing::info!(delegate = %addr, "aa delegate loaded — multi-action runs will bundle via EIP-7702");
+                    tracing::info!(delegate = %addr, source = "config", "aa delegate loaded — multi-action runs will bundle via EIP-7702");
                     srv.aa_delegate = Some(addr);
                 }
                 Err(e) => {
-                    tracing::error!(raw = %raw, error = %e, "aa.delegate parse failed — multi-action runs will use per-action path");
+                    let fallback = executor_signer::predicted_delegate_address();
+                    tracing::error!(
+                        raw = %raw,
+                        error = %e,
+                        fallback = %fallback,
+                        "aa.delegate parse failed — falling back to CREATE2-predicted address",
+                    );
+                    srv.aa_delegate = Some(fallback);
                 }
+            },
+            None => {
+                let predicted = executor_signer::predicted_delegate_address();
+                tracing::info!(
+                    delegate = %predicted,
+                    source = "create2_predicted",
+                    "aa delegate auto-resolved via CREATE2 — run `executor-mcp deploy-delegate` once per chain to deploy",
+                );
+                srv.aa_delegate = Some(predicted);
             }
         }
         Ok(srv)
