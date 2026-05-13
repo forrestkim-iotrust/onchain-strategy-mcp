@@ -63,6 +63,10 @@ pub struct ExecutorServer {
     /// v1.1 spike: optional EIP-7702 delegate. When `Some`, multi-action runs
     /// are bundled into one tx via `BatchExec.executeBatch`.
     pub(crate) aa_delegate: Option<alloy_primitives::Address>,
+    /// v1.2 Stream E (mempool worker): shared WSS endpoint for
+    /// `kind = mempool` triggers. `None` → mempool workers are skipped
+    /// (warn-logged) at spawn time. Loaded from `[trigger].mempool_wss_url`.
+    pub(crate) mempool_wss_url: Option<String>,
     /// v1.2 Trigger Core (Stream D): worker pool table — one `JoinHandle`
     /// per active background worker, keyed by trigger id.
     pub(crate) trigger_pool: Arc<Mutex<crate::triggers::pool::WorkerPool>>,
@@ -105,6 +109,7 @@ impl ExecutorServer {
             chain_id_cell: Arc::new(tokio::sync::OnceCell::new()),
             policy: Arc::new(RwLock::new(None)),
             aa_delegate: None,
+            mempool_wss_url: None,
             trigger_pool: Arc::new(Mutex::new(crate::triggers::pool::WorkerPool::new())),
             trigger_events_tx,
         })
@@ -148,6 +153,9 @@ impl ExecutorServer {
         srv.policy = Arc::new(RwLock::new(loaded));
         // v1.1 spike: optional [aa].delegate. Parsed via lenient EIP-55;
         // errors are logged but never block boot.
+        // v1.2 Stream E: shared mempool WSS endpoint. Stored as-is; workers
+        // validate it on connect (transient errors → reconnect with backoff).
+        srv.mempool_wss_url = full_cfg.trigger.mempool_wss_url.clone();
         if let Some(raw) = full_cfg.aa.delegate.as_deref() {
             match raw.parse::<alloy_primitives::Address>() {
                 Ok(addr) => {
@@ -218,7 +226,9 @@ impl ExecutorServer {
                 for summary in &list {
                     match store.get_trigger(&summary.id) {
                         Ok(Some(trigger)) => {
-                            if let Err(e) = pool.spawn(&trigger, tx.clone()) {
+                            if let Err(e) =
+                                pool.spawn(&trigger, tx.clone(), &arc.mempool_wss_url)
+                            {
                                 tracing::warn!(
                                     trigger_id = %trigger.id,
                                     error = %e,

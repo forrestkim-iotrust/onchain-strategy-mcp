@@ -41,6 +41,20 @@ pub struct Config {
     /// strategy_run bundles multi-action runs into a single 7702 batch tx.
     #[serde(default)]
     pub aa: AaSection,
+    /// v1.2 Stream E: shared knobs for the trigger workers. Today this only
+    /// carries the mempool WSS endpoint used by `kind = mempool` workers.
+    #[serde(default)]
+    pub trigger: TriggerConfig,
+}
+
+/// `[trigger]` section — shared trigger-worker config. Optional.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TriggerConfig {
+    /// Shared WSS endpoint for mempool subscriptions.
+    /// Required for any `kind = mempool` trigger. Without this, the daemon
+    /// logs a warn and skips spawning mempool workers.
+    pub mempool_wss_url: Option<String>,
 }
 
 /// `[aa]` section — EIP-7702 account abstraction config. Optional.
@@ -509,6 +523,35 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.signer.private_key_env.is_none());
         assert!(matches!(cfg.signer_config(), Ok(None)));
+    }
+
+    // ─────────── v1.2 Stream E [trigger] section ───────────
+
+    #[test]
+    fn trigger_section_absent_yields_none_mempool_wss_url() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.trigger.mempool_wss_url.is_none());
+    }
+
+    #[test]
+    fn trigger_section_mempool_wss_url_propagates() {
+        let cfg: Config = toml::from_str(
+            "[trigger]\nmempool_wss_url = \"wss://example/v2/key\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.trigger.mempool_wss_url.as_deref(),
+            Some("wss://example/v2/key")
+        );
+    }
+
+    #[test]
+    fn trigger_section_rejects_unknown_fields() {
+        let err = toml::from_str::<Config>(
+            "[trigger]\nmempool_wss_url = \"wss://x\"\nextra = true\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("extra"));
     }
 
     #[test]

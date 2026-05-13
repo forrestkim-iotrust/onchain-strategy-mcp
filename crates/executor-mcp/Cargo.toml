@@ -18,6 +18,10 @@ default = []
 # test that requires foundry's `anvil` on PATH). Mirrors the executor-evm
 # `anvil-tests` feature (D-14 carry-forward).
 anvil-tests = ["alloy/node-bindings"]
+# v1.2 Stream E: opts the mempool worker integration test in to live
+# Alchemy WSS. Off by default; the test also skips when `ALCHEMY_WSS_URL`
+# is unset.
+mempool-live-tests = []
 
 [dependencies]
 rmcp.workspace = true
@@ -34,7 +38,12 @@ async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 hex = "0.4"
 alloy-primitives = "1"
-alloy = { version = "2.0", optional = true, features = ["node-bindings"] }
+# v1.2 Stream E (mempool worker): alloy is now a non-optional dep here so the
+# trigger worker can open an Alchemy WSS subscription via the `pubsub` +
+# `provider-ws` features. `node-bindings` is still feature-gated behind
+# `anvil-tests` for the existing anvil-spawning integration tests.
+alloy = { version = "2.0.4", features = ["pubsub", "provider-ws", "rpc-types-eth"] }
+futures-util = "0.3"
 executor-core = { path = "../executor-core" }
 executor-state = { path = "../executor-state" }
 executor-signer = { path = "../executor-signer" }
