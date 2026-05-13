@@ -46,35 +46,48 @@ Trigger modes available out of the box:
 
 ## 3. How to use it
 
-You'll need: a Mac/Linux machine, [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/), and [Claude Code](https://claude.ai/code).
+You'll need: a Mac or Linux machine, [Node.js 18+](https://nodejs.org/), and [Claude Code](https://claude.ai/code). No Rust, no Foundry.
 
 ```bash
-# 1. Build
+# 1. One-line install (downloads the prebuilt binary, generates a burner wallet
+#    stored in your OS keychain, scaffolds .local/config.toml + .local/policy.toml)
+npx onchain-strategy-mcp init
+
+# 2. Register with Claude Code (init prints this exact line for you)
+claude mcp add osmcp -- npx onchain-strategy-mcp serve
+```
+
+That's it. Open Claude Code and:
+
+> Register the example strategy at `examples/strategies/yield-snapshot.js`, run it once, and show me the result.
+
+Claude calls the MCP tools, the runtime executes, and you see the journaled outcome in chat. From there: write more strategies, attach triggers, build flows by talking.
+
+<details>
+<summary>Building from source (advanced)</summary>
+
+If you'd rather build the Rust binary yourself instead of using the prebuilt one:
+
+```bash
 git clone https://github.com/forrestkim-iotrust/onchain-strategy-mcp.git
 cd onchain-strategy-mcp
 cargo build --release --bin executor-mcp
 
-# 2. Spin up a fresh wallet for the agent (small amounts only)
-cast wallet new
+cast wallet new                       # generate a burner; small amounts only
 export EXECUTOR_PRIVATE_KEY=0xyourkey
 
-# 3. Operator config
 cp -R .local.example .local
-$EDITOR .local/config.toml         # RPC + signer env name
-$EDITOR .local/policy.toml         # what the agent is allowed to touch
+$EDITOR .local/config.toml            # RPC + signer env name
+$EDITOR .local/policy.toml            # agent permissions
 
-# 4. Plug into Claude Code
 claude mcp add osmcp \
   -e EXECUTOR_CONFIG=$PWD/.local/config.toml \
   -e EXECUTOR_PRIVATE_KEY=$EXECUTOR_PRIVATE_KEY \
   -- $PWD/target/release/executor-mcp
 ```
 
-Then inside Claude Code:
-
-> Register the example strategy at `examples/strategies/yield-snapshot.js`, run it once, and show me the result.
-
-Claude calls the MCP tools, the runtime executes, and you see the journaled outcome in chat. From there: write more strategies, attach triggers, build flows by talking.
+Requires [Rust](https://rustup.rs/) and (optionally) [Foundry](https://book.getfoundry.sh/) for `cast`.
+</details>
 
 ---
 

@@ -46,35 +46,48 @@ Claude 같은 AI 에이전트가 온체인에서 **직접 손발을 갖게** 해
 
 ## 3. 어떻게 써요?
 
-준비물: Mac/Linux, [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/), [Claude Code](https://claude.ai/code).
+준비물: Mac 또는 Linux, [Node.js 18+](https://nodejs.org/), [Claude Code](https://claude.ai/code). Rust도 Foundry도 필요 없음.
 
 ```bash
-# 1. 코드 받고 빌드
+# 1. 한 줄 설치 (prebuilt 바이너리 다운로드 + burner 지갑 OS 키체인에 생성
+#    + .local/config.toml + .local/policy.toml 스캐폴드까지)
+npx onchain-strategy-mcp init
+
+# 2. Claude Code에 붙이기 (init이 이 명령어를 그대로 출력해줍니다)
+claude mcp add osmcp -- npx onchain-strategy-mcp serve
+```
+
+끝. Claude Code 열고:
+
+> `examples/strategies/yield-snapshot.js` 등록해서 한 번 돌리고 결과 보여줘.
+
+Claude가 MCP 도구로 strategy 등록·실행하고, journal에 남은 결과가 채팅에 그대로 나옵니다. 여기서부터는 strategy 더 짜고, 트리거 붙이고, 흐름을 말로 다 조립하면 됩니다.
+
+<details>
+<summary>소스에서 직접 빌드 (고급)</summary>
+
+prebuilt 바이너리 대신 Rust 소스에서 직접 빌드하고 싶다면:
+
+```bash
 git clone https://github.com/forrestkim-iotrust/onchain-strategy-mcp.git
 cd onchain-strategy-mcp
 cargo build --release --bin executor-mcp
 
-# 2. 에이전트가 굴릴 새 지갑 생성 (소액만 넣기)
-cast wallet new
+cast wallet new                       # burner 지갑 생성, 소액만
 export EXECUTOR_PRIVATE_KEY=0x여기에키
 
-# 3. 운영자 설정
 cp -R .local.example .local
-$EDITOR .local/config.toml         # RPC와 signer env 변수명
-$EDITOR .local/policy.toml         # 에이전트가 만질 수 있는 범위
+$EDITOR .local/config.toml            # RPC와 signer env 변수명
+$EDITOR .local/policy.toml            # 에이전트 권한
 
-# 4. Claude Code에 붙이기
 claude mcp add osmcp \
   -e EXECUTOR_CONFIG=$PWD/.local/config.toml \
   -e EXECUTOR_PRIVATE_KEY=$EXECUTOR_PRIVATE_KEY \
   -- $PWD/target/release/executor-mcp
 ```
 
-그 다음 Claude Code 안에서:
-
-> `examples/strategies/yield-snapshot.js` 등록해서 한 번 돌리고 결과 보여줘.
-
-Claude가 MCP 도구로 strategy 등록·실행하고, journal에 남은 결과가 채팅에 그대로 나옵니다. 여기서부터는 strategy 더 짜고, 트리거 붙이고, 흐름을 말로 다 조립하면 됩니다.
+[Rust](https://rustup.rs/) 필요. `cast` 쓰려면 [Foundry](https://book.getfoundry.sh/)도.
+</details>
 
 ---
 
