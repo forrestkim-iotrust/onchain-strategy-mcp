@@ -219,6 +219,12 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
     if !has_column(conn, "strategies", "contracts_touched_json")? {
         conn.execute_batch("ALTER TABLE strategies ADD COLUMN contracts_touched_json TEXT;")?;
     }
+    // v1.6.x: free-form natural-language description on each trigger so the
+    // operator can recognise "what does this trigger DO" without decoding the
+    // address/topic blob. Not part of the content hash — purely descriptive.
+    if !has_column(conn, "triggers", "note")? {
+        conn.execute_batch("ALTER TABLE triggers ADD COLUMN note TEXT;")?;
+    }
     Ok(())
 }
 
