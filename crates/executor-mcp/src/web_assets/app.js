@@ -1328,10 +1328,10 @@
     const { tab, sub } = parseHash();
     S.tab = tab;
     S.sub = sub && Object.keys(sub).length ? sub : null;
-    // Reset the detail-page anti-flicker hash so navigation between
-    // strategies (or leaving the detail page) forces a fresh paint
-    // instead of being silently skipped against the previous payload.
-    S.lastHash.detail = null;
+    // Reset the tab-level anti-flicker hash on navigation so the next
+    // poll always re-renders against the new tab/sub (rather than
+    // being silently skipped against a stale fingerprint).
+    S.lastTabHash = "";
     setActiveTab();
     renderTab();
     pollNow();

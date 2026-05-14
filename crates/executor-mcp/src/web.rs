@@ -163,6 +163,7 @@ fn build_router(app: AppState) -> Router {
     Router::new()
         .route("/", get(root_redirect))
         .route("/index.html", get(serve_index))
+        .route("/favicon.ico", get(serve_favicon))
         .route("/static/style.css", get(serve_style))
         .route("/static/app.js", get(serve_app_js))
         .route("/api/portfolio", get(api_portfolio))
@@ -290,6 +291,12 @@ async fn serve_index() -> impl IntoResponse {
         )],
         INDEX_HTML,
     )
+}
+
+async fn serve_favicon() -> impl IntoResponse {
+    // Stub 204 so the browser's automatic /favicon.ico request doesn't
+    // hit the 405 method_not_allowed branch and pollute the console.
+    StatusCode::NO_CONTENT
 }
 
 async fn serve_style() -> impl IntoResponse {
