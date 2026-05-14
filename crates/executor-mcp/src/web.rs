@@ -295,10 +295,19 @@ async fn serve_index() -> impl IntoResponse {
 async fn serve_style() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/css; charset=utf-8"),
-        )],
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/css; charset=utf-8"),
+            ),
+            // Local dev loop only — every osmcp rebuild ships new assets and
+            // we don't want the browser holding a stale `app.js` from a
+            // previous run. `no-store` skips both memory + disk cache.
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+            ),
+        ],
         STYLE_CSS,
     )
 }
@@ -306,10 +315,16 @@ async fn serve_style() -> impl IntoResponse {
 async fn serve_app_js() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/javascript; charset=utf-8"),
-        )],
+        [
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/javascript; charset=utf-8"),
+            ),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+            ),
+        ],
         APP_JS,
     )
 }
