@@ -666,6 +666,11 @@ async fn strategy_register_creates_row() -> Result<()> {
 
 #[tokio::test]
 async fn strategy_register_idempotent_same_source() -> Result<()> {
+    // v1.8: same-name + same-content is idempotent. Note that this differs
+    // from the pre-v1.8 contract where ANY two strategies sharing source
+    // content (regardless of name) collided; under v1.8 the idempotency
+    // anchor is the NAME, not the content hash. See lineage tests for
+    // cross-name registration of identical content.
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -680,21 +685,17 @@ async fn strategy_register_idempotent_same_source() -> Result<()> {
     assert_eq!(b1["already_exists"], false);
     let id1 = b1["strategy_id"].as_str().unwrap().to_string();
 
-    // Second register with SAME source but a different (unique) name +
-    // description: server must report idempotent, preserving the original
-    // row's name/description.
+    // Second register with SAME name + SAME source: idempotent.
     let r2 = call_tool(
         &mut proc,
         3,
         "strategy_register",
-        json!({ "name": "second", "source": "// SAME", "description": "v2" }),
+        json!({ "name": "first", "source": "// SAME", "description": "ignored" }),
     )
     .await?;
     let b2 = extract_json_result(&r2);
     assert_eq!(b2["already_exists"], true);
     assert_eq!(b2["strategy_id"].as_str().unwrap(), id1);
-    // The response surfaces the FIRST registration's name, not the new one.
-    assert_eq!(b2["name"], "first");
     assert_eq!(b2["existing_name"], "first");
 
     proc.child.kill().await?;
@@ -702,7 +703,11 @@ async fn strategy_register_idempotent_same_source() -> Result<()> {
 }
 
 #[tokio::test]
-async fn strategy_register_conflict_same_name_different_source() -> Result<()> {
+async fn strategy_register_same_name_different_source_bumps_version() -> Result<()> {
+    // v1.8: re-registering the same NAME with different content no longer
+    // returns a `name_conflict` error — it now soft-deletes the previous
+    // active row and inserts a new version under the SAME `lineage_id`,
+    // returning a `replaced_version` block describing the change.
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -715,8 +720,9 @@ async fn strategy_register_conflict_same_name_different_source() -> Result<()> {
     .await?;
     let b1 = extract_json_result(&r1);
     let id1 = b1["strategy_id"].as_str().unwrap().to_string();
+    let lineage1 = b1["lineage_id"].as_str().unwrap().to_string();
+    assert_eq!(b1["version"], 1);
 
-    // Different source but same active name → name_conflict (-32015).
     let r2 = call_tool(
         &mut proc,
         3,
@@ -724,11 +730,16 @@ async fn strategy_register_conflict_same_name_different_source() -> Result<()> {
         json!({ "name": "arb", "source": "// src-B" }),
     )
     .await?;
-    let err = &r2["error"];
-    assert_eq!(err["code"], -32015);
-    assert_eq!(err["data"]["code"], "name_conflict");
-    assert_eq!(err["data"]["attempted_name"], "arb");
-    assert_eq!(err["data"]["existing_strategy_id"], id1);
+    let b2 = extract_json_result(&r2);
+    assert_eq!(b2["already_exists"], false);
+    assert_eq!(b2["lineage_id"].as_str().unwrap(), lineage1);
+    assert_eq!(b2["version"], 2);
+    let rv = &b2["replaced_version"];
+    assert_eq!(rv["previous_id"].as_str().unwrap(), id1);
+    assert_eq!(rv["previous_version"], 1);
+    assert_eq!(rv["previous_execute_changed"], true);
+    assert_eq!(rv["previous_records_changed"], false);
+    assert_eq!(rv["previous_view_changed"], false);
 
     proc.child.kill().await?;
     Ok(())
@@ -1281,6 +1292,7 @@ async fn execution_status_surfaces_match() -> Result<()> {
         let sid = match outcome {
             executor_state::RegisterOutcome::Created(s)
             | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+            executor_state::RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         let rid = store.insert_run(&sid, executor_core::schema::execution::RunStatus::Running)?;
         store.record_execution_broadcast(
@@ -1343,6 +1355,7 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
         let outcome = store.register_strategy("seed", "// seed strategy\n", None, None)?;
         let sid = match outcome {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            executor_state::RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         let rid = store.insert_run(&sid, RunStatus::Queued)?;
         (sid, rid)
@@ -1540,6 +1553,7 @@ fn seed_strategy(db_path: &std::path::Path, name: &str, source: &str) -> Result<
     let id = match outcome {
         executor_state::RegisterOutcome::Created(s)
         | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+        executor_state::RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     };
     Ok(id)
 }
@@ -2575,6 +2589,7 @@ async fn strategy_run_rejects_deleted_strategy() -> Result<()> {
         let sid = match outcome {
             executor_state::RegisterOutcome::Created(s)
             | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+            executor_state::RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         store.soft_delete_strategy(&sid)?;
         sid

@@ -73,6 +73,7 @@ async fn view_fallback_for_legacy_strategy() -> Result<()> {
         let mut store = StateStore::open(&db_path)?;
         match store.register_strategy("legacy", "(ctx) => 'noop'", None, None)? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         }
     };
 
@@ -123,6 +124,7 @@ async fn records_endpoint_lists_rows_with_since_filter() -> Result<()> {
             None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         // Insert a run + capture rows directly (the capture hook would do
         // this from the run pipeline, but tests stay hermetic by seeding).
@@ -223,6 +225,7 @@ async fn view_endpoint_runs_user_view_against_aggregated_records() -> Result<()>
             None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         let rid = store.insert_run(&sid, RunStatus::Queued)?;
         // Two supply captures: amounts 1_000_000 and 500_000 → sum 1_500_000.
@@ -287,6 +290,7 @@ async fn view_records_sum_method_matches_sums_field() -> Result<()> {
             Some(records_json), Some(view_source), None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         let rid = store.insert_run(&sid, RunStatus::Queued)?;
         store.record_strategy_capture(&rid, &sid, "supply", r#"{"amount":"700"}"#)?;
@@ -338,6 +342,7 @@ async fn view_records_declared_but_uncaptured_has_empty_handle() -> Result<()> {
             Some(records_json), Some(view_source), None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         }
     };
 

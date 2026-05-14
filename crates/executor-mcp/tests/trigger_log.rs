@@ -54,6 +54,7 @@ async fn log_worker_fires_against_live_alchemy_wss() -> Result<()> {
         let sid = match outcome {
             executor_state::strategies::RegisterOutcome::Created(s) => s.id,
             executor_state::strategies::RegisterOutcome::AlreadyExists(s) => s.id,
+            executor_state::strategies::RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         let outcome = store.register_trigger(RegisterTriggerInput {
             strategy_id: sid,
