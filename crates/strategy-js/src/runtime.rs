@@ -55,6 +55,14 @@ pub struct RuntimeContext {
     /// manually-invoked strategies; `Some(payload)` for trigger-fired
     /// strategies. Surfaced as `ctx.event` (null when None).
     event: Option<serde_json::Value>,
+    /// v1.7 (`ctx.price.usd`): shared price cache. Optional because tests
+    /// build `RuntimeContext` without a real cache; production paths set
+    /// this via [`RuntimeContext::with_price_cache`].
+    price_cache: Option<Arc<executor_evm::PriceCache>>,
+    /// v1.7 (`ctx.price.usd`): host's default chain_id (looked up via
+    /// `eth_chainId` at strategy_run setup). `None` ⇒ JS callers that
+    /// omit `chain_id` will see `null`.
+    host_chain_id: Option<u64>,
 }
 
 /// One `ctx.evm.*` call's journal payload (Phase 4 D-13).
@@ -84,7 +92,22 @@ impl RuntimeContext {
             evm_config: EvmConfig::default(),
             evm_reads: Vec::new(),
             event: None,
+            price_cache: None,
+            host_chain_id: None,
         }
+    }
+
+    /// v1.7 (`ctx.price.usd`): attach the shared price cache + the host's
+    /// default chain id. Builder-style; production callers (strategy_run)
+    /// chain after `with_evm`.
+    pub fn with_price_cache(
+        mut self,
+        cache: Arc<executor_evm::PriceCache>,
+        chain_id: Option<u64>,
+    ) -> Self {
+        self.price_cache = Some(cache);
+        self.host_chain_id = chain_id;
+        self
     }
 
     /// v1.2 Trigger Core: attach the trigger event payload. Builder-style;
@@ -188,5 +211,31 @@ impl CtxHost for RuntimeContext {
     }
     fn event(&self) -> Option<&serde_json::Value> {
         self.event.as_ref()
+    }
+    fn host_chain_id(&self) -> Option<u64> {
+        self.host_chain_id
+    }
+    fn price_cache(&self) -> Option<&Arc<executor_evm::PriceCache>> {
+        self.price_cache.as_ref()
+    }
+    /// Synchronous bridge to `executor_evm::resolve_usd_micros`. Production
+    /// path uses `block_in_place` so the async resolver runs on the current
+    /// tokio runtime without starving other tasks. Returns `None` when
+    /// required state (provider / cache) is missing — matches the JS-side
+    /// `null` semantic at the sandbox boundary.
+    fn price_usd_micros(
+        &self,
+        chain_id: u64,
+        token: executor_evm::Address,
+        amount: executor_evm::U256,
+    ) -> Option<u128> {
+        let provider = self.provider.as_ref()?.clone();
+        let cache = self.price_cache.as_ref()?.clone();
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        tokio::task::block_in_place(|| {
+            handle.block_on(executor_evm::resolve_usd_micros(
+                chain_id, token, amount, &provider, &cache,
+            ))
+        })
     }
 }
