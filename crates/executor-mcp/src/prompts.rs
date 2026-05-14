@@ -732,6 +732,339 @@ impl ExecutorServer {
         )])
         .with_description("Top-N footguns"))
     }
+
+    /// v1.11 Track E1: `inventory` — one-screen status digest answering
+    /// "what's running right now?" in a single prompt call.
+    ///
+    /// Prefetches `runtime://status`, `portfolio://`, and
+    /// `strategy://list?status=active&summary=true`, composing them into a
+    /// human-readable Markdown digest with System / Positions / Strategies
+    /// sections. Each prefetch is matched independently — a single failure
+    /// degrades that section to a `⚠️ unavailable` marker and the prompt
+    /// continues. Honesty-envelope (`confidence != "full"`) prepends a
+    /// section-level `⚠️ Partial: <reason>` line.
+    #[prompt(
+        name = "inventory",
+        description = "One-screen status digest: System (RPC/watchers/24h), Positions (portfolio), Strategies (active)."
+    )]
+    async fn inventory(
+        &self,
+        Parameters(_args): Parameters<EmptyPromptArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let evm = crate::resources::ViewEvm {
+            provider: self.evm_provider().await.ok(),
+            evm_config: self.evm_config.clone(),
+            price_cache: Some(self.price_cache.clone()),
+            chain_id: self.chain_id().await.ok(),
+        };
+
+        // 1. System section — runtime://status.
+        let system_block = match crate::resources::dispatch_uri_to_json(
+            "runtime://status".to_string(),
+            self.state.clone(),
+            evm.clone(),
+        )
+        .await
+        {
+            Ok(v) => render_system_section(&v),
+            Err(e) => format!("**System**: ⚠️ unavailable — {}", e.message),
+        };
+
+        // 2. Positions section — portfolio://.
+        let positions_block = match crate::resources::dispatch_uri_to_json(
+            "portfolio://".to_string(),
+            self.state.clone(),
+            evm.clone(),
+        )
+        .await
+        {
+            Ok(v) => render_positions_section(&v),
+            Err(e) => format!("**Positions**: ⚠️ unavailable — {}", e.message),
+        };
+
+        // 3. Strategies section — active summary list.
+        let strategies_block = match crate::resources::dispatch_uri_to_json(
+            "strategy://list?status=active&summary=true".to_string(),
+            self.state.clone(),
+            evm.clone(),
+        )
+        .await
+        {
+            Ok(v) => render_strategies_section(&v),
+            Err(e) => format!("**Strategies**: ⚠️ unavailable — {}", e.message),
+        };
+
+        let body = format!(
+            "# Inventory — one-screen status digest\n\n\
+             ## System\n\n{system}\n\n\
+             ## Positions\n\n{positions}\n\n\
+             ## Strategies\n\n{strategies}\n\n\
+             Next steps:\n\
+             - Failed runs? → call prompt `triage_run` with the run_id \
+             (see execution://list?status=failed&limit=1)\n\
+             - Adjust strategy thresholds? → call prompt `tune_thresholds`\n\
+             - System health detail? → read runtime://status\n",
+            system = system_block,
+            positions = positions_block,
+            strategies = strategies_block,
+        );
+
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            body,
+        )])
+        .with_description("One-screen status digest: System + Positions + Strategies"))
+    }
+}
+
+/// Render the System block from a `runtime://status` payload. Best-effort:
+/// when a field is missing the line still renders with a `?` placeholder so
+/// the agent can see the shape gap without an aborted digest.
+fn render_system_section(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+
+    // Honesty envelope: surface partial-confidence at the top of the section.
+    if let Some(c) = v.get("confidence").and_then(serde_json::Value::as_str)
+        && c != "full"
+    {
+        let reason = v
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(no reason given)");
+        let _ = writeln!(out, "⚠️ Partial: {reason}\n");
+    }
+
+    let chain_id = v
+        .get("chain_id")
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let burner = v
+        .get("burner")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let rpc = match v.get("rpc") {
+        Some(rpc_v) => {
+            let status = rpc_v
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("?");
+            match status {
+                "ok" => "ok".to_string(),
+                "degraded" | "missing" => {
+                    let reason = rpc_v
+                        .get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("(no reason given)");
+                    format!("{status} ({reason})")
+                }
+                other => other.to_string(),
+            }
+        }
+        None => "?".to_string(),
+    };
+    let _ = writeln!(out, "- chain_id={chain_id} | burner={burner} | RPC: {rpc}");
+
+    let last_24h = v
+        .get("last_24h")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let runs = last_24h
+        .get("runs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let succeeded = last_24h
+        .get("succeeded")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let failed = last_24h
+        .get("failed")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let noop = last_24h
+        .get("noop")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let _ = writeln!(
+        out,
+        "- last 24h: runs={runs} | succeeded={succeeded} | failed={failed} | noop={noop}"
+    );
+
+    let watchers = v
+        .get("watchers")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let mempool = watchers
+        .get("mempool")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let log_w = watchers
+        .get("log")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let _ = writeln!(out, "- watchers: mempool={mempool}, log={log_w}");
+
+    out
+}
+
+/// Render the Positions block from a `portfolio://` payload. The honesty
+/// envelope from Track C is the outer object; the aggregation lives at
+/// `.data` and the asset list at `.data.data.assets[]` (the inner `data` is
+/// the aggregation result; the outer `data` is the envelope's payload).
+fn render_positions_section(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+
+    if let Some(c) = v.get("confidence").and_then(serde_json::Value::as_str)
+        && c != "full"
+    {
+        let reason = v
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(no reason given)");
+        let _ = writeln!(out, "⚠️ Partial: {reason}\n");
+    }
+
+    // Double-`.data.data` unwrap per the v1.11 spec — outer is honesty
+    // envelope (Track C), inner is the aggregation payload. We probe both
+    // shapes so the renderer survives schema drift between sub-tracks.
+    let assets_opt = v
+        .get("data")
+        .and_then(|d| d.get("data"))
+        .and_then(|d| d.get("assets"))
+        .and_then(serde_json::Value::as_array);
+
+    let assets = match assets_opt {
+        Some(a) => a,
+        None => {
+            out.push_str("(no positions)\n");
+            return out;
+        }
+    };
+
+    if assets.is_empty() {
+        out.push_str("(no positions)\n");
+        return out;
+    }
+
+    let mut total_usd: f64 = 0.0;
+    let mut any_usd = false;
+    for a in assets {
+        let symbol = a
+            .get("symbol")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let amount = a
+            .get("amount")
+            .and_then(|x| {
+                x.as_str()
+                    .map(String::from)
+                    .or_else(|| x.as_f64().map(|f| f.to_string()))
+                    .or_else(|| x.as_u64().map(|u| u.to_string()))
+            })
+            .unwrap_or_else(|| "?".to_string());
+        let usd_opt = a.get("usd").and_then(|x| {
+            x.as_f64()
+                .or_else(|| x.as_str().and_then(|s| s.parse::<f64>().ok()))
+        });
+        if let Some(u) = usd_opt {
+            total_usd += u;
+            any_usd = true;
+        }
+        let usd_disp = usd_opt
+            .map(|u| format!("${u:.2}"))
+            .unwrap_or_else(|| "$?".to_string());
+        let chain = a
+            .get("chain")
+            .and_then(|x| {
+                x.as_str()
+                    .map(String::from)
+                    .or_else(|| x.as_u64().map(|u| u.to_string()))
+            })
+            .unwrap_or_else(|| "?".to_string());
+        let venue = a
+            .get("venue")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let _ = writeln!(
+            out,
+            "- {symbol} {amount} ({usd_disp}) on {chain} via {venue}"
+        );
+    }
+
+    if any_usd {
+        let _ = writeln!(out, "\nTotal: ${total_usd:.2}");
+    }
+
+    out
+}
+
+/// Render the Strategies block from a `strategy://list?...` payload.
+fn render_strategies_section(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+
+    let strategies = v
+        .get("strategies")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    if strategies.is_empty() {
+        out.push_str("(no active strategies)\n");
+        return out;
+    }
+
+    for s in &strategies {
+        let name = s
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let version = s
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let kinds = s
+            .get("trigger_kinds")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        let kinds_disp = if kinds.is_empty() {
+            "none".to_string()
+        } else {
+            kinds
+        };
+        let last_fire = s
+            .get("last_fire_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("never");
+        let last_24h = s
+            .get("last_24h")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let runs = last_24h
+            .get("runs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let succeeded = last_24h
+            .get("succeeded")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let failed = last_24h
+            .get("failed")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "- {name} [v{version}] — triggers: {kinds_disp}, last_fire: {last_fire}, 24h: {runs}/{succeeded}/{failed}"
+        );
+    }
+
+    out
 }
 
 // ────────────────────────── unit tests ──────────────────────────
