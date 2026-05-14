@@ -223,7 +223,7 @@ async fn resources_surface_matches_contract() -> Result<()> {
     // v1.11 Track I — resources/list now publishes the 12 stable static
     // entrypoints (the "30-second rule" agent-discovery surface). Dynamic
     // per-instance URIs (strategy://{id}, journal://{id}, etc.) remain in
-    // `resources/templates/list`.
+    // `resources/templates/list`. Track C's `portfolio://` is one of the 12.
     send(
         &mut proc,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
@@ -360,6 +360,11 @@ async fn resources_surface_matches_contract() -> Result<()> {
             "missing self-doc template {required}; got {template_uris:?}"
         );
     }
+    // v1.11 Track C: portfolio aggregate template (parameter-less today).
+    assert!(
+        template_uris.contains(&"portfolio://"),
+        "v1.11 Track C: missing portfolio:// template; got {template_uris:?}"
+    );
 
     // resources/read → resource_not_found (-32002) with data.uri echoed.
     // v1.11 Track A: typed-only error construction surfaces the discriminator
