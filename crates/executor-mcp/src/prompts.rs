@@ -14,10 +14,11 @@
 //! self-doc prompts take no arguments — represented by [`EmptyPromptArgs`].
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use executor_core::schema::prompt_args::{
-    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, TuneThresholdsArgs,
-    WriteEvmStrategyArgs,
+    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, TriageRunArgs,
+    TuneThresholdsArgs, WriteEvmStrategyArgs,
 };
 use executor_policy::LoadedPolicy;
 use executor_state::StrategySummary;
@@ -30,6 +31,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::errors::invalid_params;
 use crate::resources::{ViewEvm, dispatch_uri_to_json};
