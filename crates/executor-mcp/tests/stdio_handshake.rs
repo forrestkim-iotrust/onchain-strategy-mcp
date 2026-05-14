@@ -62,7 +62,7 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     // v1.4 Track B: tool surface shrunk from 15 → 8. Read paths moved to
     // resources (strategy://list, strategy://by-name/{name}, trigger://list,
     // policy://current, plus the existing execution://list, strategy://{id},
-    // trigger://{id}, trigger-events://{id}).
+    // trigger://{id}, trigger://{id}/events).
     // v1.5 Track 1A: re-added `policy_set` for AI-managed policy edits —
     // surface back to 9 tools (8 mutations + 1 read primitive `evm_view`).
     for expected in [
@@ -278,14 +278,21 @@ async fn resources_surface_matches_contract() -> Result<()> {
         template_uris.contains(&"journal://{run_id}"),
         "missing journal template; got {template_uris:?}"
     );
-    // v1.2 Trigger Core (Stream C): trigger + trigger-events templates.
+    // v1.2 Trigger Core (Stream C): trigger template.
+    // v1.11 Track G: events nested under trigger (trigger://{id}/events).
     assert!(
         template_uris.contains(&"trigger://{trigger_id}"),
         "missing trigger template; got {template_uris:?}"
     );
     assert!(
-        template_uris.contains(&"trigger-events://{trigger_id}"),
-        "missing trigger-events template; got {template_uris:?}"
+        template_uris.contains(&"trigger://{trigger_id}/events"),
+        "missing trigger://{{trigger_id}}/events template; got {template_uris:?}"
+    );
+    // Flat `trigger-events://` is deprecated in v1.11 and no longer advertised
+    // (still functional with a deprecation envelope until v1.12).
+    assert!(
+        !template_uris.contains(&"trigger-events://{trigger_id}"),
+        "deprecated trigger-events:// template should not be advertised; got {template_uris:?}"
     );
     // v1.3 self-documenting surface: examples + docs templates.
     for required in [
@@ -3622,6 +3629,97 @@ async fn strategy_register_dry_run_bundle_id_differs_from_source_only() -> Resul
     assert!(
         items.is_empty(),
         "two dry_run calls must produce zero persisted rows; got: {items:?}"
+    );
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+// v1.11 Track G: `trigger://{id}/events` is the canonical nested form.
+// The deprecated flat `trigger-events://{id}` MUST still work but wrap its
+// response with `confidence: partial` + a remediation pointing at the new
+// form. Both URIs MUST return identical `events[]` arrays.
+#[tokio::test]
+async fn trigger_events_nested_uri_with_deprecation_envelope() -> Result<()> {
+    use common::{call_tool, extract_json_result, extract_resource_json, read_resource};
+
+    let mut proc = common::spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    // Register a strategy + manual trigger so we have a valid trigger id.
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "tg-rename", "source": "// noop" }),
+    )
+    .await?;
+    let strategy_id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .expect("strategy_id")
+        .to_string();
+
+    let r = call_tool(
+        &mut proc,
+        3,
+        "trigger_register",
+        json!({
+            "strategy_id": strategy_id,
+            "kind": "manual",
+            "config": {},
+        }),
+    )
+    .await?;
+    let trigger_id = extract_json_result(&r)["trigger_id"]
+        .as_str()
+        .expect("trigger_id")
+        .to_string();
+
+    // (1) New nested form returns confidence: full + data.events array.
+    let nested_uri = format!("trigger://{trigger_id}/events");
+    let r_new = read_resource(&mut proc, 4, &nested_uri).await?;
+    assert!(
+        r_new["error"].is_null(),
+        "nested trigger://{{id}}/events failed: {r_new}"
+    );
+    let body_new = extract_resource_json(&r_new);
+    assert_eq!(
+        body_new["confidence"], "full",
+        "nested form should return confidence: full; got {body_new}"
+    );
+    let events_new = body_new["data"]["events"]
+        .as_array()
+        .expect("data.events must be an array on nested form")
+        .clone();
+
+    // (2) Old flat form still works, but wrapped with deprecation envelope.
+    let flat_uri = format!("trigger-events://{trigger_id}");
+    let r_old = read_resource(&mut proc, 5, &flat_uri).await?;
+    assert!(
+        r_old["error"].is_null(),
+        "deprecated trigger-events:// must still resolve: {r_old}"
+    );
+    let body_old = extract_resource_json(&r_old);
+    assert_eq!(
+        body_old["confidence"], "partial",
+        "flat form must mark confidence: partial; got {body_old}"
+    );
+    let remediation = body_old["remediation"]
+        .as_str()
+        .expect("remediation string on flat form");
+    assert!(
+        remediation.contains("trigger://{trigger_id}/events"),
+        "remediation must point at the new nested form; got: {remediation}"
+    );
+    let events_old = body_old["data"]["events"]
+        .as_array()
+        .expect("data.events must be an array on flat form")
+        .clone();
+
+    // (3) Both URIs return identical events[] arrays for the same trigger.
+    assert_eq!(
+        events_new, events_old,
+        "nested and flat forms must yield identical events arrays"
     );
 
     proc.child.kill().await?;

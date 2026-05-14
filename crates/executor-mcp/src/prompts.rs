@@ -55,7 +55,7 @@ Concrete examples:
 - **Periodic snapshot / yield comparator:** `interval` with `interval_ms` matching the rate of change you care about (hourly = `3_600_000`).
 - **One-shot or human-in-the-loop:** `manual`. No trigger registered; agent invokes `strategy_run` on demand.
 
-Concurrency: a trigger that fires while a previous run of the same strategy is still in flight is skipped and journaled as a `dedup_rejected` event. Inspect via `trigger-events://{trigger_id}`.
+Concurrency: a trigger that fires while a previous run of the same strategy is still in flight is skipped and journaled as a `dedup_rejected` event. Inspect via `trigger://{trigger_id}/events`.
 
 Mempool requires `[trigger].mempool_wss_url` in `.local/config.toml` (an Alchemy or equivalent WSS endpoint). Without it, mempool workers warn-log and stay idle."#;
 
@@ -93,7 +93,7 @@ const COMMON_PITFALLS_BODY: &str = r#"Mistakes the runtime forgives poorly:
 
 8. **Strategy ids are 64-char lowercase hex.** Run ids are 26-char Crockford ULIDs. Resource templates reject malformed ids with `-32002 resource_not_found`.
 
-9. **Trigger dedup window:** a trigger that fires while its strategy is still executing is rejected, not queued. Build idempotent strategies; check `trigger-events://{id}` to see suppressed fires."#;
+9. **Trigger dedup window:** a trigger that fires while its strategy is still executing is rejected, not queued. Build idempotent strategies; check `trigger://{id}/events` to see suppressed fires."#;
 
 /// v1.4 Track E1: bundle skeleton template for the `author_strategy` prompt.
 /// Static for now — Track A wires up the real bundle records/view executor.

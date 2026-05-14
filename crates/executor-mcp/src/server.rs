@@ -185,7 +185,7 @@ to preview the id (and surface bundle/non-bundle status) before committing.
 ## Resources
 
 - `strategy://{id}`, `execution://{run_id}`, `journal://{run_id}` — real JSON
-- `trigger://{id}`, `trigger-events://{id}` — trigger row + last 100 events
+- `trigger://{id}`, `trigger://{id}/events` — trigger row + last 100 events
 - `examples://strategies` (list) and `examples://strategies/{name}` — embedded
   reference strategies (eth-funnel, yield-snapshot, erc20-approve,
   generic-counter-call)
