@@ -89,6 +89,12 @@ pub struct Trigger {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup_window_ms: Option<u64>,
+    /// v1.8 name-anchored lineage: the lineage this trigger fires for.
+    /// Dispatcher resolves lineage_id → latest active strategy version
+    /// at fire time, so view/records-spec re-registrations do not orphan
+    /// the trigger. May be absent on rows registered before v1.8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_lineage_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -100,6 +106,9 @@ pub struct TriggerSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fired_at: Option<String>,
     pub created_at: String,
+    /// v1.8 name-anchored lineage. See [`Trigger::strategy_lineage_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_lineage_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -126,4 +135,9 @@ pub struct TriggerListFilter {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy_id: Option<String>,
+    /// v1.8: filter by lineage. When set, returns ALL triggers attached to
+    /// the lineage (regardless of which specific version they were
+    /// registered against).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_lineage_id: Option<String>,
 }

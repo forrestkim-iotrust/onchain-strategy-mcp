@@ -41,14 +41,41 @@
         "type": "string"
       }
     },
+    "lineage_id": {
+      "description": "v1.8: stable lineage identifier — preserved across re-registrations of the same name.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "name": {
       "type": "string"
     },
     "policy_alignment": {
       "description": "v1.5: derived alignment between contracts_touched and the active policy. Verdict ∈ satisfied | partial | missing | incomplete. Always recomputed against the live policy — not cached."
     },
+    "replaced_version": {
+      "description": "v1.8: details about the version this register superseded. Present only when register replaced an existing active row of the same name.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReplacedVersionInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "strategy_id": {
       "type": "string"
+    },
+    "version": {
+      "description": "v1.8: 1-based version of this row within its lineage. 1 = first register, 2 = second iteration, ...",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
     }
   },
   "required": [
@@ -56,5 +83,39 @@
     "name",
     "created_at",
     "already_exists"
-  ]
+  ],
+  "$defs": {
+    "ReplacedVersionInfo": {
+      "description": "v1.8: details of the version a register call superseded.",
+      "type": "object",
+      "properties": {
+        "previous_execute_changed": {
+          "type": "boolean"
+        },
+        "previous_id": {
+          "description": "`strategy_id` of the row that was just soft-deleted.",
+          "type": "string"
+        },
+        "previous_records_changed": {
+          "type": "boolean"
+        },
+        "previous_version": {
+          "description": "1-based version of the row that was just superseded.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "previous_view_changed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "previous_id",
+        "previous_version",
+        "previous_view_changed",
+        "previous_records_changed",
+        "previous_execute_changed"
+      ]
+    }
+  }
 }
