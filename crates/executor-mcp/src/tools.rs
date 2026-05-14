@@ -11,6 +11,18 @@
 //!
 //! Schema definitions for the dropped tools' inputs/outputs live in
 //! `executor-core::schema::*` UNTOUCHED — resource handlers reuse them.
+//
+// MUTATION TAG CHANNEL: `_meta` — rmcp 1.5.0 DOES expose `Tool._meta`
+// (serialised as `_meta`) as of 2026-05-14. v1.11 Track D promotes the
+// mutation tag from the legacy `[DESTRUCTIVE]` description prefix
+// (v1.4 P5 / Track G) to the MCP-spec blessed `_meta.osmcp.mutation`
+// channel so consent-flow clients can read it structurally. The
+// description prefix is retained for backward compatibility with the
+// v1.4 contract (tests in `tests/destructive_tags.rs`).
+//
+// Values: "destructive" — irreversible / signs onchain / drops data.
+//         "safe-side-effects" — mutates server-local state only;
+//                                reversible or idempotent.
 
 use alloy_primitives::{Address, U256};
 use executor_core::schema::{
@@ -68,6 +80,25 @@ use crate::{
 /// sites agree.
 pub(crate) const RESERVED_ACTION_KEYS: &[&str] =
     &["execute", "view", "records", "default"];
+
+/// v1.11 Track D — `_meta.osmcp.mutation` tag builder for tool advertisements.
+///
+/// Returned `Meta` serialises to `{"osmcp": {"mutation": "<kind>"}}` and is
+/// emitted on the wire under each `Tool`'s `_meta` field by the rmcp 1.5
+/// `#[tool(meta = ...)]` macro hook. Consent-flow clients read this
+/// structurally; humans read the `[DESTRUCTIVE]` description prefix.
+///
+/// `kind` MUST be one of: `"destructive"`, `"safe-side-effects"`.
+pub(crate) fn mutation_meta(kind: &'static str) -> rmcp::model::Meta {
+    let mut osmcp = serde_json::Map::new();
+    osmcp.insert(
+        "mutation".to_string(),
+        serde_json::Value::String(kind.to_string()),
+    );
+    let mut root = serde_json::Map::new();
+    root.insert("osmcp".to_string(), serde_json::Value::Object(osmcp));
+    rmcp::model::Meta(root)
+}
 
 // ─────────── v1.2 Trigger Core inline input types ───────────
 
@@ -156,7 +187,8 @@ impl ExecutorServer {
         description = "Register a JavaScript strategy (content-addressed; idempotent on same bundle). \
 Supplying `records` and/or `view` opts into the v1.4 self-documenting bundle — `strategy://{id}/view` \
 then returns rich state (principal, accrued interest, cycle counts, etc.) instead of the generic \
-balance fallback. Pass `dry_run: true` to validate without persisting (returns the would-be id)."
+balance fallback. Pass `dry_run: true` to validate without persisting (returns the would-be id).",
+        meta = mutation_meta("safe-side-effects")
     )]
     async fn strategy_register(
         &self,
@@ -431,7 +463,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
 
     #[tool(
         name = "strategy_delete",
-        description = "[DESTRUCTIVE] Soft-delete a registered strategy. Idempotent: repeat calls return the same deleted_at."
+        description = "[DESTRUCTIVE] Soft-delete a registered strategy. Idempotent: repeat calls return the same deleted_at.",
+        meta = mutation_meta("destructive")
     )]
     async fn strategy_delete(
         &self,
@@ -465,7 +498,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         description = "[DESTRUCTIVE] Execute a registered JavaScript strategy once in a sandbox. \
                        Returns the validated `Action[]` or `noop`. Runtime / validation \
                        errors become structured MCP errors with a `run_id` reference \
-                       for journal lookup via `execution://{run_id}` and `journal://{run_id}`."
+                       for journal lookup via `execution://{run_id}` and `journal://{run_id}`.",
+        meta = mutation_meta("destructive")
     )]
     async fn strategy_run(
         &self,
@@ -1044,7 +1078,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                        field). Returns the previous + new revision ids, a JSON Patch (RFC 6902) \
                        diff, and an `impact` block listing newly-granted capabilities (e.g. \
                        contract addresses / selectors now allowed). Edits take effect \
-                       immediately — subsequent strategy_run calls are gated by the new policy."
+                       immediately — subsequent strategy_run calls are gated by the new policy.",
+        meta = mutation_meta("safe-side-effects")
     )]
     async fn policy_set(
         &self,
@@ -1173,7 +1208,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
 
     #[tool(
         name = "trigger_register",
-        description = "Register a trigger bound to a strategy. Content-addressed (same strategy_id + kind + config + predicate yields the same trigger_id; returns `already_exists: true`). Workers are spawned by the daemon (Stream D). Pass an optional `note` (free-form text, NOT hashed) describing what this trigger does in plain language — surfaced in `trigger://list` and the web UI."
+        description = "Register a trigger bound to a strategy. Content-addressed (same strategy_id + kind + config + predicate yields the same trigger_id; returns `already_exists: true`). Workers are spawned by the daemon (Stream D). Pass an optional `note` (free-form text, NOT hashed) describing what this trigger does in plain language — surfaced in `trigger://list` and the web UI.",
+        meta = mutation_meta("safe-side-effects")
     )]
     async fn trigger_register(
         &self,
@@ -1223,7 +1259,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
 
     #[tool(
         name = "trigger_delete",
-        description = "[DESTRUCTIVE] Hard-delete a trigger and its event history. Idempotent (returns `deleted: false` if the trigger was already absent)."
+        description = "[DESTRUCTIVE] Hard-delete a trigger and its event history. Idempotent (returns `deleted: false` if the trigger was already absent).",
+        meta = mutation_meta("destructive")
     )]
     async fn trigger_delete(
         &self,
@@ -1244,7 +1281,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
 
     #[tool(
         name = "trigger_set_enabled",
-        description = "Enable or disable a trigger. Daemon (Stream D) resumes/aborts the worker on next pool sync; CRUD state persists either way."
+        description = "Enable or disable a trigger. Daemon (Stream D) resumes/aborts the worker on next pool sync; CRUD state persists either way.",
+        meta = mutation_meta("safe-side-effects")
     )]
     async fn trigger_set_enabled(
         &self,
