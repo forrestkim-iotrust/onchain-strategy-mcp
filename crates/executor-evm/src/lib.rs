@@ -44,7 +44,8 @@ pub use normalize::{NormalizedAction, NormalizedActionKind, normalize_action};
 pub use prices::{NATIVE_SENTINEL, PriceCache, resolve_usd_micros};
 pub use provider::build_provider;
 pub use read::{
-    BlockTag, ReadContractInput, get_code, get_native_balance, get_tx_receipt, read_contract,
+    BlockTag, GetLogsInput, GET_LOGS_MAX_RESULTS, LogBlockTag, ReadContractInput, TopicSlot,
+    get_code, get_logs, get_native_balance, get_tx_receipt, parse_b256, read_contract,
 };
 pub use simulate::{SimulationFailReason, SimulationOutcome, simulate_one, simulate_one_latest};
 pub use units::{format_units, format_units_from_str, parse_units};

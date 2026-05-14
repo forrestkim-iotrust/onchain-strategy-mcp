@@ -121,12 +121,25 @@ blocks the host thread on the call):
 - `ctx.evm.erc20Balance(token, address, blockTag?)` → base units as string
 - `ctx.evm.readContract({ address, abi, function, args, blockTag? })` →
   decoded return value (full ABI required; the runtime selects by name)
+- `ctx.evm.getLogs({ address, fromBlock?, toBlock?, topics?, blockTag? })` →
+  array of log rows `{ blockNumber, txHash, logIndex, address, topics[],
+  data, removed }`. Hard cap 5000 logs per response — narrow `fromBlock`
+  or `topics` if you hit it.
 - `ctx.evm.code(address, blockTag?)` → hex string of deployed bytecode
 - `ctx.evm.receipt(txHash)` → JSON receipt
 
 `blockTag` accepts `"latest" | "pending" | "earliest" | "<block_number>"` —
 historical reads work against archive RPCs. There is no async/await; do not
 use `await` inside a strategy.
+
+## `ctx.abi` decoders
+
+Pure host-side decoders for raw event-log payloads (no RPC, no journal):
+
+- `ctx.abi.decodeUint256(hexData, offsetBytes?)` → decimal string. Pulls a
+  32-byte big-endian uint256 from `hexData` at byte offset (default 0).
+  Useful for summing non-indexed `uint256` event fields returned by
+  `ctx.evm.getLogs`.
 
 ## Tool surface
 

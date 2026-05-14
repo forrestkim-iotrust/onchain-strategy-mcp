@@ -255,6 +255,7 @@ fn ctx_evm_keys_includes_all_phase4_surfaces() {
             const expected = [
                 "erc20Allowance",
                 "erc20Balance",
+                "getLogs",
                 "nativeBalance",
                 "readContract",
                 "readErc20",

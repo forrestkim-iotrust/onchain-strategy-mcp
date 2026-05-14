@@ -118,6 +118,7 @@ fn ctx_object_shape_matches_d04() {
     let mut actual: Vec<String> = serde_json::from_value(r).expect("array of strings");
     actual.sort();
     let mut expected = vec![
+        "abi".to_string(),     // v1.8: ctx.abi.decodeUint256 helper.
         "actions".to_string(),
         "address".to_string(), // Phase 4 D-11: ctx.address.* sub-namespace (04-04).
         "event".to_string(),   // v1.2 Trigger Core: ctx.event (null when no trigger).
