@@ -735,7 +735,13 @@
     // pill) as the Portfolio / Triggers tab so the look stays consistent
     // across surfaces.
     const all = (S.cache.triggers && S.cache.triggers.triggers) || [];
-    const mine = all.filter((t) => t.strategy_id === id);
+    // v1.8 lineage: a trigger may have been registered against a PRIOR
+    // version of this strategy. Match by lineage_id when both sides know
+    // it; fall back to strategy_id for legacy rows.
+    const lineageId = (d && d.lineage_id) || null;
+    const mine = all.filter((t) =>
+      (lineageId && t.strategy_lineage_id === lineageId) ||
+      t.strategy_id === id);
     const triggersSec = el("div", { class: "section" });
     triggersSec.appendChild(el("div", { class: "section-head" }, [
       el("span", { text: "triggers" }),
