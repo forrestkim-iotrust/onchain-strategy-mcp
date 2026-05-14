@@ -311,6 +311,39 @@ In addition to `ctx.evm.*` (read-only chain access) and `ctx.units.*` /
   to a USD number. `null` ⇒ no quote available. Cache TTL is 60s for hits,
   10s for negative results.
 
+v1.8 adds two helpers for event-derived state:
+
+- `ctx.evm.getLogs({ address, fromBlock?, toBlock?, topics?, blockTag? }) → Log[]`
+  — wraps `eth_getLogs`. `address` is a string or string[]; `fromBlock`
+  defaults to `"earliest"` and `toBlock` to `"latest"`. `topics[i]` may
+  be a string (exact), `string[]` (OR-set), or `null` (wildcard). Hard
+  cap is 5000 rows per response — narrow `fromBlock` or `topics` if you
+  hit it.
+- `ctx.abi.decodeUint256(hexData, offsetBytes?) → string` — pull a 32-byte
+  big-endian uint256 out of a log `data` blob as a decimal string.
+
+Useful for deriving cumulative state that current onchain reads don't
+preserve. Example: sum Aave V3 `Supply(reserve, user, onBehalfOf, amount,
+referralCode)` event amounts for the burner to get "true principal":
+
+```js
+const POOL  = "0xA238Dd80C259a72e81d7e4664a9801593F98d1c5";
+const TOPIC = "0x...Supply event signature...";
+const BURNER_TOPIC = "0x000...<padded burner address>";
+const logs = ctx.evm.getLogs({
+  address:   POOL,
+  fromBlock: "earliest",
+  topics:    [TOPIC, null, BURNER_TOPIC]  // [signature, reserve=any, user=burner]
+});
+let principal = 0n;
+for (const l of logs) {
+  // amount is the 4th uint256 word of data (Supply has 5 non-indexed-ish args;
+  // see the protocol's event layout for exact offset).
+  principal += BigInt(ctx.abi.decodeUint256(l.data, 96));
+}
+return { principal_raw: principal.toString() };
+```
+
 ```js
 view: (ctx, _records) => {
   const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
