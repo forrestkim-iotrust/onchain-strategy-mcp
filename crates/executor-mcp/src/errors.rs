@@ -558,6 +558,240 @@ pub fn storage_error(msg: impl Into<String>) -> McpError {
     )
 }
 
+// ─────────── v1.11 Track A — resource_not_found typed constructors ───────────
+//
+// These constructors centralise every `resource_not_found (-32002)` site in
+// the resource-read surface. Each emits `data.kind` for agent dispatch and a
+// `data.hint` naming the concrete next URI or tool to call. v1.4 §8 promised
+// every error carries a non-empty hint; calling these typed constructors is
+// the only sanctioned way to honor that contract for `resource_not_found`.
+
+/// `resource_not_found (-32002)` for a malformed `strategy://{id}` URI.
+/// The id slot did not match the 64-lowercase-hex shape — the read never
+/// touched the DB. Hint points the agent at `strategy://list` so they can
+/// discover valid ids.
+pub fn malformed_strategy_id(uri: &str) -> McpError {
+    let hint = require_hint(
+        "call resource strategy://list to see active strategy ids".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("malformed strategy id in uri: {uri}"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "malformed_strategy_id",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for a malformed `execution://{run_id}` or
+/// `journal://{run_id}` URI. The run_id slot did not match the 26-char
+/// alphanumeric ULID shape — the read never touched the DB. Hint points the
+/// agent at `execution://list` so they can fetch valid ids.
+pub fn malformed_run_id(uri: &str) -> McpError {
+    let hint = require_hint(
+        "fetch a valid run_id from execution://list[?strategy_id=...]".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("malformed run id in uri: {uri}"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "malformed_run_id",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for a malformed `strategy://lineage/{id}`
+/// URI (empty / missing lineage_id segment). Hint points at the lineage
+/// listing exposed via `strategy://list` (lineage ids are surfaced per-row).
+pub fn malformed_lineage_id(uri: &str) -> McpError {
+    let hint = require_hint(
+        "lineage_id must be a non-empty URI segment; list lineages via strategy://list (each row carries `lineage_id`)".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("malformed lineage_id in uri: {uri}"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "malformed_lineage_id",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for a malformed `strategy://by-name/{name}`
+/// URI (empty name segment).
+pub fn malformed_strategy_name(uri: &str) -> McpError {
+    let hint = require_hint(
+        "name must be a non-empty URI segment; list active names via strategy://list?status=active".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("malformed name in uri: {uri}"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "malformed_strategy_name",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for a well-formed `strategy://{id}` URI
+/// whose id has no row in the DB (or row exists but is unreachable for the
+/// requested view).
+pub fn strategy_not_found(uri: &str) -> McpError {
+    let hint = require_hint(hints::STRATEGY_LIST.to_string());
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("strategy {uri} not found"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "strategy_not_found",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for a well-formed `strategy://by-name/{name}`
+/// URI whose name has no active row.
+pub fn strategy_by_name_not_found(uri: &str, name: &str) -> McpError {
+    let hint = require_hint(hints::STRATEGY_LIST.to_string());
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("strategy with name `{name}` not found"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "strategy_by_name_not_found",
+            "uri": uri,
+            "name": name,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for `execution://{run_id}` /
+/// `journal://{run_id}` whose run_id is well-formed but has no row.
+pub fn run_not_found(uri: &str) -> McpError {
+    let hint = require_hint(
+        "list recent runs via execution://list".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("run {uri} not found"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "run_not_found",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for `trigger://{id}` whose id has no row.
+pub fn trigger_not_found(uri: &str) -> McpError {
+    let hint = require_hint(hints::TRIGGER_LIST.to_string());
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("trigger {uri} not found"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "trigger_not_found",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for `strategy://lineage/{id}` whose lineage
+/// has no active row. Surfaces the dormant state so the agent can re-register
+/// or read the lineage history for archived versions.
+pub fn lineage_no_active_version(uri: &str, lineage_id: &str) -> McpError {
+    let hint = require_hint(
+        "the lineage's most recent version was soft-deleted; \
+         re-register the strategy name to mint a new version OR \
+         read strategy://lineage/{id}/history for archived versions"
+            .to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("no active version for lineage `{lineage_id}`"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "lineage_no_active_version",
+            "uri": uri,
+            "lineage_id": lineage_id,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for `strategy://lineage/{id}/history` whose
+/// lineage_id is unknown (zero rows — active or soft-deleted).
+pub fn lineage_not_found(uri: &str, lineage_id: &str) -> McpError {
+    let hint = require_hint(
+        "list lineages via strategy://list; each row carries its `lineage_id`".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("no rows for lineage `{lineage_id}`"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "lineage_not_found",
+            "uri": uri,
+            "lineage_id": lineage_id,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for `examples://strategies/{name}` or
+/// `examples://contracts/{name}` whose name doesn't match an embedded asset.
+/// `known` surfaces the available names so the agent can self-correct in one
+/// hop.
+pub fn unknown_embedded_resource(uri: &str, known: &[&str]) -> McpError {
+    let hint = require_hint(
+        "list embedded examples via examples://strategies or examples://contracts; pick a name from `data.known`".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("unknown embedded resource: {uri}"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "unknown_embedded_resource",
+            "uri": uri,
+            "known": known,
+            "hint": hint,
+        })),
+    )
+}
+
+/// `resource_not_found (-32002)` for a URI that doesn't match any of the
+/// templates the server declares. The agent should consult
+/// `resources/templates/list` for the supported shapes.
+pub fn unsupported_resource_uri(uri: &str) -> McpError {
+    let hint = require_hint(
+        "call resources/templates/list to see supported URI shapes (strategy://, execution://, journal://, trigger://, examples://, docs://)".to_string(),
+    );
+    McpError::new(
+        ErrorCode::RESOURCE_NOT_FOUND,
+        format!("unsupported resource URI: {uri}"),
+        Some(json!({
+            "code": "resource_not_found",
+            "kind": "unsupported_resource_uri",
+            "uri": uri,
+            "hint": hint,
+        })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
