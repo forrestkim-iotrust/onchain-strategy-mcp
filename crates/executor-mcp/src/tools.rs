@@ -58,6 +58,12 @@ use crate::{
     },
 };
 
+/// Internal resolved form of [`StrategyGetInput`] after XOR validation.
+enum StrategyGetLookup {
+    ById(String),
+    ByName(String),
+}
+
 /// `strategy_list` input — single optional boolean. Declared inline because
 /// it is not shared with `executor-core` (no schema golden needed — the
 /// empty-args shape is invariant enough).
@@ -271,12 +277,30 @@ impl ExecutorServer {
         &self,
         Parameters(input): Parameters<StrategyGetInput>,
     ) -> Result<CallToolResult, McpError> {
+        // XOR validation — exactly one of `strategy_id` / `name` (modeled as
+        // a flat struct because Anthropic's MCP input_schema rejects top-level
+        // `anyOf`/`oneOf`).
+        let lookup = match (input.strategy_id, input.name) {
+            (Some(_), Some(_)) => {
+                return Err(invalid_params(
+                    "pass exactly one of `strategy_id` or `name`, not both",
+                ));
+            }
+            (None, None) => {
+                return Err(invalid_params(
+                    "pass exactly one of `strategy_id` or `name`",
+                ));
+            }
+            (Some(id), None) => StrategyGetLookup::ById(id),
+            (None, Some(name)) => StrategyGetLookup::ByName(name),
+        };
+
         let state = self.state.clone();
         let row = tokio::task::spawn_blocking(move || {
             let store = state.blocking_lock();
-            match input {
-                StrategyGetInput::ById { strategy_id } => store.get_strategy_by_id(&strategy_id),
-                StrategyGetInput::ByName { name } => store.get_strategy_by_name(&name),
+            match lookup {
+                StrategyGetLookup::ById(strategy_id) => store.get_strategy_by_id(&strategy_id),
+                StrategyGetLookup::ByName(name) => store.get_strategy_by_name(&name),
             }
         })
         .await

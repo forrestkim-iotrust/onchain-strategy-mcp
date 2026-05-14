@@ -46,14 +46,20 @@ pub struct StrategyRunInput {
 #[deprecated(note = "Use `StrategyRunInput` instead. The `_once` qualifier was a Phase-1 placeholder.")]
 pub use StrategyRunInput as StrategyRunOnceInput;
 
-/// XOR input for `strategy_get`: agent supplies either the content-addressed
-/// `strategy_id` or the human-friendly `name` (active strategies only).
+/// XOR input for `strategy_get`: agent supplies exactly one of
+/// `strategy_id` (content-addressed) or `name` (active strategies only).
+///
+/// Modeled as a flat struct with two optional fields instead of an
+/// `#[serde(untagged)]` enum so that the emitted JSON Schema has no
+/// top-level `anyOf`/`oneOf` (Anthropic's MCP `input_schema` rejects
+/// top-level unions). XOR is validated in the tool handler.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged, deny_unknown_fields)]
-#[schemars(extend("type" = "object"))]
-pub enum StrategyGetInput {
-    ById { strategy_id: String },
-    ByName { name: String },
+#[serde(deny_unknown_fields)]
+pub struct StrategyGetInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

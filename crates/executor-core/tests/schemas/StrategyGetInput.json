@@ -1,32 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StrategyGetInput",
-  "description": "XOR input for `strategy_get`: agent supplies either the content-addressed\n`strategy_id` or the human-friendly `name` (active strategies only).",
+  "description": "XOR input for `strategy_get`: agent supplies exactly one of\n`strategy_id` (content-addressed) or `name` (active strategies only).\n\nModeled as a flat struct with two optional fields instead of an\n`#[serde(untagged)]` enum so that the emitted JSON Schema has no\ntop-level `anyOf`/`oneOf` (Anthropic's MCP `input_schema` rejects\ntop-level unions). XOR is validated in the tool handler.",
   "type": "object",
-  "anyOf": [
-    {
-      "type": "object",
-      "properties": {
-        "strategy_id": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "strategy_id"
+  "properties": {
+    "name": {
+      "type": [
+        "string",
+        "null"
       ]
     },
-    {
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "name"
+    "strategy_id": {
+      "type": [
+        "string",
+        "null"
       ]
     }
-  ]
+  },
+  "additionalProperties": false
 }
