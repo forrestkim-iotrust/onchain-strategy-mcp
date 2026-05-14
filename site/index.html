@@ -1,36 +1,29 @@
 <!doctype html>
-<!--
-  onchain-strategy-mcp homepage (English).
-  Static. No build step. Open this file directly with file:// to preview.
-
-  GitHub Pages: Settings → Pages → Source: main branch, /site folder.
-  Live URL: https://forrestkim-iotrust.github.io/onchain-strategy-mcp/
--->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>onchain-strategy-mcp — the onchain execution layer for AI agents</title>
-<meta name="description" content="The onchain execution layer for AI agents. Local runtime that lets Claude sign, broadcast, react to events, and bundle atomic multi-step transactions.">
+<meta name="description" content="The onchain execution layer for AI agents. A local runtime that lets Claude sign, broadcast, watch chains, and bundle multi-step transactions on your machine.">
 <meta property="og:title" content="onchain-strategy-mcp">
 <meta property="og:description" content="The onchain execution layer for AI agents.">
 <meta property="og:type" content="website">
 <link rel="stylesheet" href="./styles.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2314171a'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='18' font-weight='700' text-anchor='middle' fill='%23d97757'%3E%3E%3C/text%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23201d1d'/%3E%3Ctext x='16' y='23' font-family='monospace' font-size='20' font-weight='700' text-anchor='middle' fill='%23fdfcfc'%3E%3E%3C/text%3E%3C/svg%3E">
 </head>
 <body>
 
 <header class="site-header">
   <div class="wrap">
-    <a class="brand" href="./index.html"><span class="dot">&gt;</span> onchain-strategy-mcp</a>
+    <a class="brand" href="./index.html">
+      <span class="dot">&gt;</span> onchain-strategy-mcp
+    </a>
     <nav class="nav" aria-label="Primary">
-      <a href="#scenarios" class="hide-sm">Scenarios</a>
-      <a href="#install">Install</a>
+      <a href="#how" class="hide-sm">How it works</a>
+      <a href="#install" class="hide-sm">Install</a>
       <a href="#faq" class="hide-sm">FAQ</a>
       <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a>
-      <span class="lang" aria-label="Language">
-        <b>EN</b> · <a href="./ko/index.html" hreflang="ko">KO</a>
-      </span>
+      <a href="#install" class="pill">Install →</a>
     </nav>
   </div>
 </header>
@@ -39,225 +32,272 @@
 
 <section class="hero">
   <div class="wrap">
-    <h1>The onchain execution layer for AI agents.</h1>
-    <p class="hero-sub">Local. Permissioned. Conversational.</p>
-
-    <div class="video-wrap">
-      <video autoplay muted loop playsinline preload="metadata" poster="./videos/scenario-a.jpg">
-        <source src="./videos/scenario-a.mp4" type="video/mp4">
-        <source src="./videos/scenario-a.webm" type="video/webm">
-        <p class="video-fallback">video coming online — see scenarios below</p>
-      </video>
-    </div>
-
-    <div class="codeblock hero-cmd" data-copy>
-      <button class="copy-btn" type="button" aria-label="Copy install command">COPY</button>
-<pre><span class="prompt">$ </span>npx onchain-strategy-mcp init</pre>
-    </div>
-    <p class="install-note">Mac or Linux. Node 18+. Claude Code.</p>
-
+    <h1>
+      The onchain execution layer<br>
+      for <span class="accent">AI agents</span>.
+    </h1>
+    <p class="lead">
+      A local runtime that gives Claude <strong>hands and eyes onchain</strong>.
+      Strategies run on your machine. Keys stay in the OS keychain.
+      Multi-step actions land as one atomic transaction.
+    </p>
     <div class="cta-row">
-      <a class="btn" href="#install">Install</a>
-      <a class="btn secondary" href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a>
+      <span class="install-line">
+        <code>npx onchain-strategy-mcp init</code>
+        <button class="copy-btn" type="button" data-copy="npx onchain-strategy-mcp init" aria-label="Copy install command">
+          <svg class="ic-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          <svg class="ic-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </button>
+      </span>
+      <a class="pill" href="#install">Install →</a>
+      <a class="pill ghost" href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a>
     </div>
   </div>
 </section>
 
-<section id="scenarios">
-  <div class="wrap">
-    <span class="eyebrow">Scenarios</span>
-    <h2>What people run.</h2>
-
-    <div class="scenario">
-      <h3>A. Auto-deposit funnel</h3>
-      <blockquote class="ask">when ETH or USDC arrives at my burner, auto-convert to USDC and supply it to Aave — keep ~$0.10 worth of ETH for gas.</blockquote>
-      <p>Claude registers the strategy plus two log triggers. Every drop hitting the wallet starts earning yield. Your only job is to send funds to the address.</p>
-      <div class="video-wrap">
-        <video autoplay muted loop playsinline preload="metadata" poster="./videos/scenario-a.jpg">
-          <source src="./videos/scenario-a.mp4" type="video/mp4">
-          <source src="./videos/scenario-a.webm" type="video/webm">
-          <p class="video-fallback">video coming online</p>
-        </video>
-      </div>
+<section class="split" id="how">
+  <div class="wrap split-grid">
+    <div class="split-text">
+      <h2>Tell Claude what to do.<br>It just does it.</h2>
+      <p>
+        Describe a goal in one sentence. Claude registers a strategy on
+        the local runtime, picks the venue, sets up the triggers, and
+        watches the chain. When funds arrive, the strategy fires, signs
+        locally, and broadcasts.
+      </p>
+      <p class="muted">
+        No copy-pasting Python. No exporting keys. No tool stack to
+        cobble together.
+      </p>
     </div>
-
-    <div class="scenario">
-      <h3>B. Yield comparator across protocols</h3>
-      <blockquote class="ask">compare USDC supply APY across Aave, Compound, and Moonwell on Base, hourly for the past 30 days.</blockquote>
-      <p>Claude writes a short view, walks past blocks via archive RPC, and hands back a table in seconds — the data already exists onchain.</p>
-      <div class="video-wrap">
-        <video autoplay muted loop playsinline preload="metadata" poster="./videos/scenario-b.jpg">
-          <source src="./videos/scenario-b.mp4" type="video/mp4">
-          <source src="./videos/scenario-b.webm" type="video/webm">
-          <p class="video-fallback">video coming online</p>
-        </video>
-      </div>
-    </div>
-
-    <div class="scenario">
-      <h3>C. Instant onchain reactor</h3>
-      <blockquote class="ask">watch the Aave oracle for ETH price updates. If price drops more than 2% in one update, repay my borrow.</blockquote>
-      <p>Claude attaches a log-event trigger. When the event fires onchain, the strategy runs within seconds.</p>
-      <div class="video-wrap">
-        <video autoplay muted loop playsinline preload="metadata" poster="./videos/scenario-c.jpg">
-          <source src="./videos/scenario-c.mp4" type="video/mp4">
-          <source src="./videos/scenario-c.webm" type="video/webm">
-          <p class="video-fallback">video coming online</p>
-        </video>
-      </div>
-    </div>
-
-    <div class="scenario">
-      <h3>D. Atomic multi-step</h3>
-      <blockquote class="ask">supply 0.1 USDC from my burner to Aave.</blockquote>
-      <p>Claude returns <code>[approve, supply]</code> as two actions; the runtime bundles them into a single EIP-7702 transaction. Both land or neither does.</p>
-      <div class="video-wrap">
-        <video autoplay muted loop playsinline preload="metadata" poster="./videos/scenario-d.jpg">
-          <source src="./videos/scenario-d.mp4" type="video/mp4">
-          <source src="./videos/scenario-d.webm" type="video/webm">
-          <p class="video-fallback">video coming online</p>
-        </video>
+    <div class="split-visual">
+      <div class="terminal" aria-label="Example session — auto-supply funnel">
+        <div class="terminal-chrome">
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-title">claude — onchain-strategy-mcp</span>
+        </div>
+        <div class="transcript">
+          <p class="t-user"><span class="t-prompt">&gt;</span> Auto-supply any ETH or USDC that arrives at my wallet so it earns yield.</p>
+          <p class="t-asst"><span class="t-dot">●</span> Compound III has the highest USDC supply rate on Base right now &mdash; 5.27% (Aave 4.12%, Moonwell 4.89%). I set the strategy to send incoming USDC there, and to swap incoming ETH into USDC on Uniswap first. I kept ~$0.10 worth of ETH aside for gas.</p>
+          <p class="t-follow"><span class="t-line">└</span> Registered and turned on. It will run automatically the next time funds arrive.</p>
+          <p class="t-user"><span class="t-prompt">&gt;</span> (a few days later) how did it go?</p>
+          <p class="t-asst"><span class="t-dot">●</span> Three days ago 1.0 ETH arrived. After the swap, 2,260 USDC went into Compound III (gas $0.04, tx 0xe7a14fbb…b9a01d).</p>
+          <p class="t-follow"><span class="t-line">└</span> Currently earning ~5.3% APR. Accumulated about $0.98 so far.</p>
+        </div>
       </div>
     </div>
   </div>
 </section>
 
-<section id="install">
+<section class="split alt">
+  <div class="wrap split-grid reverse">
+    <div class="split-text">
+      <h2>Reads real onchain history.<br>Decides with data.</h2>
+      <p>
+        Compare protocols, walk archive blocks, build datasets in seconds.
+        Then turn the recommendation into an automated strategy with one
+        more sentence — same conversation.
+      </p>
+      <p class="muted">
+        No APIs to glue. No spreadsheets to update. Just talk.
+      </p>
+    </div>
+    <div class="split-visual">
+      <div class="terminal" aria-label="Example session — yield comparator and rotator">
+        <div class="terminal-chrome">
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-dot"></span>
+          <span class="terminal-title">claude — onchain-strategy-mcp</span>
+        </div>
+        <div class="transcript">
+          <p class="t-user"><span class="t-prompt">&gt;</span> Compare USDC supply on Base &mdash; now and the past week.</p>
+          <p class="t-asst"><span class="t-dot">●</span> Right now: Compound III 5.27%, Moonwell 4.89%, Aave 4.12%.</p>
+          <p class="t-follow"><span class="t-line">└</span> Compound held 5% all week. Moonwell spiked to 6.2% Tuesday and dropped same-day. For peak chasing, I can register a rotator that switches when the post-gas gain beats $0.05.</p>
+          <p class="t-user"><span class="t-prompt">&gt;</span> do the rotator.</p>
+          <p class="t-asst"><span class="t-dot">●</span> Registered. Hourly check, $0.05+ minimum gain.</p>
+          <p class="t-user"><span class="t-prompt">&gt;</span> (a few days later) earnings report?</p>
+          <p class="t-asst"><span class="t-dot">●</span> One rebalance: Moonwell hit 5.8%, strategy moved out of Compound. Still in Moonwell.</p>
+          <p class="t-follow"><span class="t-line">└</span> $2.96 in interest. Sitting in Compound would have been about $2.79.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="features">
+  <div class="wrap features-grid">
+    <div class="feature">
+      <div class="feature-label">Local-first</div>
+      <p>The runtime, the keys, the state — all on your machine. No servers we run.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-label">Permissioned</div>
+      <p>Deny-by-default policy DSL gates every signing call. Outside the policy, nothing leaves the box.</p>
+    </div>
+    <div class="feature">
+      <div class="feature-label">Atomic by default</div>
+      <p>Multi-step plans bundle into one EIP-7702 transaction. No approve-and-pray gaps.</p>
+    </div>
+  </div>
+</section>
+
+<section class="usecases">
   <div class="wrap">
-    <span class="eyebrow">Install</span>
-    <h2>Two commands. Under a minute.</h2>
+    <h2 class="section-title">What you can build</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="card-tag">AUTO-FUNNEL</div>
+        <p>Every drop of ETH or USDC that lands at your wallet ends up earning yield, automatically.</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">YIELD ROTATOR</div>
+        <p>Liquidity follows the best rate — only when the post-gas gain beats your threshold.</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">EVENT REACTOR</div>
+        <p>Oracle drops, transfer hooks, mempool signals — strategies fire onchain within seconds.</p>
+      </div>
+      <div class="card">
+        <div class="card-tag">ATOMIC MULTI-STEP</div>
+        <p>approve + supply, swap + LP — land in one transaction via EIP-7702.</p>
+      </div>
+    </div>
+  </div>
+</section>
 
-    <div class="codeblock" data-copy>
-      <button class="copy-btn" type="button" aria-label="Copy install commands">COPY</button>
-<pre><span class="comment"># 1. One-line install (downloads the prebuilt binary, generates a burner wallet
-#    stored in your OS keychain, scaffolds .local/config.toml + .local/policy.toml)</span>
-<span class="prompt">$ </span>npx onchain-strategy-mcp init
+<section class="install-section" id="install">
+  <div class="wrap">
+    <h2 class="section-title">Install</h2>
+    <p class="muted small">Requires Node.js 18+ and Claude Code.</p>
 
-<span class="comment"># 2. Register with Claude Code (init prints this exact line for you)</span>
-<span class="prompt">$ </span>claude mcp add osmcp -- npx onchain-strategy-mcp serve</pre>
+    <div class="cmd-block">
+      <p class="cmd-comment"># Scaffold a burner (key → OS keychain), starter config + policy.</p>
+      <div class="cmd-row">
+        <code>npx onchain-strategy-mcp init</code>
+        <button class="copy-btn dark" type="button" data-copy="npx onchain-strategy-mcp init" aria-label="Copy command">
+          <svg class="ic-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          <svg class="ic-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </button>
+      </div>
     </div>
 
-    <p style="color:var(--fg-muted);max-width:62ch">Open Claude Code and:</p>
-    <blockquote class="ask" style="max-width:62ch">Register the example strategy at <code>examples/strategies/yield-snapshot.js</code>, run it once, and show me the result.</blockquote>
+    <div class="cmd-block">
+      <p class="cmd-comment"># Register the MCP server with Claude Code.</p>
+      <div class="cmd-row">
+        <code>claude mcp add osmcp -- npx onchain-strategy-mcp serve</code>
+        <button class="copy-btn dark" type="button" data-copy="claude mcp add osmcp -- npx onchain-strategy-mcp serve" aria-label="Copy command">
+          <svg class="ic-copy" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          <svg class="ic-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+        </button>
+      </div>
+    </div>
+    <p class="muted small">
+      Then open Claude Code and say <em>“load the getting_started prompt and walk me through this MCP.”</em>
+      The server self-documents.
+    </p>
 
     <details class="advanced">
-      <summary>Building from source (advanced)</summary>
-      <p style="color:var(--fg-muted)">If you'd rather build the Rust binary yourself instead of using the prebuilt one:</p>
-      <div class="codeblock" data-copy>
-        <button class="copy-btn" type="button" aria-label="Copy build-from-source commands">COPY</button>
-<pre><span class="prompt">$ </span>git clone https://github.com/forrestkim-iotrust/onchain-strategy-mcp.git
-<span class="prompt">$ </span>cd onchain-strategy-mcp
-<span class="prompt">$ </span>cargo build --release --bin executor-mcp
+      <summary>Build from source (advanced)</summary>
+      <pre class="code-block"><code>git clone https://github.com/forrestkim-iotrust/onchain-strategy-mcp.git
+cd onchain-strategy-mcp
+cargo build --release --bin executor-mcp
 
-<span class="prompt">$ </span>cast wallet new                       <span class="comment"># generate a burner; small amounts only</span>
-<span class="prompt">$ </span>export EXECUTOR_PRIVATE_KEY=0xyourkey
+cast wallet new
+export EXECUTOR_PRIVATE_KEY=0xyourkey
 
-<span class="prompt">$ </span>cp -R .local.example .local
-<span class="prompt">$ </span>$EDITOR .local/config.toml            <span class="comment"># RPC + signer env name</span>
-<span class="prompt">$ </span>$EDITOR .local/policy.toml            <span class="comment"># agent permissions</span>
+cp -R .local.example .local
+$EDITOR .local/config.toml
+$EDITOR .local/policy.toml
 
-<span class="prompt">$ </span>claude mcp add osmcp \
-    -e EXECUTOR_CONFIG=$PWD/.local/config.toml \
-    -e EXECUTOR_PRIVATE_KEY=$EXECUTOR_PRIVATE_KEY \
-    -- $PWD/target/release/executor-mcp</pre>
-      </div>
-      <p style="color:var(--fg-muted)">Requires <a href="https://rustup.rs/">Rust</a> and (optionally) <a href="https://book.getfoundry.sh/">Foundry</a> for <code>cast</code>.</p>
+claude mcp add osmcp \
+  -e EXECUTOR_CONFIG=$PWD/.local/config.toml \
+  -e EXECUTOR_PRIVATE_KEY=$EXECUTOR_PRIVATE_KEY \
+  -- $PWD/target/release/executor-mcp</code></pre>
+      <p class="muted small">Requires Rust and (optionally) Foundry for <code>cast</code>.</p>
     </details>
   </div>
 </section>
 
-<section id="faq" class="faq">
+<section class="faq" id="faq">
   <div class="wrap">
-    <span class="eyebrow">FAQ</span>
-    <h2>Short answers.</h2>
+    <h2 class="section-title">FAQ</h2>
 
     <details>
-      <summary>What chains?</summary>
-      <p>Built and tested on Base. Any EVM chain works with a config tweak. Non-EVM is on the roadmap.</p>
+      <summary>What chains does it support?</summary>
+      <p>Built and tested on Base. Any EVM-compatible chain works with a one-line config change. Solana and other non-EVM chains are on the roadmap.</p>
     </details>
 
     <details>
       <summary>What does it cost?</summary>
-      <p>Software is free. Gas on Base is typically under $0.10 per action. Start with $5–10 of ETH plus a small amount of whatever asset you want to work with.</p>
+      <p>The software is free. Onchain transactions cost gas — typically under $0.10 per action on Base. Start with $5–10 of ETH and a small amount of whatever asset you want to work with.</p>
     </details>
 
     <details>
-      <summary>Do I need to code?</summary>
-      <p>A little. You copy commands and edit a config once. Strategies are short JS — Claude writes them from your description.</p>
+      <summary>Do I need to be a programmer?</summary>
+      <p>A little. You'll copy commands and edit a config once. Strategies are short JavaScript functions, which Claude will write from your plain-language description.</p>
     </details>
 
     <details>
-      <summary>API keys?</summary>
-      <p>Public RPC works for basics. Mempool / live events / older history want an <a href="https://www.alchemy.com/">Alchemy</a> key. Free tier is enough.</p>
+      <summary>Do I need API keys?</summary>
+      <p>For basic use, no — public RPC works. For mempool watching, live event subscriptions, or deep historical reads, you'll want an Alchemy key. Free tier is enough.</p>
     </details>
 
     <details>
-      <summary>What is MCP?</summary>
-      <p>Model Context Protocol — how Claude Code talks to outside programs. This is one of those programs.</p>
+      <summary>What is "MCP"?</summary>
+      <p>Model Context Protocol — the standard way Claude Code (and similar AI clients) talk to outside programs. This project is one of those programs.</p>
     </details>
 
     <details>
-      <summary>How does the policy gate work?</summary>
-      <p>Deny-by-default DSL: allowed chains, contracts, function selectors, native-value caps, ERC20 spend caps. Anything outside is refused before signing.</p>
+      <summary>How does the policy model work?</summary>
+      <p>Deny-by-default DSL — allowed chains, contracts, function selectors, native value caps, ERC20 spend caps. Anything outside the policy is refused before signing.</p>
     </details>
 
     <details>
-      <summary>Bugs or questions?</summary>
-      <p><a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues">Open an issue</a>. Use GitHub's private security advisory for security-sensitive items.</p>
+      <summary>Where do I report bugs?</summary>
+      <p><a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues">Open an issue on GitHub.</a> Use the private security advisory feature for anything sensitive.</p>
     </details>
-  </div>
-</section>
-
-<section id="roadmap">
-  <div class="wrap">
-    <span class="eyebrow">Roadmap</span>
-    <h2>What's next.</h2>
-    <ul class="roadmap-list">
-      <li>
-        <span class="tag">next</span>
-        <span><strong>Self-documenting MCP session.</strong> Server ships populated instructions, prompts, and resource templates so a fresh session knows what it can do.</span>
-      </li>
-      <li>
-        <span class="tag">next</span>
-        <span><strong>External oracle triggers.</strong> Fire on Chainlink / Pyth / Redstone price updates, off-chain feeds, or HTTPS webhooks.</span>
-      </li>
-      <li>
-        <span class="tag">next</span>
-        <span><strong>WaaS integration.</strong> First-class adapters for Privy, Turnkey, Coinbase MPC — push permissioning into the wallet layer.</span>
-      </li>
-    </ul>
-    <p style="color:var(--fg-muted)"><a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp#roadmap">Full roadmap on GitHub →</a></p>
   </div>
 </section>
 
 </main>
 
+<script>
+  // Tiny copy-button helper. No deps.
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-copy');
+      if (!text) return;
+      (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject())
+        .then(function () {
+          btn.classList.add('copied');
+          setTimeout(function () { btn.classList.remove('copied'); }, 1400);
+        })
+        .catch(function () {
+          // Fallback: select range so the user can copy manually.
+          var range = document.createRange();
+          range.selectNode(btn.previousElementSibling);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+        });
+    });
+  });
+</script>
+
 <footer class="site-footer">
   <div class="wrap">
-    <div class="left">Apache 2.0 · Local-first — no servers we run, no accounts you create.</div>
-    <div>
-      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a> ·
-      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues">Issues</a> ·
-      <a href="./ko/index.html">한국어</a>
+    <div class="footer-left">
+      Apache 2.0 · Local-first — no servers, no accounts.
+    </div>
+    <div class="footer-right">
+      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp">GitHub</a>
+      <a href="https://github.com/forrestkim-iotrust/onchain-strategy-mcp/issues">Issues</a>
     </div>
   </div>
 </footer>
-
-<script>
-document.querySelectorAll('.codeblock[data-copy]').forEach(function (block) {
-  var btn = block.querySelector('.copy-btn');
-  var pre = block.querySelector('pre');
-  if (!btn || !pre) return;
-  btn.addEventListener('click', function () {
-    var text = pre.innerText.replace(/^\$\s?/gm, '').trim();
-    navigator.clipboard.writeText(text).then(function () {
-      btn.textContent = 'COPIED';
-      btn.classList.add('copied');
-      setTimeout(function () { btn.textContent = 'COPY'; btn.classList.remove('copied'); }, 1400);
-    });
-  });
-});
-</script>
 
 </body>
 </html>
