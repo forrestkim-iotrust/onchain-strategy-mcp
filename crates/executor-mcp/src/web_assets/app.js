@@ -745,6 +745,7 @@
       const tbl = el("table", { class: "compact" });
       tbl.appendChild(el("thead", null, [el("tr", null, [
         el("th", { text: "kind" }),
+        el("th", { text: "note" }),
         el("th", { text: "enabled" }),
         el("th", { text: "last fired" }),
         el("th", { text: "id" }),
@@ -753,6 +754,8 @@
       mine.forEach((t) => {
         const tr = el("tr");
         tr.appendChild(el("td", { class: "mono", text: t.kind || "" }));
+        tr.appendChild(el("td", { class: t.note ? "" : "dim",
+          text: t.note || "—", title: t.note || "" }));
         tr.appendChild(el("td", { class: "mono",
           text: t.enabled === false ? "no" : "yes" }));
         tr.appendChild(el("td", { class: "mono",
@@ -785,15 +788,18 @@
       ["name", "description", "tags", "created_at", "deleted_at",
        "trigger_kinds", "last_fire_at", "has_bundle", "view_uri"]
         .forEach((k) => { if (d[k] != null) meta[k] = d[k]; });
-      detailBody.appendChild(renderObjectAsKV(meta, chain));
+      const kv = renderObjectAsKV(meta, chain);
+      detailBody.appendChild(kv);
 
-      // Dedicated alignment row: badge + (when non-satisfied) inline
-      // copy-report button. The full structured detail is what the report
-      // carries — the UI itself stays compact.
+      // Inline policy_alignment as ANOTHER row in the same KV grid so the
+      // label/value column alignment stays consistent. Value cell carries
+      // the verdict badge + (when non-satisfied) the copy-report button +
+      // inline remediation hint.
       const pa = d.policy_alignment;
       if (pa && typeof pa === "object" && pa.verdict) {
+        kv.appendChild(el("div", { class: "k", text: "policy_alignment" }));
+        const vCell = el("div", { class: "v" });
         const row = el("div", { class: "row gap" });
-        row.appendChild(el("span", { class: "dim", text: "policy_alignment" }));
         row.appendChild(verdictBadge(pa.verdict));
         if (pa.verdict !== "satisfied") {
           const missingDesc = (pa.missing || []).map((m) => {
@@ -809,11 +815,12 @@
             remediation:  pa.remediation,
             detail_uri:   "strategy://" + (d.strategy_id || id),
           }));
-          if (pa.remediation) {
-            row.appendChild(el("span", { class: "dim small", text: pa.remediation }));
-          }
         }
-        detailBody.appendChild(row);
+        vCell.appendChild(row);
+        if (pa.verdict !== "satisfied" && pa.remediation) {
+          vCell.appendChild(el("div", { class: "dim small", text: pa.remediation }));
+        }
+        kv.appendChild(vCell);
       }
 
       // view auto-render
@@ -960,18 +967,20 @@
 
     const tbl = el("table", { class: "t" });
     tbl.appendChild(el("thead", null, [el("tr", null, [
-      el("th", { text: "id" }),
       el("th", { text: "kind" }),
+      el("th", { text: "note" }),
       el("th", { text: "strategy" }),
       el("th", { text: "enabled" }),
       el("th", { text: "last fire" }),
       el("th", { text: "created" }),
+      el("th", { text: "id" }),
     ])]));
     const tbody = el("tbody");
     list.forEach((t) => {
       const tr = el("tr");
-      tr.appendChild(el("td", { class: "mono", text: fmt.shortHex(t.id, 6, 4), title: t.id }));
       tr.appendChild(el("td", { class: "mono", text: t.kind || "—" }));
+      tr.appendChild(el("td", { class: t.note ? "" : "dim",
+        text: t.note || "—", title: t.note || "" }));
       const stratName = stratMap[t.strategy_id];
       const stratTd = el("td");
       if (stratName) {
@@ -993,6 +1002,7 @@
         text: t.last_fired_at ? fmt.rel(t.last_fired_at) : "—" }));
       tr.appendChild(el("td", { class: "mono", title: t.created_at || "",
         text: t.created_at ? fmt.rel(t.created_at) : "—" }));
+      tr.appendChild(el("td", { class: "mono", text: fmt.shortHex(t.id, 6, 4), title: t.id }));
       tbody.appendChild(tr);
     });
     tbl.appendChild(tbody);

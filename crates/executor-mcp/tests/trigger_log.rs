@@ -64,6 +64,7 @@ async fn log_worker_fires_against_live_alchemy_wss() -> Result<()> {
             }),
             predicate: None,
             dedup_window_ms: None,
+            note: None,
         })?;
         match outcome {
             TriggerRegisterOutcome::Created(t) => t.id,

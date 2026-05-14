@@ -46,6 +46,7 @@ async fn interval_worker_fires_and_records_events() -> Result<()> {
             config: serde_json::json!({ "interval_ms": 200 }),
             predicate: None,
             dedup_window_ms: None,
+            note: None,
         })?;
         match outcome {
             TriggerRegisterOutcome::Created(t) => t.id,

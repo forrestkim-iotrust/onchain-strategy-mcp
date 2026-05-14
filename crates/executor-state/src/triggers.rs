@@ -81,6 +81,7 @@ fn map_trigger_row(
     last_fired_at: Option<String>,
     created_at: String,
     dedup_window_ms: Option<i64>,
+    note: Option<String>,
 ) -> Result<Trigger, StateError> {
     Ok(Trigger {
         id,
@@ -92,6 +93,7 @@ fn map_trigger_row(
         last_fired_at,
         created_at,
         dedup_window_ms: dedup_window_ms.and_then(|n| u64::try_from(n).ok()),
+        note,
     })
 }
 
@@ -130,8 +132,8 @@ pub(crate) fn register(
     let dedup = input.dedup_window_ms.map(|n| n as i64);
     conn.execute(
         "INSERT INTO triggers(id, strategy_id, kind, config_json, predicate_js,
-                              enabled, last_fired_at, created_at, dedup_window_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, ?6, ?7)",
+                              enabled, last_fired_at, created_at, dedup_window_ms, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, ?6, ?7, ?8)",
         params![
             &id,
             &input.strategy_id,
@@ -140,6 +142,7 @@ pub(crate) fn register(
             input.predicate.as_deref(),
             &now,
             dedup,
+            input.note.as_deref(),
         ],
     )?;
 
@@ -153,6 +156,7 @@ pub(crate) fn register(
         last_fired_at: None,
         created_at: now,
         dedup_window_ms: input.dedup_window_ms,
+        note: input.note,
     }))
 }
 
@@ -161,7 +165,7 @@ pub(crate) fn list(
     filter: Option<&TriggerListFilter>,
 ) -> Result<Vec<TriggerSummary>, StateError> {
     let mut sql = String::from(
-        "SELECT id, strategy_id, kind, enabled, last_fired_at, created_at \
+        "SELECT id, strategy_id, kind, enabled, last_fired_at, created_at, note \
          FROM triggers",
     );
     let mut clauses: Vec<String> = Vec::new();
@@ -197,11 +201,12 @@ pub(crate) fn list(
                 r.get::<_, i64>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, String>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, sid, kind, enabled, last_fired_at, created_at) in rows {
+    for (id, sid, kind, enabled, last_fired_at, created_at, note) in rows {
         out.push(TriggerSummary {
             id,
             strategy_id: sid,
@@ -209,6 +214,7 @@ pub(crate) fn list(
             enabled: enabled != 0,
             last_fired_at,
             created_at,
+            note,
         });
     }
     Ok(out)
@@ -217,7 +223,7 @@ pub(crate) fn list(
 pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Trigger>, StateError> {
     conn.query_row(
         "SELECT id, strategy_id, kind, config_json, predicate_js, enabled,
-                last_fired_at, created_at, dedup_window_ms
+                last_fired_at, created_at, dedup_window_ms, note
          FROM triggers WHERE id = ?1",
         params![id],
         |r| {
@@ -231,11 +237,12 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Trigger>, 
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, String>(7)?,
                 r.get::<_, Option<i64>>(8)?,
+                r.get::<_, Option<String>>(9)?,
             ))
         },
     )
     .optional()?
-    .map(|t| map_trigger_row(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8))
+    .map(|t| map_trigger_row(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9))
     .transpose()
 }
 

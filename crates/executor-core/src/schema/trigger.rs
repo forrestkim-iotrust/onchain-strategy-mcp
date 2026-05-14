@@ -72,6 +72,12 @@ pub struct RegisterTriggerInput {
     pub predicate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup_window_ms: Option<u64>,
+    /// Free-form natural-language description of what this trigger does
+    /// (e.g. `"fires on burner USDC inbound transfer"`). NOT part of the
+    /// content hash — purely descriptive so operators can recognise a
+    /// trigger without decoding the address / topic blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -89,6 +95,9 @@ pub struct Trigger {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup_window_ms: Option<u64>,
+    /// v1.6.x: free-form operator-supplied note. See `RegisterTriggerInput::note`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -100,6 +109,8 @@ pub struct TriggerSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fired_at: Option<String>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -47,6 +47,7 @@ fn trigger_crud_round_trip() {
         config: json!({ "interval_ms": 1000 }),
         predicate: None,
         dedup_window_ms: None,
+        note: None,
     };
     let outcome = store.register_trigger(input.clone()).expect("register");
     let trigger_id = match outcome {
@@ -141,6 +142,7 @@ fn trigger_register_unknown_strategy_is_not_found() {
         config: json!({}),
         predicate: None,
         dedup_window_ms: None,
+        note: None,
     };
     let err = store.register_trigger(input).expect_err("strategy must exist");
     let msg = format!("{err}");
@@ -157,6 +159,7 @@ fn trigger_events_round_trip_and_limit() {
         config: json!({}),
         predicate: None,
         dedup_window_ms: None,
+        note: None,
     };
     let trigger = match store.register_trigger(input).expect("register") {
         TriggerRegisterOutcome::Created(t) => t,

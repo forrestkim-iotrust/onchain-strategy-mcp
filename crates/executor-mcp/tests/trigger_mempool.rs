@@ -60,6 +60,7 @@ async fn mempool_worker_fires_against_live_alchemy_wss() -> Result<()> {
             config: serde_json::json!({ "to_address": [USDC_BASE] }),
             predicate: None,
             dedup_window_ms: None,
+            note: None,
         })?;
         match outcome {
             TriggerRegisterOutcome::Created(t) => t.id,

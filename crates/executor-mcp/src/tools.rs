@@ -978,7 +978,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
 
     #[tool(
         name = "trigger_register",
-        description = "Register a trigger bound to a strategy. Content-addressed (same strategy_id + kind + config + predicate yields the same trigger_id; returns `already_exists: true`). Workers are spawned by the daemon (Stream D)."
+        description = "Register a trigger bound to a strategy. Content-addressed (same strategy_id + kind + config + predicate yields the same trigger_id; returns `already_exists: true`). Workers are spawned by the daemon (Stream D). Pass an optional `note` (free-form text, NOT hashed) describing what this trigger does in plain language — surfaced in `trigger://list` and the web UI."
     )]
     async fn trigger_register(
         &self,
