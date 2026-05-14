@@ -22,11 +22,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy::eips::BlockId;
+use alloy::eips::BlockNumberOrTag;
 use alloy::providers::{DynProvider, Provider};
 use alloy::rpc::types::TransactionRequest;
+use alloy::rpc::types::eth::{Filter, ValueOrArray};
 use alloy_dyn_abi::{DynSolType, DynSolValue, FunctionExt, JsonAbiExt};
 use alloy_json_abi::{Function, JsonAbi};
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 
 use crate::dyn_abi::{dyn_sol_to_js_value, js_value_to_dyn_sol};
 use crate::{EvmConfig, EvmError};
@@ -335,6 +337,256 @@ pub fn sanitize_revert_reason(s: &str) -> String {
     out
 }
 
+/// v1.8 `ctx.evm.getLogs` — block-range / topic filter over `eth_getLogs`.
+///
+/// Behaviour mirrors [`read_contract`]:
+/// - `tokio::time::timeout(cfg.call_timeout, …)` wraps the RPC.
+/// - Returns plain `serde_json::Value` (Array of log objects) consumable by
+///   the JS sandbox without further conversion.
+///
+/// Limits (enforced AFTER fetch so a too-big request fails loudly rather than
+/// silently truncating):
+/// - Up to [`GET_LOGS_MAX_RESULTS`] logs per response. Beyond that we surface
+///   `EvmError::Decode { category: "get_logs_too_many" }` — the host binding
+///   stringifies the typed error onto the wire with a "narrow the filter"
+///   hint baked into the JS-side error message.
+pub const GET_LOGS_MAX_RESULTS: usize = 5_000;
+
+/// Block tag for `getLogs` `fromBlock` / `toBlock`. Distinct from
+/// [`BlockTag`] (`read_contract`) because `getLogs` accepts `"earliest"` —
+/// `eth_call` does not.
+#[derive(Debug, Clone, Copy)]
+pub enum LogBlockTag {
+    Latest,
+    Pending,
+    Earliest,
+    Finalized,
+    Safe,
+    Number(u64),
+}
+
+impl LogBlockTag {
+    fn to_alloy(self) -> BlockNumberOrTag {
+        match self {
+            LogBlockTag::Latest => BlockNumberOrTag::Latest,
+            LogBlockTag::Pending => BlockNumberOrTag::Pending,
+            LogBlockTag::Earliest => BlockNumberOrTag::Earliest,
+            LogBlockTag::Finalized => BlockNumberOrTag::Finalized,
+            LogBlockTag::Safe => BlockNumberOrTag::Safe,
+            LogBlockTag::Number(n) => BlockNumberOrTag::Number(n),
+        }
+    }
+}
+
+/// Topic filter slot: a single B256, an OR-set of B256s, or wildcard.
+#[derive(Debug, Clone, Default)]
+pub enum TopicSlot {
+    /// Wildcard — matches any value at this position.
+    #[default]
+    Any,
+    /// Exact match.
+    One(B256),
+    /// OR-set: any of these matches.
+    Many(Vec<B256>),
+}
+
+impl TopicSlot {
+    /// Parse a `serde_json::Value` into a `TopicSlot`.
+    ///   - `null` → `Any`
+    ///   - string → `One(b256)`
+    ///   - array of strings → `Many(b256s)` (empty array → `Any`)
+    pub fn from_json(v: &serde_json::Value) -> Result<Self, EvmError> {
+        match v {
+            serde_json::Value::Null => Ok(TopicSlot::Any),
+            serde_json::Value::String(s) => {
+                let h = parse_b256(s)?;
+                Ok(TopicSlot::One(h))
+            }
+            serde_json::Value::Array(arr) => {
+                if arr.is_empty() {
+                    return Ok(TopicSlot::Any);
+                }
+                let mut out = Vec::with_capacity(arr.len());
+                for (i, item) in arr.iter().enumerate() {
+                    match item {
+                        serde_json::Value::Null => continue,
+                        serde_json::Value::String(s) => out.push(parse_b256(s)?),
+                        _ => {
+                            return Err(EvmError::Encode {
+                                category: std::borrow::Cow::Borrowed("get_logs_topic_shape"),
+                                detail_for_log: format!(
+                                    "topic[{i}] must be 0x-prefixed 32-byte hex string or null"
+                                ),
+                            });
+                        }
+                    }
+                }
+                if out.is_empty() {
+                    Ok(TopicSlot::Any)
+                } else if out.len() == 1 {
+                    Ok(TopicSlot::One(out.into_iter().next().unwrap()))
+                } else {
+                    Ok(TopicSlot::Many(out))
+                }
+            }
+            _ => Err(EvmError::Encode {
+                category: std::borrow::Cow::Borrowed("get_logs_topic_shape"),
+                detail_for_log: "topic entry must be a string, array of strings, or null".into(),
+            }),
+        }
+    }
+}
+
+/// Parse a `0x`-prefixed 32-byte hex string into [`B256`], wrapping the error
+/// in [`EvmError::Encode`] with `category = "bad_topic"`.
+pub fn parse_b256(s: &str) -> Result<B256, EvmError> {
+    B256::from_str(s).map_err(|e| EvmError::Encode {
+        category: std::borrow::Cow::Borrowed("bad_topic"),
+        detail_for_log: format!("topic parse {s:?}: {e}"),
+    })
+}
+
+/// JS-facing input shape for `ctx.evm.getLogs`. The host binding builds this
+/// from the JS argument object before handing off to [`get_logs`].
+#[derive(Debug, Clone)]
+pub struct GetLogsInput {
+    pub addresses: Vec<String>,
+    pub from_block: LogBlockTag,
+    pub to_block: LogBlockTag,
+    /// Up to 4 topic slots per Ethereum's `eth_getLogs` shape. Topics beyond
+    /// index 3 are rejected at the host binding boundary.
+    pub topics: Vec<TopicSlot>,
+}
+
+/// Phase 4-aligned host helper for `eth_getLogs`.
+///
+/// 1. Parse addresses (1..N) as `Address`.
+/// 2. Build alloy `Filter` (addresses + from/to + up-to-4 topic slots).
+/// 3. `tokio::time::timeout(cfg.call_timeout, provider.get_logs(&filter))`.
+/// 4. Enforce [`GET_LOGS_MAX_RESULTS`] hard cap.
+/// 5. Map each `alloy_rpc_types_eth::Log` into a plain JSON object — the
+///    JS-side decoder shape (`blockNumber`, `txHash`, `logIndex`, `address`,
+///    `topics`, `data`, `removed`).
+pub async fn get_logs(
+    provider: Arc<DynProvider>,
+    cfg: &EvmConfig,
+    input: GetLogsInput,
+) -> Result<serde_json::Value, EvmError> {
+    // 1. Addresses.
+    if input.addresses.is_empty() {
+        return Err(EvmError::Encode {
+            category: std::borrow::Cow::Borrowed("get_logs_no_address"),
+            detail_for_log: "addresses[] must contain at least one entry".into(),
+        });
+    }
+    let mut parsed_addrs: Vec<Address> = Vec::with_capacity(input.addresses.len());
+    for s in &input.addresses {
+        let a = Address::from_str(s).map_err(|e| EvmError::Encode {
+            category: std::borrow::Cow::Borrowed("bad_address"),
+            detail_for_log: format!("address parse {s:?}: {e}"),
+        })?;
+        parsed_addrs.push(a);
+    }
+
+    // 2. Build the alloy filter.
+    let mut filter = Filter::new()
+        .from_block(input.from_block.to_alloy())
+        .to_block(input.to_block.to_alloy());
+    filter = if parsed_addrs.len() == 1 {
+        filter.address(parsed_addrs[0])
+    } else {
+        filter.address(ValueOrArray::Array(parsed_addrs.clone()))
+    };
+    if input.topics.len() > 4 {
+        return Err(EvmError::Encode {
+            category: std::borrow::Cow::Borrowed("get_logs_too_many_topics"),
+            detail_for_log: format!(
+                "topics[] has {} entries; eth_getLogs supports up to 4",
+                input.topics.len()
+            ),
+        });
+    }
+    for (i, slot) in input.topics.iter().enumerate() {
+        // Skip Any (wildcard); leaving the slot empty is the default.
+        let topic_set: alloy::rpc::types::eth::Topic = match slot {
+            TopicSlot::Any => continue,
+            TopicSlot::One(h) => (*h).into(),
+            TopicSlot::Many(hs) => hs.clone().into(),
+        };
+        filter = match i {
+            0 => filter.event_signature(topic_set),
+            1 => filter.topic1(topic_set),
+            2 => filter.topic2(topic_set),
+            3 => filter.topic3(topic_set),
+            _ => unreachable!(),
+        };
+    }
+
+    // 3. RPC with timeout.
+    let call_fut = provider.get_logs(&filter);
+    let logs = match tokio::time::timeout(cfg.call_timeout, call_fut).await {
+        Err(_) => return Err(EvmError::Timeout),
+        Ok(Err(e)) => {
+            return Err(EvmError::Transport {
+                detail_for_log: format!("eth_getLogs: {e}"),
+            });
+        }
+        Ok(Ok(v)) => v,
+    };
+
+    // 4. Hard cap. Surface as a typed Decode error so the wire taxonomy is
+    //    `evm_decode_error` (host classifies via Display). The JS binding
+    //    composes a user-facing hint on top of the wire-safe Display string.
+    if logs.len() > GET_LOGS_MAX_RESULTS {
+        return Err(EvmError::Decode {
+            category: std::borrow::Cow::Borrowed("get_logs_too_many"),
+            detail_for_log: format!(
+                "eth_getLogs returned {} > cap {GET_LOGS_MAX_RESULTS}",
+                logs.len()
+            ),
+        });
+    }
+
+    // 5. Map each log to a plain JSON object. We do NOT round-trip alloy's
+    //    own Serialize impl because its camelCase / null-skipping shape can
+    //    drift across versions; the JS sandbox needs a stable, minimal
+    //    contract.
+    let arr: Vec<serde_json::Value> = logs
+        .into_iter()
+        .map(|l| {
+            let topics: Vec<serde_json::Value> = l
+                .topics()
+                .iter()
+                .map(|t| serde_json::Value::String(format!("0x{}", hex_encode_lower(t.as_slice()))))
+                .collect();
+            let data_hex = format!("0x{}", hex_encode_lower(l.inner.data.data.as_ref()));
+            let address_hex = format!("0x{}", hex_encode_lower(l.inner.address.as_slice()));
+            serde_json::json!({
+                "blockNumber": l.block_number.unwrap_or(0),
+                "txHash":      l.transaction_hash
+                    .map(|h| format!("0x{}", hex_encode_lower(h.as_slice())))
+                    .unwrap_or_else(|| "0x".to_string()),
+                "logIndex":    l.log_index.unwrap_or(0),
+                "address":     address_hex,
+                "topics":      topics,
+                "data":        data_hex,
+                "removed":     l.removed,
+            })
+        })
+        .collect();
+    Ok(serde_json::Value::Array(arr))
+}
+
+fn hex_encode_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
 fn hex_decode_loose(s: &str) -> Option<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
         return None;
@@ -505,5 +757,136 @@ mod tests {
                    48656c6c6f20576f726c64210000000000000000000000000000000000000000";
         let reason = try_extract_revert_reason(raw).expect("decodable");
         assert_eq!(reason, "Hello World!");
+    }
+
+    #[test]
+    fn get_logs_rejects_empty_address_list() {
+        // No address — encoding error before any RPC.
+        let cfg = EvmConfig::default();
+        let provider = crate::build_provider(&cfg).unwrap();
+        let input = GetLogsInput {
+            addresses: vec![],
+            from_block: LogBlockTag::Earliest,
+            to_block: LogBlockTag::Latest,
+            topics: vec![],
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(get_logs(provider, &cfg, input)).unwrap_err();
+        match err {
+            EvmError::Encode { category, .. } => assert_eq!(category, "get_logs_no_address"),
+            other => panic!("expected Encode(get_logs_no_address), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_logs_rejects_bad_address() {
+        let cfg = EvmConfig::default();
+        let provider = crate::build_provider(&cfg).unwrap();
+        let input = GetLogsInput {
+            addresses: vec!["not-an-address".into()],
+            from_block: LogBlockTag::Earliest,
+            to_block: LogBlockTag::Latest,
+            topics: vec![],
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(get_logs(provider, &cfg, input)).unwrap_err();
+        match err {
+            EvmError::Encode { category, .. } => assert_eq!(category, "bad_address"),
+            other => panic!("expected Encode(bad_address), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_logs_rejects_too_many_topic_slots() {
+        let cfg = EvmConfig::default();
+        let provider = crate::build_provider(&cfg).unwrap();
+        let input = GetLogsInput {
+            addresses: vec!["0x0000000000000000000000000000000000000001".into()],
+            from_block: LogBlockTag::Earliest,
+            to_block: LogBlockTag::Latest,
+            topics: vec![
+                TopicSlot::Any,
+                TopicSlot::Any,
+                TopicSlot::Any,
+                TopicSlot::Any,
+                TopicSlot::Any,
+            ],
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = rt.block_on(get_logs(provider, &cfg, input)).unwrap_err();
+        match err {
+            EvmError::Encode { category, .. } => assert_eq!(category, "get_logs_too_many_topics"),
+            other => panic!("expected Encode(get_logs_too_many_topics), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_logs_timeout_fires_when_rpc_unreachable() {
+        let cfg = EvmConfig::from_raw(
+            "http://127.0.0.1:1",
+            200,
+            "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        )
+        .unwrap();
+        let provider = crate::build_provider(&cfg).unwrap();
+        let input = GetLogsInput {
+            addresses: vec!["0x0000000000000000000000000000000000000001".into()],
+            from_block: LogBlockTag::Earliest,
+            to_block: LogBlockTag::Latest,
+            topics: vec![],
+        };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let err = rt.block_on(get_logs(provider, &cfg, input)).unwrap_err();
+        let elapsed = start.elapsed();
+        // Either Timeout or Transport — both surface as evm_rpc_error.
+        assert_eq!(err.data_kind(), "evm_rpc_error");
+        assert!(
+            elapsed < std::time::Duration::from_millis(5_000),
+            "get_logs hung: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn topic_slot_from_json_handles_shapes() {
+        // null → Any
+        assert!(matches!(
+            TopicSlot::from_json(&serde_json::Value::Null).unwrap(),
+            TopicSlot::Any
+        ));
+        // empty array → Any
+        assert!(matches!(
+            TopicSlot::from_json(&json!([])).unwrap(),
+            TopicSlot::Any
+        ));
+        // single string → One
+        let h = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        assert!(matches!(
+            TopicSlot::from_json(&json!(h)).unwrap(),
+            TopicSlot::One(_)
+        ));
+        // array of strings → Many
+        assert!(matches!(
+            TopicSlot::from_json(&json!([h, h])).unwrap(),
+            TopicSlot::Many(v) if v.len() == 2
+        ));
+        // bad hex → Encode error
+        let err = TopicSlot::from_json(&json!("not-hex")).unwrap_err();
+        match err {
+            EvmError::Encode { category, .. } => assert_eq!(category, "bad_topic"),
+            other => panic!("expected Encode(bad_topic), got {other:?}"),
+        }
     }
 }
