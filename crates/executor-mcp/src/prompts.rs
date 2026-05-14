@@ -19,6 +19,7 @@ use executor_core::schema::prompt_args::{
     AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, WriteEvmStrategyArgs,
 };
 use executor_policy::LoadedPolicy;
+#[cfg(test)]
 use executor_state::StrategySummary;
 use rmcp::{
     ErrorData as McpError, RoleServer,
@@ -130,9 +131,30 @@ const BUNDLE_SKELETON: &str = r#"```js
 })
 ```"#;
 
+/// v1.11 Track H: collapse a `McpError` to a one-line reason for the
+/// `getting_started` "⚠️ Partial: …" markers. The full structured error
+/// envelope would dominate the briefing; the caller can re-read the URI
+/// directly via `resources/read` for full forensics.
+fn short_err(e: &McpError) -> String {
+    let m: &str = e.message.as_ref();
+    let line = m.lines().next().unwrap_or("error");
+    let trimmed: String = line.chars().take(120).collect();
+    if line.chars().count() > 120 {
+        format!("{trimmed}…")
+    } else {
+        trimmed
+    }
+}
+
 /// Build a compact markdown table of currently registered strategies. When the
 /// list is empty, returns a one-line "no strategies registered" placeholder so
 /// the agent knows it's an empty-state run.
+///
+/// v1.11 Track H: kept for backwards-compatible test coverage of the
+/// empty-state placeholder contract. The live `getting_started` prompt now
+/// derives its inventory line from the prefetched `strategy://list` JSON
+/// instead of inlining a Markdown table.
+#[cfg(test)]
 fn format_strategy_table(list: &[StrategySummary]) -> String {
     if list.is_empty() {
         return "_(no strategies registered yet — empty state)_".to_string();
@@ -452,74 +474,295 @@ impl ExecutorServer {
         .with_description("Guided strategy review"))
     }
 
-    /// v1.4 Track E1: refreshed `getting_started` — prefetches the live
-    /// strategy list and the loaded policy and inlines them in the body so a
-    /// fresh agent has a one-screen orientation without any further tool
-    /// calls. See `.planning/v1.4-AGENT-UX-DESIGN.md` §9.
+    /// v1.11 Track H: canonical first-screen briefing.
+    ///
+    /// Prefetches live state via `crate::resources::dispatch_uri_to_json` so a
+    /// fresh agent has a single composed snapshot — chain/RPC posture, the
+    /// strategy + trigger inventory, the policy fingerprint, and a 24h run
+    /// rollup — without making N additional resource reads. Composes a
+    /// state-conditional playbook (exactly ONE of empty/partial/active) and
+    /// the namespace map. Graceful degradation: any prefetch that errors
+    /// prepends a `⚠️ Partial: <reason>` note to the relevant section and the
+    /// rest of the body renders normally.
+    ///
+    /// Note: `server.get_info().instructions` is intentionally slim and only
+    /// points here — the namespace map and first-action playbook are the
+    /// single source of truth in this prompt body.
     #[prompt(
         name = "getting_started",
-        description = "Orient a fresh agent: inlined strategy_list + policy + 5-step first-action playbook."
+        description = "Canonical first-screen briefing: current state + first-action playbook + namespace map (single source of truth)."
     )]
     async fn getting_started(
         &self,
         Parameters(_args): Parameters<EmptyPromptArgs>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
-        // Prefetch live state — single short DB read on the StateStore mutex.
-        let state = self.state.clone();
-        let strategies: Vec<StrategySummary> = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.list_strategies(false).unwrap_or_default()
-        })
-        .await
-        .unwrap_or_default();
-        let policy_summary = {
-            let guard = self.policy.read().await;
-            format_policy_summary(guard.as_ref())
+        use crate::resources::{ViewEvm, dispatch_uri_to_json};
+
+        // Build a minimal ViewEvm — the URIs we prefetch here don't actually
+        // exercise the JS view sandbox, so a None provider + default config is
+        // sufficient. Pulling the real provider would force an RPC connect
+        // before the agent has even seen the briefing, which is exactly the
+        // posture problem this prompt is trying to surface (not paper over).
+        let evm = ViewEvm::default();
+
+        // ── Prefetch — each call independently degrades. ──
+        let strategies_json = dispatch_uri_to_json(
+            "strategy://list?summary=true".to_string(),
+            self.state.clone(),
+            evm.clone(),
+        )
+        .await;
+        let triggers_json = dispatch_uri_to_json(
+            "trigger://list".to_string(),
+            self.state.clone(),
+            evm.clone(),
+        )
+        .await;
+        let policy_json = dispatch_uri_to_json(
+            "policy://current".to_string(),
+            self.state.clone(),
+            evm.clone(),
+        )
+        .await;
+        // Last 24h: list_runs with no status filter — the per-status counts
+        // come from the same execution://list dispatch via simple status
+        // groupings on the response array.
+        let since_24h = chrono::Utc::now() - chrono::Duration::hours(24);
+        let since_24h_rfc = since_24h.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let runs_json = dispatch_uri_to_json(
+            format!("execution://list?since={since_24h_rfc}&limit=200"),
+            self.state.clone(),
+            evm,
+        )
+        .await;
+
+        // ── Current state extraction (each block degrades independently). ──
+        let chain_label = match self.chain_id().await {
+            Ok(id) => format!("chain {id}"),
+            Err(_) => "unconfigured".to_string(),
         };
-        let strategy_table = format_strategy_table(&strategies);
-        let empty = strategies.is_empty();
+        let rpc_state = {
+            let url = self.evm_config.rpc_url.as_str();
+            // Mask off the path/query — the host+scheme is enough for posture.
+            match self.evm_config.rpc_url.host_str() {
+                Some(host) => format!(
+                    "{scheme}://{host}",
+                    scheme = self.evm_config.rpc_url.scheme(),
+                ),
+                None => url.to_string(),
+            }
+        };
 
-        let playbook = if empty {
-            r#"## First-action playbook (empty state — prove the loop end-to-end)
+        // strategies + 24h rollup share the prefetch. Extract counts without
+        // re-reading the DB.
+        let mut strategies_warning: Option<String> = None;
+        let active_strategy_count: usize = match &strategies_json {
+            Ok(v) => v
+                .get("count")
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0) as usize,
+            Err(e) => {
+                strategies_warning =
+                    Some(format!("strategy://list prefetch failed: {}", short_err(e)));
+                0
+            }
+        };
 
-1. **Register a strategy.** Read `examples://strategies/yield-snapshot` and call `strategy_register({ name: "yield-snapshot", source: <that source> })`. yield-snapshot is pure-read and exercises no policy gates.
-2. **Attach a trigger.** Call `trigger_register({ strategy_id: <id>, kind: "interval", config: { interval_ms: 3_600_000 } })` for an hourly snapshot, OR skip and run manually.
-3. **Wait for first fire** (or call `strategy_run({ strategy_id })` to fire now).
-4. **Check the execution.** Read `execution://{run_id}` for the report and `journal://{run_id}` for the per-action decision trace.
-5. **Tune.** Inspect `strategy://list` / `trigger://list` and decide whether to add a real funnel strategy. See `examples://strategies` for source patterns."#
+        let mut triggers_warning: Option<String> = None;
+        let (active_trigger_count, kind_counts) = match &triggers_json {
+            Ok(v) => {
+                let triggers = v.get("triggers").and_then(|t| t.as_array());
+                let total = triggers.map(|t| t.len()).unwrap_or(0);
+                // (mempool, log, interval, manual)
+                let mut counts: [usize; 4] = [0; 4];
+                if let Some(arr) = triggers {
+                    for t in arr {
+                        let enabled = t
+                            .get("enabled")
+                            .and_then(|e| e.as_bool())
+                            .unwrap_or(true);
+                        if !enabled {
+                            continue;
+                        }
+                        match t.get("kind").and_then(|k| k.as_str()).unwrap_or("") {
+                            "mempool" => counts[0] += 1,
+                            "log" => counts[1] += 1,
+                            "interval" => counts[2] += 1,
+                            "manual" => counts[3] += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                let active_total: usize = counts.iter().sum();
+                (
+                    // If we filtered to enabled-only and that came out 0 but
+                    // raw total was nonzero, prefer the raw total so the
+                    // briefing surfaces ALL triggers (UI will filter).
+                    if active_total == 0 { total } else { active_total },
+                    counts,
+                )
+            }
+            Err(e) => {
+                triggers_warning =
+                    Some(format!("trigger://list prefetch failed: {}", short_err(e)));
+                (0, [0; 4])
+            }
+        };
+
+        let mut policy_warning: Option<String> = None;
+        let (policy_label, policy_rules_count): (String, usize) = match &policy_json {
+            Ok(v) => {
+                let loaded = v.get("loaded").and_then(|b| b.as_bool()).unwrap_or(false);
+                if !loaded {
+                    ("not loaded".to_string(), 0)
+                } else {
+                    let rev = v
+                        .get("revision_id")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("");
+                    let short = if rev.len() >= 8 { &rev[..8] } else { rev };
+                    // Best-effort rules count: sum of allow lists across the
+                    // policy body when present. Falls back to 0 on shape drift.
+                    let rules = v
+                        .get("policy")
+                        .and_then(|p| p.as_object())
+                        .map(|obj| {
+                            let mut n = 0usize;
+                            for (_k, val) in obj {
+                                if let Some(arr) = val.as_array() {
+                                    n += arr.len();
+                                }
+                            }
+                            n
+                        })
+                        .unwrap_or(0);
+                    let label = if short.is_empty() {
+                        "active".to_string()
+                    } else {
+                        format!("rev {short}")
+                    };
+                    (label, rules)
+                }
+            }
+            Err(e) => {
+                policy_warning =
+                    Some(format!("policy://current prefetch failed: {}", short_err(e)));
+                ("unknown".to_string(), 0)
+            }
+        };
+
+        let mut runs_warning: Option<String> = None;
+        let (runs_total, runs_ok, runs_failed, runs_noop) = match &runs_json {
+            Ok(v) => {
+                let arr = v.get("runs").and_then(|r| r.as_array());
+                let mut total = 0usize;
+                let mut ok = 0usize;
+                let mut failed = 0usize;
+                let mut noop = 0usize;
+                if let Some(rows) = arr {
+                    for r in rows {
+                        total += 1;
+                        match r.get("status").and_then(|s| s.as_str()).unwrap_or("") {
+                            "succeeded" => ok += 1,
+                            "failed" => failed += 1,
+                            "noop" => noop += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                (total, ok, failed, noop)
+            }
+            Err(e) => {
+                runs_warning =
+                    Some(format!("execution://list prefetch failed: {}", short_err(e)));
+                (0, 0, 0, 0)
+            }
+        };
+
+        // ── Compose "Current state" with prepended warnings on failure. ──
+        let mut current_state = String::new();
+        if let Some(w) = &strategies_warning {
+            let _ = writeln!(current_state, "⚠️ Partial: {w}");
+        }
+        if let Some(w) = &triggers_warning {
+            let _ = writeln!(current_state, "⚠️ Partial: {w}");
+        }
+        if let Some(w) = &policy_warning {
+            let _ = writeln!(current_state, "⚠️ Partial: {w}");
+        }
+        if let Some(w) = &runs_warning {
+            let _ = writeln!(current_state, "⚠️ Partial: {w}");
+        }
+        let _ = writeln!(current_state, "- Chain: {chain_label}");
+        let _ = writeln!(current_state, "- Burner: see `policy://current` (signer field) or `.local/config.toml`");
+        let _ = writeln!(current_state, "- RPC: {rpc_state}");
+        let _ = writeln!(current_state, "- Active strategies: {active_strategy_count}");
+        let _ = writeln!(
+            current_state,
+            "- Active triggers: {active_trigger_count} (mempool={}, log={}, interval={}, manual={})",
+            kind_counts[0], kind_counts[1], kind_counts[2], kind_counts[3],
+        );
+        let _ = writeln!(
+            current_state,
+            "- Policy: {policy_label} · {policy_rules_count} allow-rules"
+        );
+        let _ = writeln!(
+            current_state,
+            "- Last 24h: {runs_total} runs ({runs_ok} succeeded · {runs_failed} failed · {runs_noop} noop)"
+        );
+
+        // ── First-action playbook (exactly ONE of empty/partial/active). ──
+        let playbook = if active_strategy_count == 0 {
+            // Empty state: zero strategies registered.
+            "### Empty state (0 strategies):\n\
+             1. Read `examples://strategies/eth-funnel` to see a starter pattern.\n\
+             2. Use the `strategy_register` tool to register your first strategy.\n\
+             3. (Optional) Attach a trigger via `trigger_register`."
+        } else if active_trigger_count == 0 {
+            // Partial: strategies but no active triggers.
+            "### Partial state (strategies registered but 0 triggers active):\n\
+             1. Inspect each strategy: `strategy://list?status=active&summary=true`.\n\
+             2. Attach triggers via `trigger_register` — see `docs://trigger-model` for kinds."
         } else {
-            r#"## First-action playbook (something is already registered)
-
-1. **Pick a strategy** from the table above and read its source via `strategy://{id}`.
-2. **Inspect triggers.** Read `trigger://list` and confirm the strategy fires on the cadence you expect.
-3. **Check recent fires.** Read the latest `execution://{run_id}` and `journal://{run_id}` to see what each fire decided.
-4. **Adjust or extend.** Either author a new strategy from the user's intent (`author_strategy` prompt) or refine an existing one (`safety_review` prompt before re-registering).
-5. **Tune thresholds** with evidence — use the records of the last N runs (Track A+E2 once shipped)."#
+            // Active: strategies + triggers running.
+            "### Active state (strategies + triggers running):\n\
+             1. One-screen status: call prompt `inventory`.\n\
+             2. Recent failures? call prompt `triage_run` with a run_id from \
+                `execution://list?status=failed`.\n\
+             3. Adjust thresholds: prompt `tune_thresholds` per-strategy."
         };
 
         let body = format!(
-            "You are connected to the Onchain Strategy MCP runtime. This is a **prefetched orientation** — the live state below is read from the server at the moment of this prompt.\n\n\
-             ## Registered strategies (`strategy://list`)\n\n{strategies}\n\n\
-             ## Active policy (`policy://current`)\n\n{policy}\n\n\
+            "# osmcp — local onchain strategy runtime\n\n\
+             A local MCP runtime that executes JavaScript strategies onchain. You author short\n\
+             JS functions describing intent; the runtime simulates, signs with a local burner,\n\
+             broadcasts, journals every decision, and (for multi-step plans) auto-bundles into\n\
+             one atomic EIP-7702 transaction. Keys in the OS keychain; state in SQLite. No\n\
+             remote services.\n\n\
+             ## Current state\n\n\
+             {current_state}\n\
+             ## First-action playbook\n\n\
              {playbook}\n\n\
-             ## Where to look next\n\n\
-             - Source patterns: `examples://strategies` (list) + `examples://strategies/{{name}}` (each source).\n\
-             - Authoring guide: invoke the `author_strategy` prompt with your intent.\n\
-             - Pre-register safety check: invoke the `safety_review` prompt with the proposed source.\n\
-             - Trigger selection: invoke the `trigger_patterns` prompt.\n\
-             - Failure modes: invoke the `common_pitfalls` prompt before iterating on a failing run.\n\n\
-             When the user describes intent, WRITE THE STRATEGY YOURSELF — do not ask the user for code. The runtime simulates each action through the policy above before signing.",
-            strategies = strategy_table,
-            policy = policy_summary,
-            playbook = playbook,
+             ## Namespace map (use this to discover URIs)\n\n\
+             - `runtime://*` — system state (status, signals, recent)\n\
+             - `strategy://`, `trigger://`, `execution://`, `journal://`, `portfolio://`, `policy://` — domain objects\n\
+             - `docs://*`, `examples://*` — reference\n\n\
+             Call `resources/list` for the stable entrypoints; `resources/templates/list` for parameterized URIs.\n\n\
+             ## Where to go next\n\n\
+             - Author a new strategy → prompt `author_strategy`\n\
+             - Review before registering → prompt `safety_review`\n\
+             - Failed run forensics → prompt `triage_run`\n\
+             - Threshold tuning → prompt `tune_thresholds`\n",
         );
 
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
             PromptMessageRole::User,
             body,
         )])
-        .with_description("Prefetched orientation: strategy_list + policy + 5-step playbook"))
+        .with_description(
+            "Canonical first-screen briefing — composes runtime + strategy + policy in one call.",
+        ))
     }
 
     /// v1.4 Track E1: vet a proposed strategy source before `strategy_register`.

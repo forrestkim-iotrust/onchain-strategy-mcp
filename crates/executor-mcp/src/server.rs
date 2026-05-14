@@ -37,193 +37,23 @@ use crate::{
     resources,
 };
 
-/// Self-documenting `instructions` payload returned in `initialize`. Read once
-/// by the agent on connect — covers the mental model, the strategy/trigger/
-/// policy surface, the `ctx` API, and pointers to the in-band prompts and
-/// resources that go deeper.
-const INSTRUCTIONS: &str = r#"# Onchain Strategy MCP
-
-A local runtime that executes JS strategies onchain. You author short
-JavaScript functions describing intent; the runtime simulates, signs with a
-local burner, broadcasts, journals every decision, and (for multi-step plans)
-auto-bundles into one atomic EIP-7702 transaction. Everything is local — keys
-in the OS keychain, state in SQLite, no remote services.
-
-When the user describes intent, WRITE THE STRATEGY YOURSELF and register it.
-Do not ask the user for code. Strategies are short, declarative, and review
-under 20 lines for most cases.
-
-If you do not know where to start, call the `getting_started` prompt.
-Before authoring a non-trivial strategy, read `docs://strategy-bundle` — it
-covers the bundle shape (execute + records + view), the records capture DSL,
-and the `$assets` convention used by `strategy://{id}/view` and the portfolio
-aggregate to surface user positions.
-
-## Three core concepts
-
-1. **Strategy** — a JS function returning `Action[] | "noop"`. Registered via
-   `strategy_register`, identified by a 64-char hex id, executed via
-   `strategy_run`. Source is plain JS; the entry point is the top-level
-   expression (no `module.exports`, no semicolons at EOF).
-
-2. **Trigger** — *when* a strategy fires. Registered via `trigger_register`,
-   attached to a strategy id. Without a trigger you must invoke `strategy_run`
-   manually. Trigger kinds:
-
-   | kind     | fires when                                              |
-   |----------|----------------------------------------------------------|
-   | manual   | An agent or user calls `strategy_run` directly           |
-   | interval | Every N ms (cron-style)                                  |
-   | log      | A confirmed log matches address + topic(s) filter        |
-   | mempool  | A pending tx matches predicate on watched WSS node       |
-
-3. **Policy** — a deny-by-default DSL gating signing. Loaded once from
-   `.local/policy.toml`. Restricts allowed chains, contracts, function
-   selectors, native value caps, and per-token ERC20 spend caps. Anything
-   outside the policy is refused before broadcast. Inspect via `policy_get`.
-   See `docs://policy-model` for the schema.
-
-## Action shapes
-
-A strategy returns an array of actions. The two supported builders:
-
-```js
-ctx.actions.contractCall({
-  address: "0x...",       // target contract
-  abi: [...],             // full ABI fragment (must include the fn)
-  function: "supply",
-  args: [token, amount, onBehalfOf, referralCode],
-  value: "0",             // optional native value, decimal string wei
-});
-
-ctx.actions.erc20Approve({
-  token:   "0x...",       // ERC20 contract
-  spender: "0x...",       // who is being approved
-  amount:  "1000000",     // decimal string in token base units
-});
-```
-
-Returning `[approve, contractCall]` (or any multi-action array) triggers
-automatic EIP-7702 bundling — both actions land in one tx via the BatchExec
-delegate, or neither does. No manual batching call needed. See
-`docs://eip-7702` for the deterministic CREATE2 address and the
-`executor-mcp deploy-delegate` flow.
-
-Return `"noop"` (or `null`) when the strategy decides no action is warranted
-on this tick. Noop runs still journal source reads.
-
-## `ctx.evm` read API
-
-All reads are synchronous from the strategy's perspective (the JS sandbox
-blocks the host thread on the call):
-
-- `ctx.evm.nativeBalance(address, blockTag?)` → wei as decimal string
-- `ctx.evm.erc20Balance(token, address, blockTag?)` → base units as string
-- `ctx.evm.readContract({ address, abi, function, args, blockTag? })` →
-  decoded return value (full ABI required; the runtime selects by name)
-- `ctx.evm.getLogs({ address, fromBlock?, toBlock?, topics?, blockTag? })` →
-  array of log rows `{ blockNumber, txHash, logIndex, address, topics[],
-  data, removed }`. Hard cap 5000 logs per response — narrow `fromBlock`
-  or `topics` if you hit it.
-- `ctx.evm.code(address, blockTag?)` → hex string of deployed bytecode
-- `ctx.evm.receipt(txHash)` → JSON receipt
-
-`blockTag` accepts `"latest" | "pending" | "earliest" | "<block_number>"` —
-historical reads work against archive RPCs. There is no async/await; do not
-use `await` inside a strategy.
-
-## `ctx.abi` decoders
-
-Pure host-side decoders for raw event-log payloads (no RPC, no journal):
-
-- `ctx.abi.decodeUint256(hexData, offsetBytes?)` → decimal string. Pulls a
-  32-byte big-endian uint256 from `hexData` at byte offset (default 0).
-  Useful for summing non-indexed `uint256` event fields returned by
-  `ctx.evm.getLogs`.
-
-## Tool surface
-
-- **Strategies:** `strategy_register`, `strategy_run`, `strategy_list`,
-  `strategy_get`, `strategy_delete`
-- **Triggers:** `trigger_register`, `trigger_list`, `trigger_get`,
-  `trigger_set_enabled`, `trigger_delete`, `trigger_events`
-- **Execution:** `execution_get` (receipt-backed report keyed by run id)
-- **Policy:** `policy_set` (DESTRUCTIVE). Replaces the active policy
-  revision; returns a JSON Patch diff + impact preview before the agent
-  confirms. Read the current policy via `policy://current`; browse
-  history via `policy://history`. Policy storage lives in SQLite — the
-  v1.4 `.local/policy.toml` is imported once on first boot then ignored.
-- **EVM reads:** `evm_receipt`, `evm_view` — `evm_view` runs ad-hoc JS in
-  the same sandbox strategies use (`ctx.evm.nativeBalance` /
-  `ctx.evm.erc20Balance` / `ctx.evm.readContract` / `ctx.evm.code`), so
-  one-shot balance / code / contract-read lookups go through it
-
-## Destructive ops (P5 — explicit consent)
-
-Four tools mutate real state and are flagged with a literal `[DESTRUCTIVE]`
-prefix at the start of their `description` field (visible via `tools/list`):
-
-- `strategy_run` — signs and broadcasts real onchain transactions
-- `strategy_delete` — soft-deletes a strategy row (recoverable but stops firing)
-- `trigger_delete` — hard-deletes a trigger and its event history
-- `policy_set` — replaces the active policy revision (v1.5 Track 1A)
-
-Clients SHOULD parse the description and require explicit user consent before
-invoking any tool tagged this way. The marker is a stable string contract:
-match `^\[DESTRUCTIVE\]` against `tool.description`. (rmcp 1.5 does not expose
-arbitrary JSON-Schema extensions through `#[tool(...)]`, so the description
-prefix is the portable carrier — see `tools.rs` "Destructive ops" doc note.)
-
-## Safe rehearsal
-
-`strategy_register` accepts `dry_run: true` (default false). When set, the
-server validates input and computes the would-be content-addressed id
-(`sha256(source + records + view)`) WITHOUT inserting a row. The response
-shape is `{ dry_run: true, would_be_strategy_id, name, has_bundle }`. Use it
-to preview the id (and surface bundle/non-bundle status) before committing.
-
-## Resources
-
-- `strategy://{id}`, `execution://{run_id}`, `journal://{run_id}` — real JSON
-- `trigger://{id}`, `trigger-events://{id}` — trigger row + last 100 events
-- `examples://strategies` (list) and `examples://strategies/{name}` — embedded
-  reference strategies (eth-funnel, yield-snapshot, erc20-approve,
-  generic-counter-call)
-- `examples://contracts/{name}` — embedded reference contracts (BatchExec)
-- `docs://strategy-bundle` — bundle authoring guide (execute + records +
-  view + `$assets` convention). Read before authoring non-trivial strategies.
-- `policy://current`, `policy://history` — active policy + revision history
-- `docs://policy-model`, `docs://eip-7702`, `docs://trigger-model` — concise
-  prose docs
-
-## Prompts to load when stuck
-
-- `getting_started` — orient a fresh session end-to-end
-- `trigger_patterns` — pick the right trigger kind
-- `example_strategies` — menu of embedded examples to adapt
-- `common_pitfalls` — short list of mistakes the runtime forgives badly
-- `write_evm_strategy`, `review_evm_strategy` — guided authoring/review
-
-## Error codes (JSON-RPC `data.kind` where applicable)
-
-`-32011` strategy_deleted · `-32014` not_found · `-32015` name_conflict ·
-`-32016` storage_error · `-32017` strategy_runtime_error
-(kind ∈ timeout|oom|stack_overflow|exception|policy_not_loaded) ·
-`-32018` strategy_invalid_output · `-32010` unimplemented ·
-`-32602` invalid_params
-
-## Operating defaults
-
-- Burner address is the policy `signer`; use it as `simulation_from` when
-  reading state-dependent prices. Other addresses simulate as the zero
-  address and may revert.
-- ETH transfers TO a 7702-delegated EOA need a BatchExec `receive()`. If a
-  `selfdestruct`/native send to the burner reverts, that's why.
-- The 7702 delegate ships at deterministic CREATE2 address
-  `0x821fd81668823A3c5a65E95CeD5F050Ee54a4f53`. Run
-  `npx onchain-strategy-mcp deploy-delegate` once per chain if
-  `ctx.evm.code` (via `evm_view`) there is empty.
-"#;
+/// v1.11 Track H: slim `instructions` payload returned in `initialize`.
+///
+/// Single source of truth principle — the namespace map and first-action
+/// playbook live in the `getting_started` prompt body, NOT here and NOT in
+/// `docs://*`. This payload only orients the agent enough to know that
+/// `getting_started` is the canonical entry point.
+///
+/// Hard cap: ≤ 1024 bytes (covered by a regression test in
+/// `tests/stdio_handshake.rs`). Do NOT enumerate individual URIs here.
+const INSTRUCTIONS: &str = "Local MCP runtime that executes JS strategies onchain. \
+Start here: call the `getting_started` prompt — it composes a current-state \
+briefing in one call.\n\n\
+Namespaces:\n\
+- `runtime://*` — system state (status, signals, recent)\n\
+- `strategy://`, `trigger://`, `execution://`, `journal://`, `portfolio://`, `policy://` — domain objects\n\
+- `docs://*`, `examples://*` — reference\n\n\
+Call `resources/list` for the stable entrypoints; `resources/templates/list` for parameterized URIs.";
 
 #[derive(Clone)]
 pub struct ExecutorServer {
