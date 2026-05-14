@@ -362,7 +362,7 @@ async fn api_strategy(
 
     let mut body = meta;
     if let Some(obj) = body.as_object_mut() {
-        obj.insert("view".to_string(), view);
+        obj.insert("view_output".to_string(), view);
         obj.insert("records".to_string(), records);
     }
     json_response(Ok(body))

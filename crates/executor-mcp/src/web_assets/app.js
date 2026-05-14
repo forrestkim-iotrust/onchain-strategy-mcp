@@ -355,9 +355,9 @@
       if (burner) {
         const span = $("#burner");
         span.innerHTML = "";
-        span.appendChild(addrCell(burner, portfolio.chain));
+        span.appendChild(addrCell(burner, portfolio.chain_id));
       }
-      $("#chain").textContent = portfolio.chain != null ? String(portfolio.chain) : "—";
+      $("#chain").textContent = portfolio.chain_id != null ? String(portfolio.chain_id) : "—";
     }
     refreshFreshness();
   }
@@ -398,7 +398,7 @@
   // ─── Tab: Portfolio ────────────────────────────────────────
   function renderPortfolio(data) {
     const root = el("div");
-    const chain = data && data.chain;
+    const chain = data && data.chain_id;
 
     // Header KPIs
     const total = aggregateAssetsTotal(data);
@@ -441,7 +441,7 @@
       rows.push(Object.assign({ _source: "idle" }, b));
     });
     (portfolio.strategies || []).forEach((s) => {
-      const view = s.view || {};
+      const view = s.view_output || {};
       const data = view.data || view;
       const list = (data && data.$assets) || [];
       list.forEach((a) => rows.push(Object.assign({ _source: s.name || s.id }, a)));
@@ -511,7 +511,7 @@
   }
 
   function strategyCard(s, chain) {
-    const view = s.view || {};
+    const view = s.view_output || {};
     const data = view.data || view;
     const conf = view.confidence;
     const obs = {};
@@ -639,7 +639,7 @@
 
     getJson("/api/strategy/" + encodeURIComponent(id)).then((d) => {
       detailBody.innerHTML = "";
-      const chain = portfolio && portfolio.chain;
+      const chain = portfolio && portfolio.chain_id;
       // meta block
       const meta = {};
       ["name", "description", "tags", "created_at", "deleted_at",
@@ -648,7 +648,7 @@
       detailBody.appendChild(renderObjectAsKV(meta, chain));
 
       // view auto-render
-      const view = d.view || {};
+      const view = d.view_output || {};
       const data = view.data || view;
       const obs = {};
       if (data && typeof data === "object" && !Array.isArray(data)) {
@@ -925,7 +925,7 @@
         tbody.appendChild(detailRow);
         getJson("/api/run/" + encodeURIComponent(r.run_id)).then((d) => {
           inner.innerHTML = "";
-          const chain = portfolio && portfolio.chain;
+          const chain = portfolio && portfolio.chain_id;
           if (d.execution) inner.appendChild(section("execution", (function () {
             const b = el("div", { class: "section-body" });
             b.appendChild(renderValue(d.execution, "execution", chain));
