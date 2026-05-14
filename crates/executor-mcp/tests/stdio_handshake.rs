@@ -220,7 +220,9 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let mut proc = spawn_server().await?;
     let _ = initialize(&mut proc).await?;
 
-    // resources/list → empty array
+    // resources/list → exactly the concrete (non-template) resources we
+    // surface. Phase 1 left this empty; v1.11 Track C pins `portfolio://`
+    // here because the burner aggregate has no template parameters.
     send(
         &mut proc,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
@@ -230,9 +232,13 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let list = r["result"]["resources"]
         .as_array()
         .expect("resources array");
+    let resource_uris: Vec<&str> = list
+        .iter()
+        .map(|t| t["uri"].as_str().unwrap_or_default())
+        .collect();
     assert!(
-        list.is_empty(),
-        "resources/list must be empty in Phase 1, got {list:?}"
+        resource_uris.contains(&"portfolio://"),
+        "v1.11 Track C: resources/list must surface portfolio://; got {resource_uris:?}"
     );
 
     // resources/templates/list → 3 URI templates
@@ -301,6 +307,11 @@ async fn resources_surface_matches_contract() -> Result<()> {
             "missing self-doc template {required}; got {template_uris:?}"
         );
     }
+    // v1.11 Track C: portfolio aggregate template (parameter-less today).
+    assert!(
+        template_uris.contains(&"portfolio://"),
+        "v1.11 Track C: missing portfolio:// template; got {template_uris:?}"
+    );
 
     // resources/read → resource_not_found (-32002) with data.uri echoed.
     // Plan 02-02 narrows the assertion: a non-hex id surfaces as

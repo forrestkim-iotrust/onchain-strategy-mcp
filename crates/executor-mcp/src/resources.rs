@@ -38,6 +38,7 @@ use serde_json::json;
 use crate::{
     errors::{invalid_params, map_state_error, storage_error},
     tools::build_execution_report,
+    web_portfolio,
 };
 
 /// EVM execution context optionally threaded into `dispatch_uri`.
@@ -552,12 +553,33 @@ pub(crate) async fn list_resources_impl(
     _req: Option<PaginatedRequestParams>,
     _ctx: RequestContext<RoleServer>,
 ) -> Result<ListResourcesResult, McpError> {
-    // Phase 2: stay empty. Enumerating all strategies here would duplicate
-    // `strategy_list`; agents who want the catalogue should use the tool.
+    // Phase 2: stay empty for the strategy/execution/trigger surfaces —
+    // enumerating those here would duplicate the corresponding `*_list`
+    // tools.
+    //
+    // v1.11 Track C: surface `portfolio://` as a concrete resource (not a
+    // template) so MCP clients can discover the burner aggregate without
+    // an out-of-band hint. Track I will rewrite this catalog wholesale;
+    // the `portfolio://` entry is pinned here so the merge doesn't drop it.
+    use rmcp::model::{Annotated, RawResource, Resource};
+    let portfolio = Annotated::new(
+        RawResource::new("portfolio://", "portfolio")
+            .with_description(
+                "Burner portfolio aggregate (v1.11 Track C): merges every active strategy's \
+                 `$assets` declarations with the idle ERC20 + native balance walk for the \
+                 burner. Single-wallet today (no `{addr}` parameter); future multi-wallet \
+                 runtimes will add `portfolio://{addr}`. Wrapped with the v1.4 honesty \
+                 contract: `{ data: { burner, chain_id, refreshed_at, idle_balances, \
+                 assets, strategies, _balance_walk_status }, confidence, reason?, \
+                 remediation? }`.",
+            )
+            .with_mime_type("application/json"),
+        None,
+    ) as Resource;
     Ok(ListResourcesResult {
         meta: None,
         next_cursor: None,
-        resources: Vec::new(),
+        resources: vec![portfolio],
     })
 }
 
@@ -729,6 +751,19 @@ pub(crate) async fn list_resource_templates_impl(
                 "v1.4 strategy bundle authoring guide — the canonical reference for `execute` + `records` + `view` shape, the records capture DSL, and the `$assets` convention for portfolio-aggregatable positions. Read this BEFORE registering any non-trivial strategy.",
                 "text/markdown",
             ),
+            // v1.11 Track C: portfolio aggregate template. URI takes no
+            // parameters today (single-burner runtime); future multi-wallet
+            // support will swap this in for `portfolio://{addr}`.
+            make_template(
+                "portfolio://",
+                "portfolio",
+                "Burner portfolio aggregate: idle balance walk + every active strategy's \
+                 `$assets` declarations, wrapped in the v1.4 honesty contract \
+                 `{ data: { burner, chain_id, refreshed_at, idle_balances, assets, \
+                 strategies, _balance_walk_status }, confidence, reason?, remediation? }`. \
+                 Single-burner today; future multi-wallet runtimes add `portfolio://{addr}`.",
+                "application/json",
+            ),
         ],
     })
 }
@@ -842,6 +877,14 @@ pub(crate) async fn dispatch_uri(
     if let Some(query) = uri.strip_prefix("trigger://list?") {
         let q = query.to_string();
         return read_trigger_list(uri, q, state).await;
+    }
+    // v1.11 Track C: portfolio aggregate. Single-burner runtime today, so
+    // the URI takes no address parameter; future multi-wallet support will
+    // add `portfolio://{addr}`. `Box::pin` indirection breaks the async-fn
+    // recursion cycle introduced by `read_portfolio` → `dispatch_uri_to_json`
+    // → `dispatch_uri`.
+    if uri == "portfolio://" {
+        return Box::pin(read_portfolio(uri, state, evm)).await;
     }
 
     // Generic strategy://{id} (after the above v1.4 specializations).
@@ -2346,6 +2389,179 @@ async fn read_strategy_view(
             ]))
         }
     }
+}
+
+/// v1.11 Track C: `portfolio://` aggregate. Walks every active strategy's
+/// `view` output, collects `$assets`, runs the idle-balance ERC20 walk for
+/// the burner, and emits a single `{burner, chain_id, refreshed_at,
+/// idle_balances, assets, strategies, _balance_walk_status}` envelope —
+/// the same body the HTTP `/api/portfolio` route returns. Wrapped in the
+/// v1.4 honesty contract `{ data, confidence, reason? }` per DESIGN §3.
+///
+/// This is the MCP-first single source of truth; `web::api_portfolio` is a
+/// thin façade over this handler. v1 wallet boundary: burner is a single
+/// burner (no `{addr}` parameter); future multi-wallet support adds
+/// `portfolio://{addr}` and threads the address through here.
+async fn read_portfolio(
+    uri: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+    evm: ViewEvm,
+) -> Result<ReadResourceResult, McpError> {
+    // 1. Pull strategy summaries (active rows only).
+    let listing = dispatch_uri_to_json(
+        "strategy://list?status=active&summary=true".to_string(),
+        state.clone(),
+        evm.clone(),
+    )
+    .await?;
+    let summaries: Vec<serde_json::Value> = listing
+        .get("strategies")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // 2. For each strategy, fetch its view output + meta (for
+    //    `contracts_touched_json` → ERC20 candidate set). No caching at this
+    //    layer — the previous 5s view cache was an HTTP-only optimization
+    //    that lived in `web::AppState`; MCP polling is rare enough that
+    //    re-running views per call is fine and keeps semantics identical
+    //    between transports.
+    let mut strategy_payloads = Vec::with_capacity(summaries.len());
+    let mut sid_view_pairs: Vec<(String, serde_json::Value)> =
+        Vec::with_capacity(summaries.len());
+    let mut contracts_blobs: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
+    for s in &summaries {
+        let id = match s.get("id").and_then(serde_json::Value::as_str) {
+            Some(i) => i.to_string(),
+            None => continue,
+        };
+        let name = s
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let view = dispatch_uri_to_json(
+            format!("strategy://{id}/view"),
+            state.clone(),
+            evm.clone(),
+        )
+        .await
+        .unwrap_or_else(|e| {
+            json!({
+                "data": serde_json::Value::Null,
+                "confidence": "partial",
+                "reason": format!("view dispatch failed: {}", e.message),
+            })
+        });
+        let strategy_meta = dispatch_uri_to_json(
+            format!("strategy://{id}"),
+            state.clone(),
+            evm.clone(),
+        )
+        .await
+        .ok();
+        if let Some(meta) = &strategy_meta
+            && let Some(ct) = meta.get("contracts_touched")
+        {
+            contracts_blobs.push(ct.clone());
+        }
+        sid_view_pairs.push((id.clone(), view.clone()));
+        strategy_payloads.push(json!({
+            "id": id,
+            "name": name,
+            "view_output": view,
+        }));
+    }
+
+    // 3. Idle balance walk (Track 6C primitives). Provider, evm_config,
+    //    price_cache, and chain_id all ride on `ViewEvm` — no HTTP-only
+    //    state required. Token-meta caching used to live on `AppState`;
+    //    we build a fresh per-request cache here for the MCP path, which
+    //    is acceptable given low call rate. The web layer will get the
+    //    same uncached behaviour after the refactor.
+    let token_candidates = web_portfolio::collect_token_candidates(&contracts_blobs);
+    let token_meta_cache = web_portfolio::new_token_meta_cache();
+    // Burner address: derived from `EvmConfig::simulation_from` (EIP-55
+    // checksummed) so HTTP and MCP both emit byte-identical values.
+    let burner = evm.evm_config.simulation_from.to_checksum(None);
+    let (idle_balances, walk_status, resolved_chain) = web_portfolio::run_balance_walk(
+        evm.provider.clone(),
+        &evm.evm_config,
+        &token_meta_cache,
+        evm.price_cache.as_ref(),
+        &burner,
+        evm.chain_id,
+        &token_candidates,
+    )
+    .await;
+
+    // 4. `$assets` aggregation across strategies + per-strategy truncation
+    //    flags. The total cap counts idle balances toward MAX_TOTAL_ASSETS
+    //    so callers never have to hand-merge two capped lists.
+    let (assets, truncated_map, total_capped) =
+        web_portfolio::aggregate_strategy_assets(&sid_view_pairs, idle_balances.len());
+
+    // 5. Annotate each strategy payload with `_truncated` when its `$assets`
+    //    contribution hit the per-strategy cap.
+    for payload in strategy_payloads.iter_mut() {
+        if let Some(obj) = payload.as_object_mut() {
+            let sid = obj
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if truncated_map.get(&sid).copied().unwrap_or(false) {
+                obj.insert("_truncated".to_string(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+
+    // 6. Final status: a per-strategy total-cap trip wins over a per-token
+    //    rpc_error so callers know the response is incomplete.
+    let final_status = if total_capped {
+        web_portfolio::BalanceWalkStatus::Truncated
+    } else {
+        walk_status
+    };
+    let status_str = final_status.as_str();
+
+    let data = json!({
+        "burner": burner,
+        "chain_id": resolved_chain,
+        "refreshed_at": chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "idle_balances": idle_balances,
+        "assets": assets,
+        "strategies": strategy_payloads,
+        "_balance_walk_status": status_str,
+    });
+
+    // 7. v1.4 honesty contract envelope (DESIGN §3). 0 strategies → still
+    //    `full` (legitimately empty). truncated/rpc_error → `partial`. All
+    //    other states → `full`.
+    let body = match final_status {
+        web_portfolio::BalanceWalkStatus::Truncated => json!({
+            "data": data,
+            "confidence": "partial",
+            "reason": "balance walk hit MAX_TOTAL_ASSETS cap — response truncated",
+            "remediation": "narrow `contracts_touched` scope on noisy strategies or split positions across multiple views",
+        }),
+        web_portfolio::BalanceWalkStatus::RpcError => json!({
+            "data": data,
+            "confidence": "partial",
+            "reason": "idle balance walk encountered an RPC error — some idle rows may be missing",
+            "remediation": "verify `[evm].rpc_url` is reachable; re-read this resource once the node is healthy",
+        }),
+        web_portfolio::BalanceWalkStatus::Ok | web_portfolio::BalanceWalkStatus::NoProvider => {
+            json!({ "data": data, "confidence": "full" })
+        }
+    };
+
+    let txt = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize portfolio: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(txt, uri).with_mime_type("application/json"),
+    ]))
 }
 
 /// Build the `records` argument the JS view function sees. The DESIGN spec

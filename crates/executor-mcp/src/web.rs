@@ -18,10 +18,8 @@
 //! - 405 is the response for any non-GET method — observation-only.
 
 use std::{
-    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use alloy::providers::DynProvider;
@@ -36,13 +34,9 @@ use executor_evm::EvmConfig;
 use executor_state::StateStore;
 use rmcp::ErrorData as McpError;
 use serde_json::{Value, json};
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex, OnceCell},
-    task::JoinHandle,
-};
+use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
-use crate::{resources, web_portfolio};
+use crate::resources;
 
 /// v1.6 Track 6A: default port, picked from the plan's "Fixed decisions"
 /// (`Port | Fixed 8473`). Falls back to next free port on conflict.
@@ -53,9 +47,6 @@ pub const DEFAULT_UI_PORT: u16 = 8473;
 /// noisy local box can still find a slot without scanning the whole 16-bit
 /// space.
 const MAX_PORT_PROBE: u16 = 32;
-
-/// View-cache TTL (plan §9 risk #1). 5s matches the polling cadence.
-const VIEW_CACHE_TTL: Duration = Duration::from_secs(5);
 
 /// Loopback-only bind address. `127.0.0.1` exclusively — `0.0.0.0` is
 /// forbidden by the threat model.
@@ -129,39 +120,26 @@ impl WebUiOptions {
     }
 }
 
-/// View-cache entry: parsed JSON output of `read_strategy_view`, plus the
-/// fingerprint we used to decide it's still fresh.
-#[derive(Clone)]
-struct ViewCacheEntry {
-    /// Inserted_at — we expire entries older than `VIEW_CACHE_TTL`
-    /// regardless of fingerprint to bound staleness when records are dormant.
-    inserted_at: Instant,
-    /// `(latest_record_ts, record_count)` snapshot. Different fingerprint
-    /// ⇒ records changed and we must recompute even within the TTL window.
-    fingerprint: (Option<String>, usize),
-    /// Cached JSON body of the view (the `{data, confidence, ...}`
-    /// envelope returned by `strategy://{id}/view`).
-    body: Value,
-}
-
+/// v1.11 Track C: `AppState` collapsed to the minimum needed to build a
+/// `ViewEvm` for `dispatch_uri_to_json`. The previous `burner` /
+/// `chain_id_cell` / `view_cache` / `token_meta_cache` fields moved out
+/// when `/api/portfolio` became a façade over `portfolio://`; the burner
+/// is now resolved from `EvmConfig::simulation_from` inside the resource
+/// handler so HTTP and MCP cannot disagree on it.
 #[derive(Clone)]
 struct AppState {
     state: Arc<Mutex<StateStore>>,
-    burner: String,
-    /// v1.6 Track 6C: chain id is now lazy-resolved. The cell starts seeded
-    /// with `WebUiOptions::chain_id` when the operator pinned it explicitly;
-    /// otherwise the first `/api/portfolio` request resolves it through the
-    /// provider (and the result sticks for the server lifetime).
-    chain_id_cell: Arc<OnceCell<u64>>,
-    view_cache: Arc<Mutex<HashMap<String, ViewCacheEntry>>>,
+    /// Chain id pinned at boot from `WebUiOptions::chain_id`. `None` means
+    /// the portfolio handler resolves it via `eth_chainId` on each call.
+    /// (The pre-v1.11 `OnceCell` memoization lived in `AppState`; with the
+    /// MCP/HTTP split the value is now resolved per-dispatch — acceptable
+    /// because the call rate is bounded by the UI's 5s poll and `OnceCell`
+    /// was only ever an optimization.)
+    chain_id: Option<u64>,
     /// v1.6 Track 6C: provider for the idle balance walk. `None` ⇒ walk
     /// short-circuits.
     provider: Option<Arc<DynProvider>>,
     evm_config: EvmConfig,
-    /// v1.6 Track 6C: forever-cache of token `(symbol, decimals)` keyed by
-    /// lowercase token address. Avoids re-fetching ABI metadata on every
-    /// portfolio poll.
-    token_meta_cache: web_portfolio::TokenMetaCache,
     /// v1.7 (`ctx.price.usd`): shared USD price cache (Uniswap V3 quotes +
     /// stablecoin map). Same `Arc` the server uses for `strategy_run` and
     /// the view sandbox — one source of truth.
@@ -210,21 +188,18 @@ pub async fn spawn(
         "🌐 UI: http://{}", addr
     );
 
-    let chain_id_cell = Arc::new(OnceCell::new());
-    if let Some(cid) = opts.chain_id {
-        // Seed eagerly when the operator pinned `chain_id` at boot. Ignore
-        // the result — set() only fails if already initialised, which can't
-        // happen on a fresh cell.
-        let _ = chain_id_cell.set(cid);
-    }
+    // v1.11 Track C: `opts.burner` is no longer threaded into `AppState`.
+    // `EvmConfig::simulation_from` is now the single source of truth for the
+    // burner address (resolved inside `resources::read_portfolio`), so the
+    // string copy on `WebUiOptions` is informational only. Keep the field on
+    // `WebUiOptions` for backward compatibility with callers that still
+    // construct one.
+    let _ = &opts.burner;
     let app_state = AppState {
         state,
-        burner: opts.burner,
-        chain_id_cell,
-        view_cache: Arc::new(Mutex::new(HashMap::new())),
+        chain_id: opts.chain_id,
         provider: opts.provider,
         evm_config: opts.evm_config,
-        token_meta_cache: web_portfolio::new_token_meta_cache(),
         price_cache: opts.price_cache,
     };
     let app = build_router(app_state);
@@ -449,189 +424,34 @@ async fn api_run(State(app): State<AppState>, Path(id): Path<String>) -> Respons
     json_response(Ok(body))
 }
 
-/// `/api/portfolio` — composite endpoint. Burner address + chain + the
-/// merged view output of every active strategy + idle wallet balances +
-/// aggregated `$assets` declarations. Cached per-strategy with a 5s TTL
-/// keyed on the latest captured record timestamp.
+/// `/api/portfolio` — v1.11 Track C façade over the MCP `portfolio://`
+/// resource. All aggregation logic (strategy summaries, view fetches,
+/// idle-balance walk, `$assets` merge) lives in `resources::read_portfolio`
+/// so HTTP and MCP cannot diverge. The HTTP layer drops the v1.4 honesty
+/// envelope (`{ data, confidence, ... }`) and returns the inner aggregation
+/// flat — preserves the v1.6 wire shape consumed by the embedded web UI
+/// and the existing `portfolio_aggregation.rs` integration tests.
 async fn api_portfolio(State(app): State<AppState>) -> Response {
-    // 1. Pull strategy summaries (we want only the active rows).
-    let listing = match resources::dispatch_uri_to_json(
-        "strategy://list?status=active&summary=true".to_string(),
+    match resources::dispatch_uri_to_json(
+        "portfolio://".to_string(),
         app.state.clone(),
         view_evm_from(&app),
     )
     .await
     {
-        Ok(v) => v,
-        Err(e) => return mcp_error_to_response(e),
-    };
-    let summaries: Vec<Value> = listing
-        .get("strategies")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    // 2. For each strategy, fetch (or read from cache) its view output, and
-    //    pull the strategy row so we can grab `contracts_touched_json` for the
-    //    balance-walk token candidates without a second round-trip.
-    let mut strategy_payloads = Vec::with_capacity(summaries.len());
-    let mut sid_view_pairs: Vec<(String, Value)> = Vec::with_capacity(summaries.len());
-    let mut contracts_blobs: Vec<Value> = Vec::with_capacity(summaries.len());
-    for s in &summaries {
-        let id = match s.get("id").and_then(Value::as_str) {
-            Some(i) => i.to_string(),
-            None => continue,
-        };
-        let name = s
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let view = fetch_view_cached(&app, &id).await;
-        // Pull the strategy row to access contracts_touched_json. The strategy
-        // resource is dispatched through the same single-source-of-truth path.
-        let strategy_meta = resources::dispatch_uri_to_json(
-            format!("strategy://{id}"),
-            app.state.clone(),
-            view_evm_from(&app),
-        )
-        .await
-        .ok();
-        if let Some(meta) = &strategy_meta
-            && let Some(ct) = meta.get("contracts_touched")
-        {
-            contracts_blobs.push(ct.clone());
+        Ok(mut v) => {
+            // Honesty envelope ⇒ flat. The MCP resource wraps the
+            // aggregation in `{ data, confidence, ... }`; the HTTP UI
+            // expects the flat shape, so we peel `data` off and discard
+            // the wrapper. When `data` is missing (defensive), pass
+            // through what we got so the failure mode is visible.
+            let body = v
+                .get_mut("data")
+                .map(serde_json::Value::take)
+                .unwrap_or(v);
+            json_response(Ok(body))
         }
-        sid_view_pairs.push((id.clone(), view.clone()));
-        strategy_payloads.push(json!({
-            "id": id,
-            "name": name,
-            "view_output": view,
-        }));
-    }
-
-    // 3. Idle balance walk (Track 6C). Resolves chain_id lazily on first
-    //    call; subsequent polls hit the cached value via OnceCell.
-    let token_candidates = web_portfolio::collect_token_candidates(&contracts_blobs);
-    let seeded_chain = app.chain_id_cell.get().copied();
-    let (idle_balances, walk_status, resolved_chain) = web_portfolio::run_balance_walk(
-        app.provider.clone(),
-        &app.evm_config,
-        &app.token_meta_cache,
-        app.price_cache.as_ref(),
-        &app.burner,
-        seeded_chain,
-        &token_candidates,
-    )
-    .await;
-    // Memoise the resolved chain id for next time. `set()` is a no-op when
-    // the cell is already initialised (or was seeded at boot).
-    if let Some(cid) = resolved_chain {
-        let _ = app.chain_id_cell.set(cid);
-    }
-
-    // 4. `$assets` aggregation across strategies + per-strategy truncation
-    //    flags. The total cap counts idle balances toward MAX_TOTAL_ASSETS
-    //    so the frontend never has to hand-merge two capped lists.
-    let (assets, truncated_map, total_capped) =
-        web_portfolio::aggregate_strategy_assets(&sid_view_pairs, idle_balances.len());
-
-    // 5. Annotate each strategy payload with `_truncated` when its
-    //    `$assets` contribution hit the per-strategy cap.
-    for payload in strategy_payloads.iter_mut() {
-        if let Some(obj) = payload.as_object_mut() {
-            let sid = obj
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            if truncated_map.get(&sid).copied().unwrap_or(false) {
-                obj.insert("_truncated".to_string(), Value::Bool(true));
-            }
-        }
-    }
-
-    // 6. Final status: a per-strategy total-cap trip wins over a per-token
-    //    rpc_error so the frontend knows the response is incomplete.
-    let final_status = if total_capped {
-        web_portfolio::BalanceWalkStatus::Truncated
-    } else {
-        walk_status
-    };
-
-    let body = json!({
-        "burner": app.burner,
-        "chain_id": app.chain_id_cell.get().copied(),
-        "refreshed_at": chrono::Utc::now()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "idle_balances": idle_balances,
-        "assets": assets,
-        "strategies": strategy_payloads,
-        "_balance_walk_status": final_status.as_str(),
-    });
-    json_response(Ok(body))
-}
-
-/// Pull a strategy's view JSON, consulting the 5s TTL cache. Cache key is
-/// the strategy id; the freshness check uses the latest record timestamp
-/// so dormant strategies stay cached longer than the TTL when nothing
-/// changes, and a fresh record always invalidates the entry.
-async fn fetch_view_cached(app: &AppState, id: &str) -> Value {
-    let fingerprint = compute_records_fingerprint(app, id).await;
-    {
-        let cache = app.view_cache.lock().await;
-        if let Some(entry) = cache.get(id) {
-            let fresh = entry.inserted_at.elapsed() < VIEW_CACHE_TTL;
-            if fresh && entry.fingerprint == fingerprint {
-                return entry.body.clone();
-            }
-        }
-    }
-    let view_uri = format!("strategy://{id}/view");
-    let body = resources::dispatch_uri_to_json(view_uri, app.state.clone(), view_evm_from(&app))
-        .await
-        .unwrap_or_else(|e| {
-            json!({
-                "data": Value::Null,
-                "confidence": "partial",
-                "reason": format!("view dispatch failed: {}", e.message),
-            })
-        });
-    let mut cache = app.view_cache.lock().await;
-    cache.insert(
-        id.to_string(),
-        ViewCacheEntry {
-            inserted_at: Instant::now(),
-            fingerprint,
-            body: body.clone(),
-        },
-    );
-    body
-}
-
-/// Compute `(latest_record_ts, record_count)` for a strategy. Used as the
-/// cache fingerprint — different value ⇒ records changed since the cached
-/// view ran, so we must recompute. We only peek at the top of the records
-/// list (limit=1) to keep this cheap; the count helper falls back to 0
-/// when the dispatch fails (treat as "unknown — recompute").
-async fn compute_records_fingerprint(
-    app: &AppState,
-    id: &str,
-) -> (Option<String>, usize) {
-    let uri = format!("strategy://{id}/records?limit=1");
-    match resources::dispatch_uri_to_json(uri, app.state.clone(), view_evm_from(&app)).await {
-        Ok(v) => {
-            let latest = v
-                .get("records")
-                .and_then(Value::as_array)
-                .and_then(|a| a.first())
-                .and_then(|r| r.get("captured_at"))
-                .and_then(Value::as_str)
-                .map(|s| s.to_string());
-            let count = v.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
-            (latest, count)
-        }
-        Err(_) => (None, 0),
+        Err(e) => mcp_error_to_response(e),
     }
 }
 
@@ -657,7 +477,11 @@ fn view_evm_from(app: &AppState) -> resources::ViewEvm {
         // v1.7 (`ctx.price.usd`): the AppState carries the same `price_cache`
         // Arc the server seeded at boot (cf. WebUiOptions wiring).
         price_cache: app.price_cache.clone(),
-        chain_id: app.chain_id_cell.get().copied(),
+        // v1.11 Track C: chain id is per-request. Pinned chain id was the
+        // sole purpose of the previous `chain_id_cell` OnceCell; the
+        // `resources::read_portfolio` handler resolves the live value via
+        // the provider when the operator didn't pin one at boot.
+        chain_id: app.chain_id,
     }
 }
 
