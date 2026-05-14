@@ -66,7 +66,10 @@
       if (!isFinite(num)) return String(v);
       const o = opts || {};
       const min = o.min != null ? o.min : 0;
-      const max = o.max != null ? o.max : 6;
+      // 20 = max fractionDigits Number.toLocaleString accepts — effectively
+      // "no cap" for any real value while staying within the API contract.
+      // KPI / explicit-precision call sites can still pass `max: 2` etc.
+      const max = o.max != null ? o.max : 20;
       return num.toLocaleString(undefined, {
         minimumFractionDigits: min,
         maximumFractionDigits: max,
