@@ -731,18 +731,26 @@
     root.appendChild(detailSec);
 
     // Per-strategy triggers section, read sync from S.cache.triggers.
-    const triggersSec = el("div", { class: "section" });
-    triggersSec.appendChild(el("div", { class: "section-head", text: "triggers" }));
-    const triggersBody = el("div", { class: "section-body" });
-    triggersSec.appendChild(triggersBody);
-    root.appendChild(triggersSec);
+    // Match the same table shape (`.t` class + section flush-body + count
+    // pill) as the Portfolio / Triggers tab so the look stays consistent
+    // across surfaces.
     const all = (S.cache.triggers && S.cache.triggers.triggers) || [];
     const mine = all.filter((t) => t.strategy_id === id);
+    const triggersSec = el("div", { class: "section" });
+    triggersSec.appendChild(el("div", { class: "section-head" }, [
+      el("span", { text: "triggers" }),
+      el("span", { class: "mono dim",
+        text: mine.length > 0 ? (mine.length + " attached") :
+              (S.cache.triggers ? "none attached" : "loading…") }),
+    ]));
     if (mine.length === 0) {
-      triggersBody.appendChild(el("div", { class: "dim",
+      const body = el("div", { class: "section-body" });
+      body.appendChild(el("div", { class: "dim",
         text: S.cache.triggers ? "no triggers attached" : "loading…" }));
+      triggersSec.appendChild(body);
     } else {
-      const tbl = el("table", { class: "compact" });
+      const body = el("div", { class: "section-body flush" });
+      const tbl = el("table", { class: "t" });
       tbl.appendChild(el("thead", null, [el("tr", null, [
         el("th", { text: "kind" }),
         el("th", { text: "note" }),
@@ -753,21 +761,25 @@
       const tb = el("tbody");
       mine.forEach((t) => {
         const tr = el("tr");
-        tr.appendChild(el("td", { class: "mono", text: t.kind || "" }));
+        tr.appendChild(el("td", { class: "mono", text: t.kind || "—" }));
         tr.appendChild(el("td", { class: t.note ? "" : "dim",
           text: t.note || "—", title: t.note || "" }));
-        tr.appendChild(el("td", { class: "mono",
-          text: t.enabled === false ? "no" : "yes" }));
-        tr.appendChild(el("td", { class: "mono",
-          text: t.last_fired_at ? fmt.rel(t.last_fired_at) : "—",
-          title: t.last_fired_at || "" }));
+        tr.appendChild(el("td", null, [
+          t.enabled === false
+            ? el("span", { class: "badge", text: "disabled" })
+            : el("span", { class: "badge ok", text: "enabled" }),
+        ]));
+        tr.appendChild(el("td", { class: "mono", title: t.last_fired_at || "",
+          text: t.last_fired_at ? fmt.rel(t.last_fired_at) : "—" }));
         tr.appendChild(el("td", { class: "mono",
           text: fmt.shortHex(t.id || "", 6, 4), title: t.id || "" }));
         tb.appendChild(tr);
       });
       tbl.appendChild(tb);
-      triggersBody.appendChild(tbl);
+      body.appendChild(tbl);
+      triggersSec.appendChild(body);
     }
+    root.appendChild(triggersSec);
 
     // Cache miss on first navigation — render placeholder; pollOnce will
     // populate the cache on its next tick and the resulting render will
