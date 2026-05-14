@@ -1881,13 +1881,28 @@ async fn read_strategy_view(
         }
     };
 
-    // 3. Build the `records` argument: { recordName: { each, count, latest,
-    //    sum(field) → value, since(ts) → array } }. We pre-compute sums for
-    //    every numeric-castable field so the JS view function can call
-    //    `records.supply.sum_amount` directly (host-computed), and we ship
-    //    the raw rows under `each` for filtering / per-entry reads. Sum-on-
-    //    demand is implemented as a JS lambda that closes over the rows.
+    // 3. Build the `records` argument the view function sees. The host emits
+    //    a JSON snapshot with `{count, latest, each, sums}` per record name
+    //    (see [`aggregate_records_for_view`]). The JS shim below promotes
+    //    `sums` to a callable `sum(field)` API + a `since(ts)` filter, and
+    //    pre-populates every DECLARED record name with an empty handle so
+    //    views work before the first capture has landed (docs §3, example
+    //    bundle eth-funnel-bundle.js).
     let records_arg = aggregate_records_for_view(&records_rows);
+
+    // Names declared in the strategy's records spec — used to pre-populate
+    // empty handles for records that haven't captured anything yet.
+    let declared_names: Vec<String> = strategy
+        .records_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<serde_json::Value>>(j).ok())
+        .map(|specs| {
+            specs
+                .iter()
+                .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
 
     // 4. Wrap the user's `(ctx, records) => any` so the existing Sandbox
     //    (which evals `(SOURCE)(__ctx)`) can call it. We inject the
@@ -1895,14 +1910,27 @@ async fn read_strategy_view(
     //    are pure JSON values, not arbitrary JS.
     let records_json_lit = serde_json::to_string(&records_arg)
         .map_err(|e| storage_error(format!("serialize view records arg: {e}")))?;
+    let declared_names_lit = serde_json::to_string(&declared_names)
+        .map_err(|e| storage_error(format!("serialize declared record names: {e}")))?;
     let wrapped_source = format!(
         "(ctx) => {{\n\
-           const __records = {records};\n\
+           const __raw = {records};\n\
+           const __declared = {declared};\n\
+           const __empty = () => ({{ count: 0, latest: null, each: [], sums: {{}} }});\n\
+           const __wrap = (r) => ({{\n\
+             count: r.count, latest: r.latest, each: r.each, sums: r.sums,\n\
+             sum: (field) => (r.sums && r.sums[field]) || \"0\",\n\
+             since: (ts) => (r.each || []).filter((e) => e && e.ts && e.ts >= ts),\n\
+           }});\n\
+           const __records = {{}};\n\
+           for (const n of __declared) __records[n] = __wrap(__empty());\n\
+           for (const k of Object.keys(__raw)) __records[k] = __wrap(__raw[k]);\n\
            const __view = ({user});\n\
            if (typeof __view !== 'function') throw new Error('view source must evaluate to a function (ctx, records) => any');\n\
            return __view(ctx, __records);\n\
          }}",
         records = records_json_lit,
+        declared = declared_names_lit,
         user = view_source
     );
 
@@ -1973,8 +2001,10 @@ async fn read_strategy_view(
 }
 
 /// Build the `records` argument the JS view function sees. The DESIGN spec
-/// asks for `{ sum(field), count, latest, since(ts), each }`. For v1 we
-/// implement these by emitting a host-computed JSON snapshot per record name:
+/// asks for `{ sum(field), count, latest, since(ts), each }`. The host emits
+/// the JSON snapshot below per record name; the call-site shim in
+/// [`read_strategy_view`] promotes `sums` to a `sum(field)` callable + adds
+/// a `since(ts)` filter so the view-facing API matches the docs/example.
 ///
 /// ```json
 /// {
@@ -1989,9 +2019,9 @@ async fn read_strategy_view(
 ///
 /// Numeric sums are evaluated host-side over every JSON field whose values are
 /// all decimal-string or JSON-number convertible to u128. Non-numeric fields
-/// are simply omitted from `sums`. The view function reads the precomputed
-/// value with `records.supply.sums.amount` (numbers as decimal strings to
-/// preserve uint256 range).
+/// are simply omitted from `sums`. The view function reads sums by name via
+/// the shim: `records.supply.sum("amount")` (numbers come back as decimal
+/// strings to preserve uint256 range).
 fn aggregate_records_for_view(
     rows: &[executor_state::RecordCaptureEntry],
 ) -> serde_json::Value {

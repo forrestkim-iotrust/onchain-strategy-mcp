@@ -261,6 +261,105 @@ async fn view_endpoint_runs_user_view_against_aggregated_records() -> Result<()>
 }
 
 #[tokio::test]
+async fn view_records_sum_method_matches_sums_field() -> Result<()> {
+    // Runtime exposes both: the host-computed `sums` object AND a
+    // call-site `sum(field)` shim that matches the docs/example bundle.
+    // Both must return the same value for the same field.
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db_path = tmp.path().to_path_buf();
+    let _ = tmp.into_temp_path().keep()?;
+
+    let sid = {
+        use executor_core::schema::execution::RunStatus;
+        use executor_state::{RegisterOutcome, StateStore};
+        let mut store = StateStore::open(&db_path)?;
+        let records_json = r#"[{
+            "name": "supply",
+            "on": {"kind":"contractCall","target":"0xA238Dd80C259a72e81d7e4664a9801593F98d1c5","selector":"supply"},
+            "capture": {"amount":"args[1]"}
+        }]"#;
+        let view_source = r#"(ctx, records) => ({
+            via_method: records.supply.sum("amount"),
+            via_field:  records.supply.sums.amount
+        })"#;
+        let sid = match store.register_strategy_bundle(
+            "sum-method-check", "(ctx) => 'noop'", None, None,
+            Some(records_json), Some(view_source), None,
+        )? {
+            RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+        };
+        let rid = store.insert_run(&sid, RunStatus::Queued)?;
+        store.record_strategy_capture(&rid, &sid, "supply", r#"{"amount":"700"}"#)?;
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        store.record_strategy_capture(&rid, &sid, "supply", r#"{"amount":"300"}"#)?;
+        sid
+    };
+
+    let mut proc = spawn_server_with_state(&db_path.to_string_lossy()).await?;
+    let _ = initialize(&mut proc).await?;
+    send(&mut proc, json!({
+        "jsonrpc":"2.0","id":2,"method":"resources/read",
+        "params":{"uri": format!("strategy://{sid}/view")}
+    })).await?;
+    let r = recv(&mut proc).await?;
+    assert!(r.get("error").is_none(), "expected success, got {r}");
+    let body = read_resource_body(&r);
+    assert_eq!(body["data"]["via_method"], json!("1000"));
+    assert_eq!(body["data"]["via_field"],  json!("1000"));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn view_records_declared_but_uncaptured_has_empty_handle() -> Result<()> {
+    // A view that reads `records.supply.sum("amount")` BEFORE any captures
+    // have landed must still succeed — the shim pre-populates every declared
+    // record name with `{ count: 0, sum() => "0", latest: null, each: [] }`.
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db_path = tmp.path().to_path_buf();
+    let _ = tmp.into_temp_path().keep()?;
+
+    let sid = {
+        use executor_state::{RegisterOutcome, StateStore};
+        let mut store = StateStore::open(&db_path)?;
+        let records_json = r#"[{
+            "name": "supply",
+            "on": {"kind":"contractCall","target":"0xA238Dd80C259a72e81d7e4664a9801593F98d1c5","selector":"supply"},
+            "capture": {"amount":"args[1]"}
+        }]"#;
+        let view_source = r#"(ctx, records) => ({
+            count:  records.supply.count,
+            sum:    records.supply.sum("amount"),
+            latest: records.supply.latest,
+            each:   records.supply.each.length
+        })"#;
+        match store.register_strategy_bundle(
+            "empty-records", "(ctx) => 'noop'", None, None,
+            Some(records_json), Some(view_source), None,
+        )? {
+            RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+        }
+    };
+
+    let mut proc = spawn_server_with_state(&db_path.to_string_lossy()).await?;
+    let _ = initialize(&mut proc).await?;
+    send(&mut proc, json!({
+        "jsonrpc":"2.0","id":2,"method":"resources/read",
+        "params":{"uri": format!("strategy://{sid}/view")}
+    })).await?;
+    let r = recv(&mut proc).await?;
+    assert!(r.get("error").is_none(), "expected success on empty records, got {r}");
+    let body = read_resource_body(&r);
+    assert_eq!(body["confidence"], json!("full"));
+    assert_eq!(body["data"]["count"],  json!(0));
+    assert_eq!(body["data"]["sum"],    json!("0"));
+    assert_eq!(body["data"]["latest"], json!(null));
+    assert_eq!(body["data"]["each"],   json!(0));
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn view_on_unknown_strategy_is_not_found() -> Result<()> {
     let mut proc = spawn_server().await?;
     let _ = initialize(&mut proc).await?;
