@@ -24,7 +24,15 @@ use common::{initialize, recv, send, spawn_server};
 
 const MARKER: &str = "[DESTRUCTIVE]";
 
-const DESTRUCTIVE_TOOLS: &[&str] = &["strategy_run", "strategy_delete", "trigger_delete"];
+// v1.5 Track 1A: `policy_set` joins the destructive set — it replaces the
+// active policy revision, which can revoke capabilities and break
+// strategies in flight. The diff/impact response is the consent surface.
+const DESTRUCTIVE_TOOLS: &[&str] = &[
+    "strategy_run",
+    "strategy_delete",
+    "trigger_delete",
+    "policy_set",
+];
 
 /// Representative non-destructive tools. `strategy_register` is the most
 /// important one to guard — it mutates state but only after explicit

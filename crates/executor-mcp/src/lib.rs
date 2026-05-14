@@ -14,10 +14,13 @@
 //!   the `ServerHandler` block in `server`.
 
 pub mod config;
+pub mod contracts_touched;
 pub mod deploy_delegate;
 pub mod errors;
 pub mod init;
 pub mod logging;
+pub mod policy_boot;
+pub mod policy_diff;
 pub mod prompts;
 pub mod records;
 pub mod resources;

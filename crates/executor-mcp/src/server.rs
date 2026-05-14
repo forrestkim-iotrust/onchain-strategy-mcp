@@ -33,6 +33,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     config::{Config, StateConfig},
+    policy_boot::resolve_boot_policy,
     resources,
 };
 
@@ -134,8 +135,11 @@ use `await` inside a strategy.
 - **Triggers:** `trigger_register`, `trigger_list`, `trigger_get`,
   `trigger_set_enabled`, `trigger_delete`, `trigger_events`
 - **Execution:** `execution_get` (receipt-backed report keyed by run id)
-- **Policy:** `policy_get` (read-only). There is no `policy_update` tool —
-  policy is edited via `.local/policy.toml` only, then the server is restarted.
+- **Policy:** `policy_set` (DESTRUCTIVE). Replaces the active policy
+  revision; returns a JSON Patch diff + impact preview before the agent
+  confirms. Read the current policy via `policy://current`; browse
+  history via `policy://history`. Policy storage lives in SQLite — the
+  v1.4 `.local/policy.toml` is imported once on first boot then ignored.
 - **EVM reads:** `evm_receipt`, `evm_view` — `evm_view` runs ad-hoc JS in
   the same sandbox strategies use (`ctx.evm.nativeBalance` /
   `ctx.evm.erc20Balance` / `ctx.evm.readContract` / `ctx.evm.code`), so
@@ -143,12 +147,13 @@ use `await` inside a strategy.
 
 ## Destructive ops (P5 — explicit consent)
 
-Three tools mutate real state and are flagged with a literal `[DESTRUCTIVE]`
+Four tools mutate real state and are flagged with a literal `[DESTRUCTIVE]`
 prefix at the start of their `description` field (visible via `tools/list`):
 
 - `strategy_run` — signs and broadcasts real onchain transactions
 - `strategy_delete` — soft-deletes a strategy row (recoverable but stops firing)
 - `trigger_delete` — hard-deletes a trigger and its event history
+- `policy_set` — replaces the active policy revision (v1.5 Track 1A)
 
 Clients SHOULD parse the description and require explicit user consent before
 invoking any tool tagged this way. The marker is a stable string contract:
@@ -174,6 +179,7 @@ to preview the id (and surface bundle/non-bundle status) before committing.
 - `examples://contracts/{name}` — embedded reference contracts (BatchExec)
 - `docs://strategy-bundle` — bundle authoring guide (execute + records +
   view + `$assets` convention). Read before authoring non-trivial strategies.
+- `policy://current`, `policy://history` — active policy + revision history
 - `docs://policy-model`, `docs://eip-7702`, `docs://trigger-model` — concise
   prose docs
 
@@ -306,31 +312,21 @@ impl ExecutorServer {
         full_cfg: &Config,
     ) -> Result<Self> {
         let mut srv = Self::new_with_config(state_cfg, evm_config)?;
-        // D-15 fail-closed: log + record None, never panic.
-        let loaded: Option<LoadedPolicy> = match full_cfg.policy_config() {
-            Ok(Some(p)) => {
-                tracing::info!(
-                    chains = ?p.chains_allow,
-                    raw_call_global = p.raw_call_allow_global,
-                    "policy loaded",
-                );
-                Some(p)
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    "[policy].path not configured — strategy_run will fail-closed with policy_not_loaded"
-                );
-                None
-            }
-            Err(e) => {
-                tracing::error!(
-                    detail = %e.detail_for_log(),
-                    kind = %e.data_kind(),
-                    "policy load failed — strategy_run will fail-closed with policy_not_loaded",
-                );
-                None
-            }
-        };
+        // v1.5 Track 1A: policy now lives in the DB. Boot resolution order:
+        //   1. If `policies` table has an active row → load THAT (the TOML
+        //      file is ignored on subsequent boots).
+        //   2. Else, if `[policy].path` is configured AND the file exists,
+        //      do a one-shot import → INSERT as the first revision with
+        //      rationale "initial import from .local/policy.toml" and log a
+        //      warning suggesting the operator delete / gitignore the TOML.
+        //   3. Else, boot with `policy = None` (D-15 fail-closed).
+        //
+        // Malformed-TOML / address-parse failures during the import path do
+        // NOT panic — we log `tracing::error!` and proceed with `None`. The
+        // operator's recovery action is to call `policy_set` with a
+        // corrected JSON body.
+        let loaded: Option<LoadedPolicy> =
+            resolve_boot_policy(&srv.state, full_cfg.policy.path.as_deref())?;
         srv.policy = Arc::new(RwLock::new(loaded));
         // v1.1 spike: optional [aa].delegate. Parsed via lenient EIP-55;
         // errors are logged but never block boot.
@@ -538,7 +534,7 @@ impl ServerHandler for ExecutorServer {
         // Phase 2: pass the Arc<Mutex<StateStore>> so `strategy://{id}` reads
         // the real row. v1.4 Track B: also pass the policy snapshot for
         // `policy://current`.
-        resources::read_resource_impl(request, ctx, self.state.clone(), self.policy.clone()).await
+        resources::read_resource_impl(request, ctx, self.state.clone()).await
     }
 }
 

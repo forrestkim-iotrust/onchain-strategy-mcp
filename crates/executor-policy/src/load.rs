@@ -72,6 +72,14 @@ pub fn parse_policy_str(raw: &str) -> Result<LoadedPolicy, PolicyError> {
     resolve(parsed)
 }
 
+/// v1.5 Track 1A: resolve a parsed [`PolicyConfig`] (e.g. loaded from JSON
+/// at the `policy_set` MCP boundary) into a [`LoadedPolicy`]. Public so the
+/// MCP layer can accept JSON, reuse the same address / U256 / selector
+/// validation, and avoid re-implementing the chain-subtable invariant.
+pub fn resolve_config(cfg: PolicyConfig) -> Result<LoadedPolicy, PolicyError> {
+    resolve(cfg)
+}
+
 fn resolve(cfg: PolicyConfig) -> Result<LoadedPolicy, PolicyError> {
     let mut loaded = LoadedPolicy {
         chains_allow: cfg.chains.allow.clone(),

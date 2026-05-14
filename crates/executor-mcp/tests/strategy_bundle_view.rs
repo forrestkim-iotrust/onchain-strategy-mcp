@@ -120,6 +120,7 @@ async fn records_endpoint_lists_rows_with_since_filter() -> Result<()> {
             None,
             Some(r#"[{"name":"supply","on":{"kind":"contractCall"},"capture":{"amount":"args[1]"}}]"#),
             Some("(ctx, records) => ({ count: records.supply ? records.supply.count : 0 })"),
+            None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
         };
@@ -219,6 +220,7 @@ async fn view_endpoint_runs_user_view_against_aggregated_records() -> Result<()>
             None,
             Some(records_json),
             Some(view_source),
+            None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
         };

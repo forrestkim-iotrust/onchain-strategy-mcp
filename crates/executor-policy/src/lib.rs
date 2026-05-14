@@ -25,7 +25,7 @@ pub use eval::evaluate;
 
 pub use decision::{Decision, DecisionVerdict, NormalizedActionKindCopy};
 pub use error::PolicyError;
-pub use load::{MAX_POLICY_FILE_BYTES, load_policy_from_path, parse_policy_str};
+pub use load::{MAX_POLICY_FILE_BYTES, load_policy_from_path, parse_policy_str, resolve_config};
 pub use model::{
     ChainContract, LoadedPolicy, PolicyConfig, RawCallAllowResolved, SelectorPattern,
 };

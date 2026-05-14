@@ -10,7 +10,10 @@
 //! (`partial_index_behaviour.rs`, `foreign_keys_enforced`). Production code
 //! must go through the typed façade methods.
 
-use crate::{error::StateError, executions, records_capture, runs, schema, strategies, triggers};
+use crate::{
+    error::StateError, executions, policy_revisions, records_capture, runs, schema, strategies,
+    triggers,
+};
 use executor_core::schema::trigger::{
     RegisterTriggerInput, Trigger, TriggerEvent, TriggerListFilter, TriggerSummary,
 };
@@ -47,13 +50,22 @@ impl StateStore {
         description: Option<&str>,
         tags: Option<&[String]>,
     ) -> Result<strategies::RegisterOutcome, StateError> {
-        strategies::register(&self.conn, name, source, description, tags, None, None)
+        // v1.5 Track 1B back-compat: legacy callers (tests, old code paths)
+        // skip the contracts_touched extraction entirely — same id, same row
+        // shape as v1.0..v1.4. The bundle-aware path is the new opt-in.
+        strategies::register(&self.conn, name, source, description, tags, None, None, None)
     }
 
     /// v1.4 bundle register. Pass `records_json` (canonical JSON of the
     /// `records` schema) and/or `view_source` (the `view` function JS source)
     /// to opt into self-describing strategy semantics. The strategy id mixes
     /// all three (execute + records + view) so distinct bundles never collide.
+    ///
+    /// v1.5 Track 1B: `contracts_touched_json` is a DERIVATION computed by
+    /// `executor-mcp::contracts_touched::extract` from `source`. It is cached
+    /// at register time, NEVER folded into the id hash, and read back on
+    /// every `strategy://{id}` to drive policy alignment. Pass `None` from
+    /// non-MCP callers that don't run the extractor.
     #[allow(clippy::too_many_arguments)]
     pub fn register_strategy_bundle(
         &mut self,
@@ -63,6 +75,7 @@ impl StateStore {
         tags: Option<&[String]>,
         records_json: Option<&str>,
         view_source: Option<&str>,
+        contracts_touched_json: Option<&str>,
     ) -> Result<strategies::RegisterOutcome, StateError> {
         strategies::register(
             &self.conn,
@@ -72,6 +85,7 @@ impl StateStore {
             tags,
             records_json,
             view_source,
+            contracts_touched_json,
         )
     }
 
@@ -465,5 +479,32 @@ impl StateStore {
         window_ms: u64,
     ) -> Result<bool, StateError> {
         triggers::check_dedup(&self.conn, trigger_id, dedup_key, window_ms)
+    }
+
+    // ---- v1.5 Track 1A — policy revisions façade ----
+
+    /// Atomic deactivate-old + insert-new for the policy revisions table.
+    /// Returns the freshly written row (revision_id, set_at populated).
+    pub fn set_active_policy(
+        &mut self,
+        body_json: &str,
+        rationale: Option<&str>,
+    ) -> Result<policy_revisions::PolicyRevision, StateError> {
+        policy_revisions::set_active(&mut self.conn, body_json, rationale)
+    }
+
+    /// Read the active policy revision, if one has been set.
+    pub fn get_active_policy(
+        &self,
+    ) -> Result<Option<policy_revisions::PolicyRevision>, StateError> {
+        policy_revisions::get_active(&self.conn)
+    }
+
+    /// List policy revisions newest-first. `limit` is hard-capped at 200.
+    pub fn list_policy_revisions(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<policy_revisions::PolicyRevisionSummary>, StateError> {
+        policy_revisions::list_revisions(&self.conn, limit)
     }
 }

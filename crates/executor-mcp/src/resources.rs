@@ -21,7 +21,6 @@ use std::sync::Arc;
 use executor_core::schema::execution::RunStatus;
 use executor_core::schema::strategy::StrategyGetResponse;
 use executor_core::schema::trigger::{TriggerKind, TriggerListFilter};
-use executor_policy::LoadedPolicy;
 use executor_state::{
     LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, RunListFilter, StateError, StateStore,
 };
@@ -35,7 +34,6 @@ use rmcp::{
     service::RequestContext,
 };
 use serde_json::json;
-use tokio::sync::RwLock;
 
 use crate::{
     errors::{invalid_params, map_state_error, storage_error},
@@ -207,6 +205,8 @@ strategies to be idempotent across closely-spaced fires.
 - `trigger_events` / `trigger-events://{id}` — last 100 events with outcome.
 - `trigger_set_enabled({trigger_id, enabled})` — toggle without losing config.
 "#;
+
+
 
 const DOC_STRATEGY_BUNDLE: &str = r#"# Strategy bundle (v1.4)
 
@@ -404,6 +404,7 @@ None of this is enforced; it's only display polish.
 - `strategy://{id}/records` resource — raw capture rows.
 "#;
 
+
 fn make_template(
     uri_template: &str,
     name: &str,
@@ -495,13 +496,25 @@ pub(crate) async fn list_resource_templates_impl(
                  `enabled=true|false`. All filters AND together.",
                 "application/json",
             ),
-            // v1.4 Track B: policy snapshot resource.
+            // v1.4 Track B + v1.5 Track 1A: policy snapshot resource.
             make_template(
                 "policy://current",
                 "policy-current",
-                "Current loaded policy. Shape: `{ loaded: bool, policy?: <toml-projected JSON>, \
-                 confidence?, reason?, remediation? }`. When `loaded` is false, the response \
-                 carries `confidence: \"missing\"` + a `remediation` pointing at `.local/policy.toml`.",
+                "Current active policy revision. Shape: `{ loaded: bool, revision_id?, set_at?, \
+                 rationale?, policy?: <JSON body>, confidence?, reason?, remediation? }`. \
+                 Backed by the SQLite `policies` table (v1.5 Track 1A); edits go through the \
+                 `policy_set` MCP tool. When `loaded` is false the response carries \
+                 `confidence: \"missing\"` + a `remediation` pointing at `policy_set`.",
+                "application/json",
+            ),
+            // v1.5 Track 1A: policy revision history.
+            make_template(
+                "policy://history",
+                "policy-history",
+                "Policy revision history, newest-first. Shape: `{ revisions: [{ revision_id, \
+                 set_at, rationale, is_active }], count }`. Optional query: `?limit=N` \
+                 (default 20, cap 200). Each `policy_set` call appends one revision; the \
+                 single active row's body is exposed via `policy://current`.",
                 "application/json",
             ),
             make_template(
@@ -593,7 +606,6 @@ pub(crate) async fn read_resource_impl(
     request: ReadResourceRequestParams,
     _ctx: RequestContext<RoleServer>,
     state: Arc<tokio::sync::Mutex<StateStore>>,
-    policy: Arc<RwLock<Option<LoadedPolicy>>>,
 ) -> Result<ReadResourceResult, McpError> {
     let uri = request.uri.clone();
 
@@ -628,9 +640,19 @@ pub(crate) async fn read_resource_impl(
             }
         }
     }
-    // policy://current — v1.4 Track B. Match exactly to avoid shadowing.
+    // policy://current — v1.4 Track B (now DB-backed under v1.5 Track 1A).
+    // Match exactly to avoid shadowing.
     if uri == "policy://current" {
-        return read_policy_current(uri, policy).await;
+        return read_policy_current(uri, state).await;
+    }
+    // policy://history[?limit=N] — v1.5 Track 1A. Listing of all revisions
+    // newest-first, with rationale + is_active flags.
+    if uri == "policy://history" {
+        return read_policy_history(uri, String::new(), state).await;
+    }
+    if let Some(query) = uri.strip_prefix("policy://history?") {
+        let q = query.to_string();
+        return read_policy_history(uri, q, state).await;
     }
     // trigger://list[?...] — v1.4 Track B. Must match before generic
     // `trigger://{id}` branch.
@@ -1181,8 +1203,8 @@ fn static_doc_for(uri: &str) -> Option<&'static str> {
     match uri {
         "docs://policy-model" => Some(DOC_POLICY_MODEL),
         "docs://eip-7702" => Some(DOC_EIP_7702),
-        "docs://trigger-model" => Some(DOC_TRIGGER_MODEL),
         "docs://strategy-bundle" => Some(DOC_STRATEGY_BUNDLE),
+        "docs://trigger-model" => Some(DOC_TRIGGER_MODEL),
         _ => None,
     }
 }
@@ -1566,34 +1588,104 @@ async fn read_trigger_list(
     ]))
 }
 
-// ─────────── v1.4 Track B — policy://current ───────────
+// ─────────── v1.4 Track B / v1.5 Track 1A — policy://current ───────────
 
 async fn read_policy_current(
     uri: String,
-    policy: Arc<RwLock<Option<LoadedPolicy>>>,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
-    let guard = policy.read().await;
-    let body = match &*guard {
-        Some(loaded) => {
-            let policy_json = serde_json::to_value(loaded).map_err(|e| {
-                tracing::warn!(detail = %e, "policy://current: failed to serialize LoadedPolicy");
-                storage_error(format!("policy://current serialize: {e}"))
-            })?;
+    // v1.5 Track 1A: policy storage moved from in-memory loader to DB. Read
+    // the active revision; respond with `revision_id` so callers can
+    // correlate against `policy://history` and `policy_set` responses.
+    let active = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.get_active_policy()
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let body = match active {
+        Some(rev) => {
+            let policy_value: serde_json::Value = serde_json::from_str(&rev.body_json)
+                .unwrap_or(serde_json::json!(null));
             json!({
                 "loaded": true,
-                "policy": policy_json,
+                "revision_id": rev.revision_id,
+                "set_at": rev.set_at,
+                "rationale": rev.rationale,
+                "policy": policy_value,
                 "confidence": "full",
             })
         }
         None => json!({
             "loaded": false,
-            "reason": "policy not loaded (set [policy].path in config or fix policy.toml; see tracing logs)",
+            "revision_id": null,
+            "reason": "no active policy revision in DB (call policy_set to install one)",
             "confidence": "missing",
-            "remediation": "create .local/policy.toml — see docs://policy-model",
+            "remediation": "call the policy_set MCP tool with a full policy JSON body — see docs://policy-model",
         }),
     };
     let body_text = serde_json::to_string(&body)
         .map_err(|e| storage_error(format!("policy://current encode: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
+// ─────────── v1.5 Track 1A — policy://history ───────────
+
+async fn read_policy_history(
+    uri: String,
+    query: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    // Parse `?limit=N`. Default 20, cap 200.
+    let mut limit: u64 = 20;
+    if !query.is_empty() {
+        for pair in query.split('&') {
+            let (k, v) = match pair.split_once('=') {
+                Some(p) => p,
+                None => continue,
+            };
+            if k == "limit" {
+                match v.parse::<u64>() {
+                    Ok(n) if n > 0 => limit = n.min(200),
+                    _ => {
+                        return Err(crate::errors::invalid_params(
+                            "policy://history?limit must be a positive integer between 1 and 200",
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let summaries = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.list_policy_revisions(limit)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let revisions: Vec<serde_json::Value> = summaries
+        .iter()
+        .map(|s| {
+            json!({
+                "revision_id": s.revision_id,
+                "set_at": s.set_at,
+                "rationale": s.rationale,
+                "is_active": s.is_active,
+            })
+        })
+        .collect();
+    let body = json!({
+        "revisions": revisions,
+        "count": summaries.len(),
+    });
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("policy://history encode: {e}")))?;
     Ok(ReadResourceResult::new(vec![
         ResourceContents::text(body_text, uri).with_mime_type("application/json"),
     ]))

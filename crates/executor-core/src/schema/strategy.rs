@@ -124,6 +124,17 @@ pub struct StrategyRegisterResponse {
     /// Surfaced when the existing row is soft-deleted (Pitfall 9).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    /// v1.5 Track 1B: static extraction of contracts + selectors the strategy
+    /// source will touch when executed. Shape:
+    /// `{ "0xCONTRACT": ["selector1", ...], "_extraction": "complete"|"incomplete", "_warnings": [...] }`.
+    /// On the idempotent (already_exists) path this echoes the value cached at
+    /// the FIRST registration — re-deriving from the same source is identical
+    /// by construction.
+    #[schemars(description = "v1.5: static extraction of contracts + selectors the strategy will touch \
+(regex-derived, cached at register time). Shape: `{ \"0xCONTRACT\": [\"selector\", ...], \
+\"_extraction\": \"complete\"|\"incomplete\", \"_warnings\": [...] }`.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contracts_touched: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

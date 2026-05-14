@@ -21,7 +21,16 @@ CREATE TABLE IF NOT EXISTS strategies (
     -- NULL on rows registered before v1.4; those strategies fall back to
     -- the generic balance-only view.
     records_json TEXT,
-    view_source  TEXT
+    view_source  TEXT,
+    -- v1.5 Track 1B: cached static extraction of contracts and selectors the
+    -- strategy source touches, computed regex-style at register time. Stored
+    -- as canonical JSON shaped like
+    --   { "0xCONTRACT": ["selector1", "selector2"],
+    --     "_extraction": "complete" | "incomplete",
+    --     "_warnings": ["..."] }
+    -- NULL on rows registered before v1.5; alignment treats those as
+    -- `_extraction: incomplete`.
+    contracts_touched_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_name_active
     ON strategies(name) WHERE deleted_at IS NULL;
@@ -165,6 +174,22 @@ CREATE INDEX IF NOT EXISTS idx_records_capture_strategy
     ON strategy_records_capture(strategy_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_records_capture_run
     ON strategy_records_capture(run_id);
+
+-- v1.5 Track 1A: policy revisions table. Policy migrates from
+-- `.local/policy.toml` to DB; `policy_set` is the only edit path. One row
+-- holds the active revision; older rows are preserved for history. The
+-- partial unique index enforces the "exactly one active" invariant at the
+-- schema level so a regression in `policy_revisions::set_active` would fail
+-- at INSERT rather than silently leaving two active rows behind.
+CREATE TABLE IF NOT EXISTS policies (
+    revision_id   TEXT PRIMARY KEY,
+    body_json     TEXT NOT NULL,
+    rationale     TEXT,
+    set_at        TEXT NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_policies_one_active
+    ON policies(is_active) WHERE is_active = 1;
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {
@@ -190,6 +215,9 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
     }
     if !has_column(conn, "strategies", "view_source")? {
         conn.execute_batch("ALTER TABLE strategies ADD COLUMN view_source TEXT;")?;
+    }
+    if !has_column(conn, "strategies", "contracts_touched_json")? {
+        conn.execute_batch("ALTER TABLE strategies ADD COLUMN contracts_touched_json TEXT;")?;
     }
     Ok(())
 }

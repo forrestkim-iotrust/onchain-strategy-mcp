@@ -63,6 +63,8 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     // resources (strategy://list, strategy://by-name/{name}, trigger://list,
     // policy://current, plus the existing execution://list, strategy://{id},
     // trigger://{id}, trigger-events://{id}).
+    // v1.5 Track 1A: re-added `policy_set` for AI-managed policy edits —
+    // surface back to 9 tools (8 mutations + 1 read primitive `evm_view`).
     for expected in [
         "strategy_register",
         "strategy_delete",
@@ -74,6 +76,8 @@ async fn tools_list_emits_full_surface() -> Result<()> {
         // EVM read primitives.
         "evm_receipt",
         "evm_view",
+        // v1.5 Track 1A: policy edits.
+        "policy_set",
     ] {
         assert!(
             names.contains(&expected),
@@ -101,8 +105,8 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     );
     assert_eq!(
         tools.len(),
-        8,
-        "v1.4 Track B: expected exactly 8 tools (3 strategy mutations + 3 trigger mutations + 2 evm read/view), got {}",
+        9,
+        "v1.5 Track 1A: expected exactly 9 tools (3 strategy mutations + 3 trigger mutations + 2 evm read/view + policy_set), got {}",
         tools.len()
     );
     for t in tools {
@@ -155,12 +159,13 @@ async fn dropped_policy_update_returns_unknown_tool() -> Result<()> {
     Ok(())
 }
 
-// VALIDATION.md 1-02-03 — narrowed in Plan 02-02 + updated in Plan 05-03 +
-// v1.4 Track B: `policy_get` moved to the `policy://current` resource. In the
-// bare `spawn_server_with_state(":memory:")` setup there is no `[policy].path`
-// configured, so the response is the fail-closed placeholder
-// `{loaded: false, reason: ..., confidence: "missing", remediation: ...}` (D-15
-// + v1.4 honesty contract).
+// VALIDATION.md 1-02-03 — narrowed in Plan 02-02, updated in Plan 05-03,
+// v1.4 Track B, and again in v1.5 Track 1A: policy now lives in the
+// SQLite `policies` table; the `policy_set` tool is the install path.
+// In a fresh `:memory:` boot with no DB row and no TOML import path, the
+// resource returns the fail-closed shape (`{loaded: false, reason,
+// confidence: "missing", remediation}`). The remediation now points at
+// the `policy_set` tool rather than `.local/policy.toml`.
 #[tokio::test]
 async fn policy_current_resource_returns_loaded_false_when_policy_not_configured() -> Result<()> {
     let mut proc = common::spawn_server_with_state(":memory:").await?;
@@ -182,25 +187,27 @@ async fn policy_current_resource_returns_loaded_false_when_policy_not_configured
     let body: Value = serde_json::from_str(text)?;
     assert_eq!(
         body["loaded"], false,
-        "policy://current without [policy].path must return loaded: false (D-15 fail-closed)"
+        "policy://current without an active revision must return loaded: false (D-15 fail-closed)"
     );
     assert!(
         body["reason"]
             .as_str()
-            .is_some_and(|s| s.contains("policy not loaded")),
+            .is_some_and(|s| s.contains("policy")),
         "reason missing fail-closed marker: {}",
         body["reason"]
     );
     // v1.4 honesty contract — when data is missing, mark confidence accordingly.
     assert_eq!(
         body["confidence"], "missing",
-        "policy://current without [policy].path must declare confidence=missing"
+        "policy://current without an active revision must declare confidence=missing"
     );
+    // v1.5 Track 1A: remediation now references the `policy_set` MCP tool
+    // (the install path moved from `.local/policy.toml` to the tool).
     assert!(
         body["remediation"]
             .as_str()
-            .is_some_and(|s| s.contains("policy.toml")),
-        "remediation should reference .local/policy.toml: {body}"
+            .is_some_and(|s| s.contains("policy_set")),
+        "remediation should reference the policy_set tool: {body}"
     );
 
     proc.child.kill().await?;

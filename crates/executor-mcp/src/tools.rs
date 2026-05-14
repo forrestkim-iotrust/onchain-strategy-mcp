@@ -88,6 +88,23 @@ pub struct TriggerSetEnabledInput {
     pub enabled: bool,
 }
 
+/// v1.5 Track 1A: `policy_set` input. The `policy` field is opaque JSON
+/// matching the LoadedPolicy / PolicyConfig wire shape — the tool layer
+/// re-validates address / U256 / selector parse + the Pitfall P-10 chain
+/// subtable invariant before INSERT.
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PolicySetInput {
+    /// Full new policy body. Same JSON shape as `policy://current`'s
+    /// `policy` field. Deny-by-default semantics apply — anything you omit
+    /// is denied.
+    pub policy: serde_json::Value,
+    /// Optional human-readable why-string; persisted with the revision so
+    /// later `policy://history` reads can explain the change.
+    #[serde(default)]
+    pub rationale: Option<String>,
+}
+
 /// `evm_view` input — ad-hoc JS function evaluated in a read-only sandbox.
 ///
 /// The source must evaluate to `(ctx) => any` (D-05 Shape-B). Unlike
@@ -132,9 +149,7 @@ impl ExecutorServer {
         description = "Register a JavaScript strategy (content-addressed; idempotent on same bundle). \
 Supplying `records` and/or `view` opts into the v1.4 self-documenting bundle — `strategy://{id}/view` \
 then returns rich state (principal, accrued interest, cycle counts, etc.) instead of the generic \
-balance fallback. The `view` function may emit a top-level `$assets` array to surface user positions \
-into the portfolio aggregate (see `docs://strategy-bundle` for the bundle shape and `$assets` keys). \
-Pass `dry_run: true` to validate without persisting (returns the would-be id)."
+balance fallback. Pass `dry_run: true` to validate without persisting (returns the would-be id)."
     )]
     async fn strategy_register(
         &self,
@@ -155,7 +170,17 @@ Pass `dry_run: true` to validate without persisting (returns the would-be id)."
         let view_source = input.view.clone();
         let dry_run = input.dry_run.unwrap_or(false);
 
-        // 3. dry_run short-circuit: compute the would-be id and return early
+        // 3. v1.5 Track 1B: static extraction. Runs AFTER validate_register so
+        //    we don't waste regex passes on rejected inputs, BEFORE any DB
+        //    touch so dry_run can echo the extraction without persistence.
+        //    Extraction is a DERIVATION — never folded into the id hash, so
+        //    re-extracting is a no-op for content-addressing.
+        let extraction = crate::contracts_touched::extract(&input.source);
+        let contracts_touched_value = extraction.to_json();
+        let contracts_touched_json_str = serde_json::to_string(&contracts_touched_value)
+            .map_err(|e| invalid_params(format!("contracts_touched serialize: {e}")))?;
+
+        // 4. dry_run short-circuit: compute the would-be id and return early
         //    without touching the DB (P5/P6 design — destructive ops must be
         //    explicit, registration is destructive in the sense that it
         //    consumes a unique name + content-address slot).
@@ -170,13 +195,15 @@ Pass `dry_run: true` to validate without persisting (returns the would-be id)."
                 "would_be_strategy_id": would_be_id,
                 "name": input.name,
                 "has_bundle": records_json.is_some() || view_source.is_some(),
+                "contracts_touched": contracts_touched_value,
             });
             return json_result(&resp);
         }
 
-        // 4. Hand the blocking DB call to the blocking pool (Pattern 2).
+        // 5. Hand the blocking DB call to the blocking pool (Pattern 2).
         //    Route through the bundle-aware register so records/view are
-        //    persisted and folded into the id hash.
+        //    persisted and folded into the id hash. `contracts_touched_json`
+        //    rides alongside as a derivation cache (NOT part of the hash).
         let state = self.state.clone();
         let name = input.name.clone();
         let source = input.source.clone();
@@ -184,6 +211,7 @@ Pass `dry_run: true` to validate without persisting (returns the would-be id)."
         let tags = input.tags.clone();
         let records_for_blocking = records_json.clone();
         let view_for_blocking = view_source.clone();
+        let contracts_for_blocking = contracts_touched_json_str.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let mut store = state.blocking_lock();
             store.register_strategy_bundle(
@@ -193,13 +221,20 @@ Pass `dry_run: true` to validate without persisting (returns the would-be id)."
                 tags.as_deref(),
                 records_for_blocking.as_deref(),
                 view_for_blocking.as_deref(),
+                Some(contracts_for_blocking.as_str()),
             )
         })
         .await
         .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
         .map_err(map_state_error)?;
 
-        // 5. Shape the response (D-01b / D-07).
+        // 6. Shape the response (D-01b / D-07).
+        //    P6 honesty: on the idempotent (AlreadyExists) path we surface the
+        //    contracts_touched cached at the FIRST registration — re-deriving
+        //    from the same source is identical to the existing row's cache by
+        //    construction, but we read it from the DB rather than recomputing
+        //    so an upgraded extractor never silently disagrees with what was
+        //    stored.
         let resp = match outcome {
             RegisterOutcome::Created(s) => StrategyRegisterResponse {
                 strategy_id: s.id,
@@ -210,17 +245,30 @@ Pass `dry_run: true` to validate without persisting (returns the would-be id)."
                 existing_description: None,
                 existing_tags: None,
                 deleted_at: s.deleted_at,
+                contracts_touched: Some(contracts_touched_value),
             },
-            RegisterOutcome::AlreadyExists(s) => StrategyRegisterResponse {
-                strategy_id: s.id.clone(),
-                name: s.name.clone(),
-                created_at: s.created_at.clone(),
-                already_exists: true,
-                existing_name: Some(s.name),
-                existing_description: s.description,
-                existing_tags: s.tags,
-                deleted_at: s.deleted_at,
-            },
+            RegisterOutcome::AlreadyExists(s) => {
+                // Read the existing row's cached extraction. NULL on legacy
+                // (pre-v1.5) rows: surface the freshly-computed value so the
+                // response is still informative without retroactively
+                // mutating the row.
+                let existing_extraction: serde_json::Value = s
+                    .contracts_touched_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| contracts_touched_value.clone());
+                StrategyRegisterResponse {
+                    strategy_id: s.id.clone(),
+                    name: s.name.clone(),
+                    created_at: s.created_at.clone(),
+                    already_exists: true,
+                    existing_name: Some(s.name),
+                    existing_description: s.description,
+                    existing_tags: s.tags,
+                    deleted_at: s.deleted_at,
+                    contracts_touched: Some(existing_extraction),
+                }
+            }
         };
         json_result(&resp)
     }
@@ -754,6 +802,88 @@ Pass `dry_run: true` to validate without persisting (returns the would-be id)."
 
     // v1.4 Track B: `policy_get` moved to the `policy://current` resource.
 
+    // ─────────── POLICY TOOLS (v1.5 Track 1A) ───────────
+
+    #[tool(
+        name = "policy_set",
+        description = "[DESTRUCTIVE] Replace the active policy with a new revision. The body \
+                       must be the full policy JSON (same shape as policy://current's `policy` \
+                       field). Returns the previous + new revision ids, a JSON Patch (RFC 6902) \
+                       diff, and an `impact` block listing newly-granted capabilities (e.g. \
+                       contract addresses / selectors now allowed). Edits take effect \
+                       immediately — subsequent strategy_run calls are gated by the new policy."
+    )]
+    async fn policy_set(
+        &self,
+        Parameters(input): Parameters<PolicySetInput>,
+    ) -> Result<CallToolResult, McpError> {
+        // 1. Parse the input JSON → LoadedPolicy + canonical body JSON.
+        let (loaded, canonical_body_json) =
+            crate::policy_boot::parse_policy_json(&input.policy)
+                .map_err(map_policy_error_for_set)?;
+
+        // 2. Snapshot the previous active revision (for diff + response).
+        let state = self.state.clone();
+        let previous = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.get_active_policy()
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        // 3. Insert the new active revision (transactional: deactivate-old +
+        //    insert-new).
+        let state = self.state.clone();
+        let body_for_write = canonical_body_json.clone();
+        let rationale_for_write = input.rationale.clone();
+        let new_revision = tokio::task::spawn_blocking(move || {
+            let mut store = state.blocking_lock();
+            store.set_active_policy(&body_for_write, rationale_for_write.as_deref())
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+        // 4. Update the in-memory Arc so signing observes the new policy
+        //    immediately (no restart needed).
+        {
+            let mut guard = self.policy.write().await;
+            *guard = Some(loaded);
+        }
+
+        // 5. Build the response: diff + impact.
+        let new_body_value: serde_json::Value = serde_json::from_str(&canonical_body_json)
+            .map_err(|e| storage_error(format!("re-parse canonical body: {e}")))?;
+        let old_body_value: serde_json::Value = match &previous {
+            Some(rev) => serde_json::from_str(&rev.body_json).unwrap_or(serde_json::json!({})),
+            None => serde_json::json!({}),
+        };
+        let ops = crate::policy_diff::diff_json(&old_body_value, &new_body_value);
+        let diff_json: Vec<serde_json::Value> = ops.iter().map(|op| op.to_json()).collect();
+        let new_capabilities =
+            crate::policy_diff::new_capabilities_granted(&old_body_value, &new_body_value, &ops);
+
+        // 6. Compose response. v1.5 Track 1A: the impact fields
+        //    `newly_satisfied_strategies` and `newly_unsatisfied_strategies`
+        //    are computed by Track 1C (alignment) — return empty arrays here
+        //    with a TODO marker so the surface shape stays stable. The
+        //    `new_capabilities_granted` field IS computed in 1A.
+        let body = serde_json::json!({
+            "previous_revision_id": previous.as_ref().map(|r| r.revision_id.clone()),
+            "new_revision_id": new_revision.revision_id,
+            "applied_at": new_revision.set_at,
+            "diff": diff_json,
+            "impact": {
+                // TODO(v1.5 Track 1C): populate from alignment compute.
+                "newly_satisfied_strategies": [],
+                "newly_unsatisfied_strategies": [],
+                "new_capabilities_granted": new_capabilities,
+            },
+        });
+        json_result(&body)
+    }
+
     // ─────────── TRIGGER TOOLS (v1.2 spike) ───────────
 
     #[tool(
@@ -921,6 +1051,20 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     let body = serde_json::to_string(value)
         .map_err(|e| storage_error(format!("serialize response: {e}")))?;
     Ok(CallToolResult::success(vec![Content::text(body)]))
+}
+
+/// v1.5 Track 1A: map a `PolicyError` (raised by `parse_policy_json` while
+/// validating the `policy_set` input body) into a wire-safe MCP error. We
+/// surface these as `-32602 invalid_params` — the caller's input is
+/// malformed, not a runtime denial. `detail_for_log` stays on stderr; only
+/// the stable `Display` text + `category` string reach the wire.
+fn map_policy_error_for_set(e: executor_policy::PolicyError) -> McpError {
+    tracing::warn!(
+        detail = %e.detail_for_log(),
+        kind = %e.data_kind(),
+        "policy_set: input policy failed validation",
+    );
+    invalid_params(format!("policy_set: {e}"))
 }
 
 /// v1.4 Track B — exposed for `strategy://list` resource handler.

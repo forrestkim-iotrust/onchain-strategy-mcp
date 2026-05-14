@@ -27,6 +27,11 @@ pub struct Strategy {
     /// v1.4 strategy bundle: JS source for the `view` function. NULL for
     /// legacy registrations; consumers fall back to a generic balance view.
     pub view_source: Option<String>,
+    /// v1.5 Track 1B: cached static extraction of contracts/selectors the
+    /// strategy touches. Canonical JSON; see
+    /// `crates/executor-mcp/src/contracts_touched.rs` for the shape. NULL on
+    /// rows registered before v1.5.
+    pub contracts_touched_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +125,7 @@ fn map_strategy(
     deleted_at: Option<String>,
     records_json: Option<String>,
     view_source: Option<String>,
+    contracts_touched_json: Option<String>,
 ) -> Strategy {
     Strategy {
         id,
@@ -131,6 +137,7 @@ fn map_strategy(
         deleted_at,
         records_json,
         view_source,
+        contracts_touched_json,
     }
 }
 
@@ -143,7 +150,12 @@ pub(crate) fn register(
     tags: Option<&[String]>,
     records_json: Option<&str>,
     view_source: Option<&str>,
+    contracts_touched_json: Option<&str>,
 ) -> Result<RegisterOutcome, StateError> {
+    // v1.5 Track 1B: `contracts_touched_json` is a DERIVATION from `source`
+    // (the regex extractor in `executor-mcp::contracts_touched` computes it)
+    // and is INTENTIONALLY excluded from the id hash. Re-deriving never
+    // changes the id; only execute/records/view do.
     let id = hash_bundle(source, records_json, view_source);
 
     // 1. Same id already in DB → idempotent (D-01b same-source, extended to
@@ -168,9 +180,9 @@ pub(crate) fn register(
     let now = now_rfc3339();
     let tags_json = encode_tags(tags);
     conn.execute(
-        "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![&id, name, source, description, tags_json, &now, records_json, view_source],
+        "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source, contracts_touched_json)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![&id, name, source, description, tags_json, &now, records_json, view_source, contracts_touched_json],
     )?;
 
     Ok(RegisterOutcome::Created(Strategy {
@@ -183,6 +195,7 @@ pub(crate) fn register(
         deleted_at: None,
         records_json: records_json.map(|s| s.to_string()),
         view_source: view_source.map(|s| s.to_string()),
+        contracts_touched_json: contracts_touched_json.map(|s| s.to_string()),
     }))
 }
 
@@ -223,7 +236,7 @@ pub(crate) fn list(
 pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
         "SELECT id, name, source, description, tags, created_at, deleted_at, \
-                records_json, view_source \
+                records_json, view_source, contracts_touched_json \
          FROM strategies WHERE id = ?1 LIMIT 1",
         params![id],
         |r| {
@@ -237,6 +250,7 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>,
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
             ))
         },
     )
@@ -247,7 +261,7 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>,
 pub(crate) fn get_by_name(conn: &Connection, name: &str) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
         "SELECT id, name, source, description, tags, created_at, deleted_at, \
-                records_json, view_source \
+                records_json, view_source, contracts_touched_json \
          FROM strategies WHERE name = ?1 AND deleted_at IS NULL",
         params![name],
         |r| {
@@ -261,6 +275,7 @@ pub(crate) fn get_by_name(conn: &Connection, name: &str) -> Result<Option<Strate
                 r.get(6)?,
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
             ))
         },
     )

@@ -7,6 +7,9 @@
     "already_exists": {
       "type": "boolean"
     },
+    "contracts_touched": {
+      "description": "v1.5: static extraction of contracts + selectors the strategy will touch (regex-derived, cached at register time). Shape: `{ \"0xCONTRACT\": [\"selector\", ...], \"_extraction\": \"complete\"|\"incomplete\", \"_warnings\": [...] }`."
+    },
     "created_at": {
       "type": "string"
     },
