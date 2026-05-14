@@ -16,6 +16,7 @@ use rquickjs::convert::Coerced;
 use rquickjs::function::Rest;
 use rquickjs::{CatchResultExt, Context, Ctx, Function, Object, Runtime, Value};
 use std::cell::RefCell;
+use std::str::FromStr;
 use std::rc::Rc;
 use std::sync::{
     Arc,
@@ -68,6 +69,43 @@ pub trait CtxHost {
     /// by manual trigger / external MCP call get `None`. Strategies invoked
     /// by interval/block/log/mempool triggers get `Some(payload)`.
     fn event(&self) -> Option<&serde_json::Value> {
+        None
+    }
+
+    /// v1.7 (`ctx.price.usd`): the host's currently-configured chain id, used
+    /// as the default when a JS call omits the explicit `chain_id` argument.
+    /// Default `None` keeps `CtxStub` and other test hosts compiling — they
+    /// surface `ctx.price.usd(token, amount)` (no chain) as `null` because
+    /// the resolver can't pick a chain without help.
+    fn host_chain_id(&self) -> Option<u64> {
+        None
+    }
+
+    /// v1.7 (`ctx.price.usd`): resolve a token amount to micro-USD (USD * 1e6).
+    /// Default `None` so test hosts (and any host without a provider) return
+    /// `null` at the JS edge. Production hosts (RuntimeContext,
+    /// ViewHostInner) override this to delegate to
+    /// `executor_evm::resolve_usd_micros`.
+    ///
+    /// Synchronous on purpose: the rquickjs sandbox is single-threaded and
+    /// the JS function it backs is also synchronous. Implementations that
+    /// need an async resolver bridge via `tokio::task::block_in_place` or
+    /// `Handle::current().block_on(...)` (mirroring `ctx.evm.readErc20`).
+    fn price_usd_micros(
+        &self,
+        _chain_id: u64,
+        _token: executor_evm::Address,
+        _amount: executor_evm::U256,
+    ) -> Option<u128> {
+        None
+    }
+
+    /// v1.7 (`ctx.price.usd`): shared price cache. Returning `Some` lets the
+    /// sandbox JS binding short-circuit cache hits without going through the
+    /// trait's `price_usd_micros` (which would block on the tokio runtime
+    /// for every call even when the answer is cached). Default `None` ⇒ the
+    /// JS binding will resolve via [`price_usd_micros`] for every call.
+    fn price_cache(&self) -> Option<&std::sync::Arc<executor_evm::PriceCache>> {
         None
     }
 }
@@ -193,6 +231,13 @@ impl Sandbox {
         // v1.2 Trigger Core: snapshot the optional trigger event payload so
         // the closure below can install `ctx.event` (null when None).
         let event_snapshot: Option<serde_json::Value> = host.event().cloned();
+        // v1.7 (`ctx.price.usd`): snapshot the shared price cache + the
+        // host's default chain_id. The closure below uses them to build
+        // `ctx.price.usd` — None for either falls back to a JS `null` at
+        // resolution time. Cache is `Arc`-cloned (cheap, no inner copy).
+        let price_cache_clone: Option<std::sync::Arc<executor_evm::PriceCache>> =
+            host.price_cache().cloned();
+        let host_chain_id_clone: Option<u64> = host.host_chain_id();
 
         let result = ctx.with(|c| -> Result<serde_json::Value, RuntimeError> {
             // 4a. D-04 ctx surface — real injection (replaces the 03-01 stub).
@@ -484,6 +529,32 @@ impl Sandbox {
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
             ctx_obj
                 .set("address", address_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // v1.7 (`ctx.price.usd`): one helper. Synchronous from JS;
+            // bridges to `executor_evm::resolve_usd_micros` via the active
+            // tokio runtime (mirrors `ctx.evm.readErc20.*`). Installed
+            // unconditionally — strategies that call it without a configured
+            // provider/cache get a JS `null` (not a missing-namespace error),
+            // matching how `usd` is treated everywhere else (optional).
+            let price_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            {
+                let provider_local = provider_clone.clone();
+                let cfg_local = evm_cfg_clone.clone();
+                let cache_local = price_cache_clone.clone();
+                let chain_local = host_chain_id_clone;
+                let f = Function::new(
+                    c.clone(),
+                    make_price_usd_closure(provider_local, cfg_local, cache_local, chain_local),
+                )
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                price_obj
+                    .set("usd", f)
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            }
+            ctx_obj
+                .set("price", price_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
             // v1.2 Trigger Core: install `ctx.event`. When the host carries
@@ -1465,6 +1536,233 @@ fn native_block_number_host_binding<'js>(
         });
 
     json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+/// v1.7 `ctx.price.usd` closure factory. Captures (provider, cfg, cache,
+/// default_chain_id) and returns a sync function compatible with rquickjs
+/// `Function::new`. Mirrors the shape of `make_erc20_closure` so any future
+/// pattern shift propagates with one grep.
+fn make_price_usd_closure(
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: executor_evm::EvmConfig,
+    cache: Option<std::sync::Arc<executor_evm::PriceCache>>,
+    default_chain_id: Option<u64>,
+) -> impl for<'js> Fn(
+    rquickjs::function::Rest<rquickjs::Value<'js>>,
+) -> rquickjs::Result<rquickjs::Value<'js>>
+       + 'static {
+    move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
+        price_usd_host_binding(
+            args.0,
+            provider.as_ref(),
+            &cfg,
+            cache.as_ref(),
+            default_chain_id,
+        )
+    }
+}
+
+/// v1.7 host binding for `ctx.price.usd(token, amount, chain_id?)`.
+///
+/// - `token`: lower/checksum hex string (`0x000…00` for native).
+/// - `amount`: raw base-unit decimal string.
+/// - `chain_id`: optional number; defaults to the host's configured chain.
+///
+/// Validation: throws on shape errors (bad address, bad amount, bad chain).
+/// Resolution failures (no provider, no cache, no chain context, unknown
+/// token, RPC failure) return JS `null` — keeping the helper ergonomic for
+/// strategy authors who just want "USD if available, else nothing".
+fn price_usd_host_binding<'js>(
+    raw_args: Vec<rquickjs::Value<'js>>,
+    provider: Option<&std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: &executor_evm::EvmConfig,
+    cache: Option<&std::sync::Arc<executor_evm::PriceCache>>,
+    default_chain_id: Option<u64>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let ctx = match raw_args.first() {
+        Some(v) => v.ctx().clone(),
+        None => return Err(rquickjs::Error::Exception),
+    };
+    if raw_args.len() < 2 {
+        return Err(throw_js_error(
+            &ctx,
+            "ctx.price.usd expects at least 2 positional args (token, amount)",
+        ));
+    }
+
+    // 1. Token: must be a string. We DO NOT enforce EIP-55 checksum here —
+    //    the resolver's static maps + alloy's lenient parser accept lower /
+    //    upper / canonical forms. We DO reject non-strings up-front.
+    let token_str = raw_args[0]
+        .as_string()
+        .ok_or_else(|| throw_js_error(&ctx, "ctx.price.usd: 'token' must be a string"))?
+        .to_string()?;
+    let token_addr = match executor_evm::Address::from_str(&token_str) {
+        Ok(a) => a,
+        Err(_) => {
+            return Err(throw_js_error(
+                &ctx,
+                &format!("ctx.price.usd: invalid token address '{token_str}'"),
+            ));
+        }
+    };
+
+    // 2. Amount: decimal string. Reject BigInt + negative /
+    //    non-integer / non-finite numeric inputs; agents that want
+    //    fractional pricing should multiply by 10^decimals first.
+    let amount_u256 = parse_price_amount(&ctx, &raw_args[1])?;
+
+    // 3. Chain id: optional 3rd arg, else host default.
+    let chain_id_opt: Option<u64> = if raw_args.len() > 2 {
+        let v = &raw_args[2];
+        if v.is_undefined() || v.is_null() {
+            default_chain_id
+        } else if let Some(n) = v.as_int() {
+            if n < 0 {
+                return Err(throw_js_error(
+                    &ctx,
+                    "ctx.price.usd: 'chain_id' must be a non-negative integer",
+                ));
+            }
+            Some(n as u64)
+        } else if let Some(f) = v.as_float() {
+            if !f.is_finite() || f < 0.0 || f.fract() != 0.0 {
+                return Err(throw_js_error(
+                    &ctx,
+                    "ctx.price.usd: 'chain_id' must be a non-negative integer",
+                ));
+            }
+            Some(f as u64)
+        } else if let Some(s) = v.as_string() {
+            let s: String = s.to_string()?;
+            match s.parse::<u64>() {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    return Err(throw_js_error(
+                        &ctx,
+                        &format!("ctx.price.usd: 'chain_id' string '{s}' not parseable as u64"),
+                    ));
+                }
+            }
+        } else {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.price.usd: 'chain_id' must be a number or decimal string",
+            ));
+        }
+    } else {
+        default_chain_id
+    };
+    let chain_id = match chain_id_opt {
+        Some(c) => c,
+        None => return Ok(rquickjs::Value::new_null(ctx.clone())),
+    };
+
+    // 4. Resolver inputs all present? If provider OR cache is missing we
+    //    can't do an RPC quote; we can still serve stablecoins out of the
+    //    static map, but `resolve_usd_micros` requires both anyway, so
+    //    short-circuit to null.
+    let (provider, cache) = match (provider, cache) {
+        (Some(p), Some(c)) => (p.clone(), c.clone()),
+        _ => return Ok(rquickjs::Value::new_null(ctx.clone())),
+    };
+
+    // 5. Bridge async resolver to sync JS via the live tokio handle (same
+    //    pattern as `erc20_host_binding`). If there's no current runtime
+    //    (defensive: shouldn't happen in production paths), build a tiny
+    //    one. Errors / None inside resolve return null at the JS edge.
+    let _ = cfg; // cfg is currently unused by resolve_usd_micros (the inner
+                 // path uses its own RPC timeout); reserved for future use.
+    let dispatch = executor_evm::resolve_usd_micros(
+        chain_id,
+        token_addr,
+        amount_u256,
+        &provider,
+        &cache,
+    );
+    let micros: Option<u128> = match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(dispatch),
+        Err(_) => {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return Ok(rquickjs::Value::new_null(ctx.clone())),
+            };
+            rt.block_on(dispatch)
+        }
+    };
+
+    // 6. Convert micros → JS Number USD at the boundary. Null when the
+    //    resolver couldn't price it.
+    match micros {
+        Some(m) => {
+            let usd = (m as f64) / 1_000_000.0;
+            Ok(rquickjs::Value::new_float(ctx.clone(), usd))
+        }
+        None => Ok(rquickjs::Value::new_null(ctx.clone())),
+    }
+}
+
+/// Parse the `amount` arg of `ctx.price.usd` as `U256`. Accepts decimal
+/// strings (preferred). Rejects BigInt (use a string), negative,
+/// non-finite, and non-integer numeric inputs.
+fn parse_price_amount(
+    ctx: &rquickjs::Ctx<'_>,
+    v: &rquickjs::Value<'_>,
+) -> rquickjs::Result<executor_evm::U256> {
+    // BigInt is rejected (mirrors the D-03 convention used by `qjs_value_to_json`
+    // for action `args[]`): the agent should pass amounts as decimal strings
+    // so the wire shape stays JSON-clean and precision is unambiguous.
+    if matches!(v.type_of(), rquickjs::Type::BigInt) {
+        return Err(throw_js_error(
+            ctx,
+            "ctx.price.usd: 'amount' must be a decimal string, got BigInt — pass a literal string",
+        ));
+    }
+    // String path.
+    if let Some(js_s) = v.as_string() {
+        let s: String = js_s.to_string()?;
+        // Reject explicit minus / empty / non-digit characters.
+        if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+            return Err(throw_js_error(
+                ctx,
+                &format!("ctx.price.usd: 'amount' must be a non-negative decimal string, got '{s}'"),
+            ));
+        }
+        return executor_evm::U256::from_str_radix(&s, 10).map_err(|_| {
+            throw_js_error(
+                ctx,
+                "ctx.price.usd: 'amount' decimal string exceeds U256::MAX",
+            )
+        });
+    }
+    // Number path: only u64-safe integers. Anything else is rejected so
+    // strategies don't accidentally pass `1e18` as a JS Number and silently
+    // lose precision.
+    if let Some(i) = v.as_int() {
+        if i < 0 {
+            return Err(throw_js_error(
+                ctx,
+                "ctx.price.usd: 'amount' must be non-negative",
+            ));
+        }
+        return Ok(executor_evm::U256::from(i as u64));
+    }
+    if let Some(f) = v.as_float() {
+        if !f.is_finite() || f < 0.0 || f.fract() != 0.0 {
+            return Err(throw_js_error(
+                ctx,
+                "ctx.price.usd: 'amount' must be a non-negative integer (use string for large values)",
+            ));
+        }
+        return Ok(executor_evm::U256::from(f as u64));
+    }
+    Err(throw_js_error(
+        ctx,
+        "ctx.price.usd: 'amount' must be a decimal string or non-negative integer",
+    ))
 }
 
 fn throw_js_error(ctx: &Ctx<'_>, msg: &str) -> rquickjs::Error {

@@ -96,6 +96,10 @@ pub struct WebUiOptions {
     /// balance walk. Default is fine when no provider is supplied — the
     /// fields are only read when `provider.is_some()`.
     pub evm_config: EvmConfig,
+    /// v1.7 (`ctx.price.usd`): shared price cache from `ExecutorServer`.
+    /// `None` lets the UI come up without pricing (idle balances render
+    /// without a `usd` column).
+    pub price_cache: Option<Arc<executor_evm::PriceCache>>,
 }
 
 /// Pull `WebUiOptions` out of env vars and a parsed `[evm]`-style config.
@@ -108,6 +112,7 @@ impl WebUiOptions {
         cli_ui_port: Option<u16>,
         provider: Option<Arc<DynProvider>>,
         evm_config: EvmConfig,
+        price_cache: Option<Arc<executor_evm::PriceCache>>,
     ) -> Self {
         let env_no_ui = std::env::var("OSMCP_NO_UI")
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
@@ -119,6 +124,7 @@ impl WebUiOptions {
             chain_id,
             provider,
             evm_config,
+            price_cache,
         }
     }
 }
@@ -156,6 +162,10 @@ struct AppState {
     /// lowercase token address. Avoids re-fetching ABI metadata on every
     /// portfolio poll.
     token_meta_cache: web_portfolio::TokenMetaCache,
+    /// v1.7 (`ctx.price.usd`): shared USD price cache (Uniswap V3 quotes +
+    /// stablecoin map). Same `Arc` the server uses for `strategy_run` and
+    /// the view sandbox — one source of truth.
+    price_cache: Option<Arc<executor_evm::PriceCache>>,
 }
 
 /// Build the axum router. Pulled out so tests can spawn it directly.
@@ -215,6 +225,7 @@ pub async fn spawn(
         provider: opts.provider,
         evm_config: opts.evm_config,
         token_meta_cache: web_portfolio::new_token_meta_cache(),
+        price_cache: opts.price_cache,
     };
     let app = build_router(app_state);
 
@@ -507,6 +518,7 @@ async fn api_portfolio(State(app): State<AppState>) -> Response {
         app.provider.clone(),
         &app.evm_config,
         &app.token_meta_cache,
+        app.price_cache.as_ref(),
         &app.burner,
         seeded_chain,
         &token_candidates,
@@ -642,6 +654,10 @@ fn view_evm_from(app: &AppState) -> resources::ViewEvm {
     resources::ViewEvm {
         provider: app.provider.clone(),
         evm_config: app.evm_config.clone(),
+        // v1.7 (`ctx.price.usd`): the AppState carries the same `price_cache`
+        // Arc the server seeded at boot (cf. WebUiOptions wiring).
+        price_cache: app.price_cache.clone(),
+        chain_id: app.chain_id_cell.get().copied(),
     }
 }
 
@@ -723,6 +739,7 @@ mod tests {
             None,
             None,
             EvmConfig::default(),
+            None,
         );
         assert!(opts.disabled, "--no-ui CLI must disable the UI");
     }
@@ -742,6 +759,7 @@ mod tests {
             None,
             None,
             EvmConfig::default(),
+            None,
         );
         // We can only assert this when OSMCP_NO_UI is not set in the test
         // environment. CI sets RUST_LOG=error and nothing else; this is safe.

@@ -50,6 +50,13 @@ use crate::{
 pub(crate) struct ViewEvm {
     pub provider: Option<Arc<executor_evm::DynProvider>>,
     pub evm_config: executor_evm::EvmConfig,
+    /// v1.7 (`ctx.price.usd`): shared cache so the view, idle walker, and
+    /// `strategy_run` all hit the same in-process price entries.
+    pub price_cache: Option<Arc<executor_evm::PriceCache>>,
+    /// v1.7 (`ctx.price.usd`): the host's currently-configured chain id.
+    /// Surfaced to the view sandbox as the default `chain_id` when JS
+    /// callers omit it.
+    pub chain_id: Option<u64>,
 }
 
 // ─────────── Embedded examples + static docs (v1.3 self-documenting) ───────────
@@ -293,6 +300,32 @@ The runtime wraps the return value with an honesty envelope:
 
 Strategies without `view` get a generic fallback (burner balances only)
 with `confidence: "missing"`.
+
+### Available helpers in `view`
+
+In addition to `ctx.evm.*` (read-only chain access) and `ctx.units.*` /
+`ctx.address.*` (pure validators), v1.7 exposes one pricing helper:
+
+- `ctx.price.usd(token: string, amount: string, chain_id?: number) → number | null`
+  — resolves a raw base-unit `amount` of `token` (or `0x000…00` for native)
+  to a USD number. `null` ⇒ no quote available. Cache TTL is 60s for hits,
+  10s for negative results.
+
+```js
+view: (ctx, _records) => {
+  const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const bal  = ctx.evm.erc20Balance(USDC, ctx.strategy.id /* burner */);
+  const usd  = ctx.price.usd(USDC, bal, 8453);  // → 1.0 per whole USDC
+  return { idle_usdc_usd: usd, balance_raw: bal };
+}
+```
+
+The resolver is intentionally narrow: USDC / USDT / DAI / USDbC on Base
++ Mainnet return $1.00 from a static map; native ETH / WETH on those
+chains route through the canonical Uniswap V3 WETH/USDC 0.05% pool's
+`slot0`. Every other token (and every other chain) returns `null` —
+strategies that need pricing for exotic assets should compute it
+themselves and write `usd` directly into their `$assets` entry.
 
 ## $assets — declaring user positions for portfolio aggregation
 
@@ -1965,6 +1998,8 @@ async fn read_strategy_view(
         logs: Vec<String>,
         provider: Option<Arc<executor_evm::DynProvider>>,
         evm_config: executor_evm::EvmConfig,
+        price_cache: Option<Arc<executor_evm::PriceCache>>,
+        chain_id: Option<u64>,
     }
     impl CtxHost for ViewHostInner {
         fn strategy_id(&self) -> &str { &self.sid }
@@ -1978,12 +2013,35 @@ async fn read_strategy_view(
         fn evm_config(&self) -> &executor_evm::EvmConfig {
             &self.evm_config
         }
+        fn host_chain_id(&self) -> Option<u64> {
+            self.chain_id
+        }
+        fn price_cache(&self) -> Option<&Arc<executor_evm::PriceCache>> {
+            self.price_cache.as_ref()
+        }
+        fn price_usd_micros(
+            &self,
+            chain_id: u64,
+            token: executor_evm::Address,
+            amount: executor_evm::U256,
+        ) -> Option<u128> {
+            let provider = self.provider.as_ref()?.clone();
+            let cache = self.price_cache.as_ref()?.clone();
+            let handle = tokio::runtime::Handle::try_current().ok()?;
+            tokio::task::block_in_place(|| {
+                handle.block_on(executor_evm::resolve_usd_micros(
+                    chain_id, token, amount, &provider, &cache,
+                ))
+            })
+        }
     }
 
     let sid_owned = strategy.id.clone();
     let name_owned = strategy.name.clone();
     let provider_owned = evm.provider.clone();
     let evm_config_owned = evm.evm_config.clone();
+    let cache_owned = evm.price_cache.clone();
+    let chain_owned = evm.chain_id;
     let exec_result: Result<(serde_json::Value, Vec<String>), strategy_js::RuntimeError> =
         tokio::task::spawn_blocking(move || {
             let mut host = ViewHostInner {
@@ -1992,6 +2050,8 @@ async fn read_strategy_view(
                 logs: Vec::new(),
                 provider: provider_owned,
                 evm_config: evm_config_owned,
+                price_cache: cache_owned,
+                chain_id: chain_owned,
             };
             let v = Sandbox::execute(&wrapped_source, &mut host)?;
             Ok((v, host.logs))

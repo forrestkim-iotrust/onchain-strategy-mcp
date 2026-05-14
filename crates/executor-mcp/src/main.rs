@@ -126,6 +126,9 @@ fn run_serve(no_ui: bool, ui_port: Option<u16>) -> Result<()> {
             ui_port,
             provider,
             evm_config,
+            // v1.7 (`ctx.price.usd`): hand the UI the same `price_cache`
+            // the orchestrator uses so view + idle walker share entries.
+            Some(server.price_cache.clone()),
         );
         match web::spawn(server.state_handle(), ui_opts).await {
             Ok(Some((addr, _handle))) => {
