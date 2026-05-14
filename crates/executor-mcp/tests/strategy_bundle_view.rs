@@ -122,6 +122,7 @@ async fn records_endpoint_lists_rows_with_since_filter() -> Result<()> {
             Some(r#"[{"name":"supply","on":{"kind":"contractCall"},"capture":{"amount":"args[1]"}}]"#),
             Some("(ctx, records) => ({ count: records.supply ? records.supply.count : 0 })"),
             None,
+            None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
             RegisterOutcome::ReplacedVersion { created, .. } => created.id,
@@ -223,6 +224,7 @@ async fn view_endpoint_runs_user_view_against_aggregated_records() -> Result<()>
             Some(records_json),
             Some(view_source),
             None,
+            None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
             RegisterOutcome::ReplacedVersion { created, .. } => created.id,
@@ -287,7 +289,7 @@ async fn view_records_sum_method_matches_sums_field() -> Result<()> {
         })"#;
         let sid = match store.register_strategy_bundle(
             "sum-method-check", "(ctx) => 'noop'", None, None,
-            Some(records_json), Some(view_source), None,
+            Some(records_json), Some(view_source), None, None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
             RegisterOutcome::ReplacedVersion { created, .. } => created.id,
@@ -339,7 +341,7 @@ async fn view_records_declared_but_uncaptured_has_empty_handle() -> Result<()> {
         })"#;
         match store.register_strategy_bundle(
             "empty-records", "(ctx) => 'noop'", None, None,
-            Some(records_json), Some(view_source), None,
+            Some(records_json), Some(view_source), None, None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
             RegisterOutcome::ReplacedVersion { created, .. } => created.id,

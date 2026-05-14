@@ -244,6 +244,9 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 records_for_blocking.as_deref(),
                 view_for_blocking.as_deref(),
                 Some(contracts_for_blocking.as_str()),
+                // v1.10 actions wiring will land in the next sub-task; legacy
+                // and v1.4–v1.9 callers pass None and keep existing hashes.
+                None,
             )
         })
         .await
@@ -330,6 +333,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 execute_changed,
                 records_changed,
                 view_changed,
+                actions_changed,
             } => StrategyRegisterResponse {
                 strategy_id: created.id.clone(),
                 name: created.name.clone(),
@@ -350,6 +354,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                         previous_view_changed: view_changed,
                         previous_records_changed: records_changed,
                         previous_execute_changed: execute_changed,
+                        previous_actions_changed: actions_changed,
                     },
                 ),
             },

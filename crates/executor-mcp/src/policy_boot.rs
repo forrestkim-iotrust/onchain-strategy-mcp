@@ -185,6 +185,23 @@ pub fn resolve_boot_policy(
 pub fn parse_policy_json(
     body: &serde_json::Value,
 ) -> Result<(LoadedPolicy, String), executor_policy::PolicyError> {
+    // Some MCP clients (notably the Anthropic API) serialize tool args typed
+    // as untyped `serde_json::Value` (no JSON Schema constraint) as a JSON
+    // *string* instead of a nested object. Tolerate that by re-parsing once
+    // when we see a string at the top level. Anything that still isn't a
+    // valid PolicyConfig falls through to the existing bad_json_shape error.
+    let owned;
+    let body = if let Some(s) = body.as_str() {
+        owned = serde_json::from_str::<serde_json::Value>(s).map_err(|e| {
+            executor_policy::PolicyError::Config {
+                category: std::borrow::Cow::Borrowed("bad_json_shape"),
+                detail_for_log: format!("re-parse string body: {e}"),
+            }
+        })?;
+        &owned
+    } else {
+        body
+    };
     // PolicyConfig: Deserialize + Serialize → round-trip safe canonical JSON.
     let cfg: PolicyConfig =
         serde_json::from_value(body.clone()).map_err(|e| executor_policy::PolicyError::Config {
@@ -308,5 +325,41 @@ mod tests {
             resolve_boot_policy(&store, Some(toml_path.to_str().unwrap())).expect("resolve");
         let loaded = loaded.expect("active revision should load");
         assert_eq!(loaded.chains_allow, vec![31337]);
+    }
+
+    // ── parse_policy_json: string-payload tolerance ──
+    //
+    // Some MCP clients wrap a `serde_json::Value` tool argument as a JSON
+    // STRING because the JSON Schema for `Value` carries no `type`
+    // constraint. The handler must transparently re-parse so the tool is
+    // usable from those clients.
+
+    // Both shapes (nested object AND JSON-encoded string) must parse to the
+    // same policy. P-10 requires every chain in chains.allow to have a
+    // matching contracts.<chain> subtable, so the fixture below provides one.
+    const VALID_POLICY: &str =
+        r#"{"chains":{"allow":[1]},"contracts":{"1":{"allow":["0x0000000000000000000000000000000000000001"]}}}"#;
+
+    #[test]
+    fn parse_policy_json_accepts_nested_object() {
+        let v: serde_json::Value = serde_json::from_str(VALID_POLICY).unwrap();
+        let (loaded, _canonical) = parse_policy_json(&v).expect("parse");
+        assert_eq!(loaded.chains_allow, vec![1]);
+    }
+
+    #[test]
+    fn parse_policy_json_accepts_string_encoded_object() {
+        let v = serde_json::Value::String(VALID_POLICY.to_string());
+        let (loaded, _canonical) = parse_policy_json(&v).expect("parse");
+        assert_eq!(loaded.chains_allow, vec![1]);
+    }
+
+    #[test]
+    fn parse_policy_json_rejects_non_json_string() {
+        let v = serde_json::Value::String("not json".to_string());
+        let err = parse_policy_json(&v).expect_err("must fail");
+        // PolicyError::Config groups under "policy_config_error" in data_kind;
+        // the fine-grained tag lives in Display.
+        assert!(err.to_string().contains("bad_json_shape"), "got {err}");
     }
 }

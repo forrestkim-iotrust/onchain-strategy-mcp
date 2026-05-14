@@ -53,7 +53,17 @@ impl StateStore {
         // v1.5 Track 1B back-compat: legacy callers (tests, old code paths)
         // skip the contracts_touched extraction entirely — same id, same row
         // shape as v1.0..v1.4. The bundle-aware path is the new opt-in.
-        strategies::register(&self.conn, name, source, description, tags, None, None, None)
+        strategies::register(
+            &self.conn,
+            name,
+            source,
+            description,
+            tags,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// v1.4 bundle register. Pass `records_json` (canonical JSON of the
@@ -76,6 +86,7 @@ impl StateStore {
         records_json: Option<&str>,
         view_source: Option<&str>,
         contracts_touched_json: Option<&str>,
+        actions_json: Option<&str>,
     ) -> Result<strategies::RegisterOutcome, StateError> {
         strategies::register(
             &self.conn,
@@ -86,6 +97,7 @@ impl StateStore {
             records_json,
             view_source,
             contracts_touched_json,
+            actions_json,
         )
     }
 
@@ -197,6 +209,20 @@ impl StateStore {
         status: RunStatus,
     ) -> Result<String, StateError> {
         runs::insert_run(&self.conn, strategy_id, status)
+    }
+
+    /// v1.10 named actions: insert a run that records which bundle entry
+    /// point was invoked. `action = None` is equivalent to
+    /// [`StateStore::insert_run`] (execute / trigger path). `Some(name)`
+    /// flags the run as a manual one-shot call into
+    /// `bundle.actions[name]` so the UI / audit trail can distinguish it.
+    pub fn insert_run_with_action(
+        &mut self,
+        strategy_id: &str,
+        status: RunStatus,
+        action: Option<&str>,
+    ) -> Result<String, StateError> {
+        runs::insert_run_with_action(&self.conn, strategy_id, status, action)
     }
 
     /// **Test-only.** Insert a run with a caller-supplied `started_at` so

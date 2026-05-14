@@ -48,6 +48,7 @@ async fn ctx_price_usd_stable_returns_one_dollar_per_whole_usdc() -> Result<()> 
             None,
             Some(view_source),
             None,
+            None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
             RegisterOutcome::ReplacedVersion { created, .. } => created.id,
@@ -117,6 +118,7 @@ async fn ctx_price_usd_unknown_token_returns_null() -> Result<()> {
             None,
             Some(view_source),
             None,
+            None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
             RegisterOutcome::ReplacedVersion { created, .. } => created.id,
@@ -171,6 +173,7 @@ async fn ctx_price_usd_rejects_bad_token_argument() -> Result<()> {
             None,
             None,
             Some(view_source),
+            None,
             None,
         )? {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,

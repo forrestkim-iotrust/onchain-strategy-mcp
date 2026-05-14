@@ -178,6 +178,11 @@ pub struct ReplacedVersionInfo {
     pub previous_view_changed: bool,
     pub previous_records_changed: bool,
     pub previous_execute_changed: bool,
+    /// v1.10: whether the bundle's `actions` map changed across the bump.
+    /// True iff the previous and current rows have different canonical
+    /// `actions_json`. False on legacy bundles that never used actions.
+    #[serde(default)]
+    pub previous_actions_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

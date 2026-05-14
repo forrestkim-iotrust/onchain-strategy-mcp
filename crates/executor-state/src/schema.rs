@@ -37,7 +37,12 @@ CREATE TABLE IF NOT EXISTS strategies (
     -- See `strategies.rs` for the register-flow case matrix and how lineage_id
     -- folds into the id hash for fresh lineages (legacy rows are backfilled
     -- with `lineage_id = id` so their pre-v1.8 ids stay byte-identical).
-    lineage_id   TEXT
+    lineage_id   TEXT,
+    -- v1.10 named actions: canonical JSON of `{name → JS source}` for manual
+    -- one-shot helpers invoked via `strategy_run({action: "..."})`. NULL when
+    -- the bundle declared no actions. Folded into the strategy_id hash so
+    -- changing actions bumps the version (lineage_id preserved).
+    actions_json TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_name_active
     ON strategies(name) WHERE deleted_at IS NULL;
@@ -58,7 +63,11 @@ CREATE TABLE IF NOT EXISTS runs (
     -- view/records re-registrations of the same strategy name so historical
     -- runs aggregate into the lineage's portfolio view. `strategy_id` is
     -- still the EXACT version that executed for forensics.
-    strategy_lineage_id TEXT
+    strategy_lineage_id TEXT,
+    -- v1.10 named actions: which entry point in the bundle was invoked.
+    -- NULL = execute (trigger-driven or default manual). String = the name
+    -- of the `actions[name]` function called via `strategy_run({action})`.
+    action       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_strategy_id ON runs(strategy_id);
 -- v1.8 strategy_lineage_id index is created in `migrate()` so pre-v1.8
@@ -333,6 +342,16 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
         "CREATE INDEX IF NOT EXISTS idx_records_capture_lineage \
               ON strategy_records_capture(strategy_lineage_id, captured_at);",
     )?;
+
+    // v1.10 named actions: optional `{name → JS source}` map on each bundle,
+    // canonicalised (key-sorted JSON) and folded into the strategy_id hash.
+    // NULL on legacy rows; `runs.action` likewise NULL means execute (default).
+    if !has_column(conn, "strategies", "actions_json")? {
+        conn.execute_batch("ALTER TABLE strategies ADD COLUMN actions_json TEXT;")?;
+    }
+    if !has_column(conn, "runs", "action")? {
+        conn.execute_batch("ALTER TABLE runs ADD COLUMN action TEXT;")?;
+    }
 
     Ok(())
 }

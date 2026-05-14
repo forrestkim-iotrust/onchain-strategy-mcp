@@ -161,6 +161,7 @@ fn seed_bundle_with_assets_view(
         None,
         Some(&view_source),
         None,
+        None,
     )?;
     let sid = match outcome {
         RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
@@ -355,6 +356,7 @@ async fn strategy_contributing_60_assets_truncates_to_50() -> Result<()> {
             None,
             None,
             Some(view),
+            None,
             None,
         )?;
         let s = match outcome {

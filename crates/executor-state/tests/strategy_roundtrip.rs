@@ -130,6 +130,7 @@ fn register_same_name_different_content_replaces_version() {
             execute_changed,
             records_changed,
             view_changed,
+            actions_changed,
         } => {
             assert_eq!(created.lineage_id, v1.lineage_id);
             assert_eq!(previous.id, v1.id);
@@ -139,6 +140,7 @@ fn register_same_name_different_content_replaces_version() {
             assert!(execute_changed);
             assert!(!records_changed);
             assert!(!view_changed);
+            assert!(!actions_changed);
         }
         other => panic!("expected ReplacedVersion, got {other:?}"),
     }

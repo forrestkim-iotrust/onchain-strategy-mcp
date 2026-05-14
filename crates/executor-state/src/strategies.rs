@@ -37,6 +37,9 @@ pub struct Strategy {
     /// to `id` for legacy rows (backfill); equal to the original register-
     /// time mint for any version >= 1 of a fresh lineage.
     pub lineage_id: String,
+    /// v1.10 named actions: canonical JSON of `{name → JS source}`. NULL when
+    /// the bundle declared no actions. Folded into the id hash.
+    pub actions_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +64,11 @@ pub struct StrategySummary {
     /// 2 = second iteration of the name, ...). Computed at list time from
     /// the lineage's full history (active + deleted rows).
     pub version: u32,
+    /// v1.10: names of the bundle's manual-only `actions[*]` entries, sorted.
+    /// Empty / NULL when the bundle declared none. Surfaced so list-time
+    /// resources can advertise per-strategy named actions without dragging
+    /// the full JS source into the response.
+    pub action_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +104,9 @@ pub enum RegisterOutcome {
         /// Whether `view_source` changed across the bump (either side may
         /// have been NULL).
         view_changed: bool,
+        /// v1.10: whether the bundle's `actions` map changed across the
+        /// version bump. Either side may have been NULL (no actions).
+        actions_changed: bool,
     },
 }
 
@@ -156,6 +167,11 @@ pub fn hash_bundle(
 /// lineage_id so two unrelated lineages that happen to share the same
 /// `execute + records + view` content still get distinct ids.
 ///
+/// v1.10: an optional `actions_json` (canonical JSON of named actions) is
+/// folded in as well. When NULL it is treated as the empty string — same
+/// byte-shape as a bundle with no actions, so back-compat with v1.8/v1.9
+/// hashes is preserved iff the caller passes `None` for actions_json.
+///
 /// Back-compat invariant: when `lineage_id` is `None`, this is
 /// byte-identical to [`hash_bundle`] — legacy rows backfilled with
 /// `lineage_id = id` would recurse, so the legacy path skips the lineage
@@ -165,16 +181,30 @@ pub fn hash_bundle_with_lineage(
     source: &str,
     records_json: Option<&str>,
     view_source: Option<&str>,
+    actions_json: Option<&str>,
 ) -> String {
     let Some(lin) = lineage_id else {
+        // Legacy lineage anchor: ignore actions_json so byte-identical
+        // pre-v1.10 hashes are preserved. Callers that want actions folded
+        // in MUST pass a fresh (v1.8+) lineage anchor.
         return hash_bundle(source, records_json, view_source);
     };
     let mut h = Sha256::new();
-    h.update(b"osmcp-bundle-v1.8\n");
+    // v1.8 frame tag is retained when there are no actions so pre-v1.10
+    // bundles keep their existing ids. v1.10 bumps to a new tag the moment
+    // a bundle declares actions so the hash domain is unambiguous.
+    if actions_json.is_some() {
+        h.update(b"osmcp-bundle-v1.10\n");
+    } else {
+        h.update(b"osmcp-bundle-v1.8\n");
+    }
     write_section(&mut h, "lineage", lin);
     write_section(&mut h, "execute", source);
     write_section(&mut h, "records", records_json.unwrap_or(""));
     write_section(&mut h, "view", view_source.unwrap_or(""));
+    if let Some(a) = actions_json {
+        write_section(&mut h, "actions", a);
+    }
     hex::encode(h.finalize())
 }
 
@@ -205,6 +235,19 @@ fn decode_tags(raw: Option<String>) -> Option<Vec<String>> {
     raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
 }
 
+/// v1.10: extract the (sorted) action names from a canonical actions_json
+/// blob. Returns an empty Vec for NULL / invalid JSON so list-time
+/// projections never panic. Sort order is BTreeMap-natural ASCII, matching
+/// the canonical write path.
+fn decode_action_names(raw: Option<&str>) -> Vec<String> {
+    let Some(s) = raw else { return Vec::new() };
+    let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(s)
+    else {
+        return Vec::new();
+    };
+    map.into_keys().collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn map_strategy(
     id: String,
@@ -218,6 +261,7 @@ fn map_strategy(
     view_source: Option<String>,
     contracts_touched_json: Option<String>,
     lineage_id: Option<String>,
+    actions_json: Option<String>,
 ) -> Strategy {
     // Backfill defense: a row created on a pre-migration binary then read
     // on a post-migration binary should always see `lineage_id = id`. The
@@ -237,6 +281,7 @@ fn map_strategy(
         view_source,
         contracts_touched_json,
         lineage_id,
+        actions_json,
     }
 }
 
@@ -259,6 +304,7 @@ pub(crate) fn register(
     records_json: Option<&str>,
     view_source: Option<&str>,
     contracts_touched_json: Option<&str>,
+    actions_json: Option<&str>,
 ) -> Result<RegisterOutcome, StateError> {
     // v1.5 Track 1B: `contracts_touched_json` is a DERIVATION from `source`
     // (the regex extractor in `executor-mcp::contracts_touched` computes it)
@@ -292,9 +338,12 @@ pub(crate) fn register(
             // hash — this is what preserves the exact-byte idempotency of
             // re-registering an unchanged pre-v1.8 bundle.
             let lineage = active.lineage_id.clone();
-            let id = if lineage == active.id {
-                // Legacy lineage anchor — keep legacy hash so byte-identical
-                // re-register is still an AlreadyExists short-circuit.
+            let id = if lineage == active.id && actions_json.is_none() {
+                // Legacy lineage anchor with no actions — keep legacy hash so
+                // byte-identical re-register of a pre-v1.10 bundle is still
+                // an AlreadyExists short-circuit. The moment a legacy lineage
+                // adopts actions, the hash domain shifts (v1.10 frame tag) —
+                // that's the intended version bump.
                 hash_bundle(source, records_json, view_source)
             } else {
                 hash_bundle_with_lineage(
@@ -302,6 +351,7 @@ pub(crate) fn register(
                     source,
                     records_json,
                     view_source,
+                    actions_json,
                 )
             };
             (lineage, id)
@@ -314,6 +364,7 @@ pub(crate) fn register(
                 source,
                 records_json,
                 view_source,
+                actions_json,
             );
             (lineage, id)
         }
@@ -338,9 +389,9 @@ pub(crate) fn register(
         None => {
             // Fresh lineage, no name conflict. Plain INSERT.
             conn.execute(
-                "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source, contracts_touched_json, lineage_id)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![&id, name, source, description, tags_json, &now, records_json, view_source, contracts_touched_json, &effective_lineage],
+                "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source, contracts_touched_json, lineage_id, actions_json)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![&id, name, source, description, tags_json, &now, records_json, view_source, contracts_touched_json, &effective_lineage, actions_json],
             )?;
 
             Ok(RegisterOutcome::Created(Strategy {
@@ -355,6 +406,7 @@ pub(crate) fn register(
                 view_source: view_source.map(|s| s.to_string()),
                 contracts_touched_json: contracts_touched_json.map(|s| s.to_string()),
                 lineage_id: effective_lineage,
+                actions_json: actions_json.map(|s| s.to_string()),
             }))
         }
         Some(previous) => {
@@ -372,6 +424,7 @@ pub(crate) fn register(
             let execute_changed = previous.source != source;
             let records_changed = previous.records_json.as_deref() != records_json;
             let view_changed = previous.view_source.as_deref() != view_source;
+            let actions_changed = previous.actions_json.as_deref() != actions_json;
 
             // Soft-delete BEFORE INSERT so the unique-on-name index
             // (`idx_strategies_name_active`) and the lineage-active index
@@ -383,9 +436,9 @@ pub(crate) fn register(
             )?;
 
             conn.execute(
-                "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source, contracts_touched_json, lineage_id)
-                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![&id, name, source, description, tags_json, &now, records_json, view_source, contracts_touched_json, &effective_lineage],
+                "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source, contracts_touched_json, lineage_id, actions_json)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![&id, name, source, description, tags_json, &now, records_json, view_source, contracts_touched_json, &effective_lineage, actions_json],
             )?;
 
             // Re-read the soft-deleted previous row so the caller sees the
@@ -406,6 +459,7 @@ pub(crate) fn register(
                     view_source: view_source.map(|s| s.to_string()),
                     contracts_touched_json: contracts_touched_json.map(|s| s.to_string()),
                     lineage_id: effective_lineage,
+                    actions_json: actions_json.map(|s| s.to_string()),
                 },
                 previous: previous_with_deletion,
                 new_version,
@@ -413,6 +467,7 @@ pub(crate) fn register(
                 execute_changed,
                 records_changed,
                 view_changed,
+                actions_changed,
             })
         }
     }
@@ -455,7 +510,8 @@ pub(crate) fn list(
                 lineage_id, \
                 (SELECT COUNT(*) FROM strategies s2 \
                  WHERE s2.lineage_id = strategies.lineage_id \
-                   AND s2.created_at <= strategies.created_at) AS version \
+                   AND s2.created_at <= strategies.created_at) AS version, \
+                actions_json \
          FROM strategies ORDER BY created_at DESC"
     } else {
         "SELECT id, name, description, tags, created_at, deleted_at, \
@@ -464,7 +520,8 @@ pub(crate) fn list(
                 lineage_id, \
                 (SELECT COUNT(*) FROM strategies s2 \
                  WHERE s2.lineage_id = strategies.lineage_id \
-                   AND s2.created_at <= strategies.created_at) AS version \
+                   AND s2.created_at <= strategies.created_at) AS version, \
+                actions_json \
          FROM strategies WHERE deleted_at IS NULL ORDER BY created_at DESC"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -473,6 +530,7 @@ pub(crate) fn list(
             let lineage: Option<String> = r.get(8)?;
             let id: String = r.get(0)?;
             let version_i64: i64 = r.get(9)?;
+            let actions_raw: Option<String> = r.get(10)?;
             Ok(StrategySummary {
                 id: id.clone(),
                 name: r.get(1)?,
@@ -484,6 +542,7 @@ pub(crate) fn list(
                 contracts_touched_json: r.get(7)?,
                 lineage_id: lineage.unwrap_or(id),
                 version: u32::try_from(version_i64).unwrap_or(1).max(1),
+                action_names: decode_action_names(actions_raw.as_deref()),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -503,7 +562,8 @@ pub(crate) fn list_for_lineage(
                 lineage_id, \
                 (SELECT COUNT(*) FROM strategies s2 \
                  WHERE s2.lineage_id = strategies.lineage_id \
-                   AND s2.created_at <= strategies.created_at) AS version \
+                   AND s2.created_at <= strategies.created_at) AS version, \
+                actions_json \
          FROM strategies WHERE lineage_id = ?1 \
          ORDER BY created_at DESC",
     )?;
@@ -512,6 +572,7 @@ pub(crate) fn list_for_lineage(
             let lineage: Option<String> = r.get(8)?;
             let id: String = r.get(0)?;
             let version_i64: i64 = r.get(9)?;
+            let actions_raw: Option<String> = r.get(10)?;
             Ok(StrategySummary {
                 id: id.clone(),
                 name: r.get(1)?,
@@ -523,6 +584,7 @@ pub(crate) fn list_for_lineage(
                 contracts_touched_json: r.get(7)?,
                 lineage_id: lineage.unwrap_or(id),
                 version: u32::try_from(version_i64).unwrap_or(1).max(1),
+                action_names: decode_action_names(actions_raw.as_deref()),
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -538,7 +600,8 @@ pub(crate) fn get_active_for_lineage(
 ) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
         "SELECT id, name, source, description, tags, created_at, deleted_at, \
-                records_json, view_source, contracts_touched_json, lineage_id \
+                records_json, view_source, contracts_touched_json, lineage_id, \
+                actions_json \
          FROM strategies \
          WHERE lineage_id = ?1 AND deleted_at IS NULL \
          LIMIT 1",
@@ -556,6 +619,7 @@ pub(crate) fn get_active_for_lineage(
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
+                r.get(11)?,
             ))
         },
     )
@@ -586,7 +650,8 @@ pub(crate) fn version_for_id(
 pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
         "SELECT id, name, source, description, tags, created_at, deleted_at, \
-                records_json, view_source, contracts_touched_json, lineage_id \
+                records_json, view_source, contracts_touched_json, lineage_id, \
+                actions_json \
          FROM strategies WHERE id = ?1 LIMIT 1",
         params![id],
         |r| {
@@ -602,6 +667,7 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>,
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
+                r.get(11)?,
             ))
         },
     )
@@ -612,7 +678,8 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>,
 pub(crate) fn get_by_name(conn: &Connection, name: &str) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
         "SELECT id, name, source, description, tags, created_at, deleted_at, \
-                records_json, view_source, contracts_touched_json, lineage_id \
+                records_json, view_source, contracts_touched_json, lineage_id, \
+                actions_json \
          FROM strategies WHERE name = ?1 AND deleted_at IS NULL",
         params![name],
         |r| {
@@ -628,6 +695,7 @@ pub(crate) fn get_by_name(conn: &Connection, name: &str) -> Result<Option<Strate
                 r.get(8)?,
                 r.get(9)?,
                 r.get(10)?,
+                r.get(11)?,
             ))
         },
     )

@@ -37,7 +37,7 @@ fn fresh_store() -> (tempfile::TempDir, StateStore) {
 
 fn register(store: &mut StateStore, name: &str, source: &str, view: Option<&str>) -> RegisterOutcome {
     store
-        .register_strategy_bundle(name, source, None, None, None, view, None)
+        .register_strategy_bundle(name, source, None, None, None, view, None, None)
         .expect("register")
 }
 
@@ -90,12 +90,14 @@ fn same_name_view_change_preserves_lineage_and_attachments() {
             execute_changed,
             records_changed,
             view_changed,
+            actions_changed,
         } => {
             assert_eq!(new_version, 2);
             assert_eq!(previous_version, 1);
             assert!(!execute_changed);
             assert!(!records_changed);
             assert!(view_changed);
+            assert!(!actions_changed);
             assert_eq!(previous.id, v1.id);
             created
         }
@@ -135,6 +137,7 @@ fn same_name_records_change_flag_is_set() {
             None,
             None,
             Some("[{\"name\":\"supply\",\"on\":{},\"capture\":{}}]"),
+            None,
             None,
             None,
         )

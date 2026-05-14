@@ -66,7 +66,7 @@ async fn view_calling_get_logs_round_trips_typed_envelope() -> Result<()> {
         }"#;
         let sid = match store.register_strategy_bundle(
             "view-getlogs", "(ctx) => 'noop'", None, None,
-            None, Some(view_source), None,
+            None, Some(view_source), None, None,
         )? {
             RegisterOutcome::Created(s)
             | RegisterOutcome::AlreadyExists(s)

@@ -26,6 +26,11 @@ pub struct Run {
     /// from the strategy row's lineage_id at insert time. Survives
     /// re-registrations of the same strategy name.
     pub strategy_lineage_id: Option<String>,
+    /// v1.10 named actions: which bundle entry point was invoked. NULL =
+    /// `execute` (trigger-driven or default manual). String = the name of
+    /// the `actions[name]` function called via
+    /// `strategy_run({action: "..."})`.
+    pub action: Option<String>,
 }
 
 /// Marker namespace — actual entry points are the free functions below
@@ -77,6 +82,23 @@ pub(crate) fn insert_run(
     strategy_id: &str,
     status: RunStatus,
 ) -> Result<String, StateError> {
+    // Default execute-path insert: action stays NULL. v1.10 manual one-shot
+    // invocations (`strategy_run({action})`) go through
+    // [`insert_run_with_action`] so the run row carries the action name for
+    // audit / UI filtering.
+    insert_run_with_action(conn, strategy_id, status, None)
+}
+
+/// v1.10: insert a run that records WHICH bundle entry point was invoked.
+/// `action = None` is identical to `insert_run` (execute / trigger path);
+/// `action = Some("name")` flags the run as a manual one-shot call into
+/// `bundle.actions[name]`.
+pub(crate) fn insert_run_with_action(
+    conn: &Connection,
+    strategy_id: &str,
+    status: RunStatus,
+    action: Option<&str>,
+) -> Result<String, StateError> {
     if !status.phase5_emittable() {
         return Err(StateError::InvalidInput(format!(
             "status {status:?} is reserved for Phase 6 and cannot be emitted from Phase 2"
@@ -97,9 +119,9 @@ pub(crate) fn insert_run(
         .optional()?
         .flatten();
     conn.execute(
-        "INSERT INTO runs(id, strategy_id, status, started_at, strategy_lineage_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![&id, strategy_id, status_to_wire(status), &started, lineage_id],
+        "INSERT INTO runs(id, strategy_id, status, started_at, strategy_lineage_id, action) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![&id, strategy_id, status_to_wire(status), &started, lineage_id, action],
     )?;
     Ok(id)
 }
@@ -131,8 +153,8 @@ pub(crate) fn insert_run_with_started_at(
         .optional()?
         .flatten();
     conn.execute(
-        "INSERT INTO runs(id, strategy_id, status, started_at, strategy_lineage_id) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO runs(id, strategy_id, status, started_at, strategy_lineage_id, action) \
+         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
         params![&id, strategy_id, status_to_wire(status), started_at, lineage_id],
     )?;
     Ok(id)
@@ -235,7 +257,7 @@ pub(crate) fn update_run_status_with_transition(
 pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, StateError> {
     let row = conn
         .query_row(
-            "SELECT id, strategy_id, status, started_at, finished_at, error, strategy_lineage_id \
+            "SELECT id, strategy_id, status, started_at, finished_at, error, strategy_lineage_id, action \
              FROM runs WHERE id = ?1",
             params![run_id],
             |r| {
@@ -247,6 +269,7 @@ pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, St
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<String>>(5)?,
                     r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -254,7 +277,7 @@ pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, St
 
     match row {
         None => Ok(None),
-        Some((id, strategy_id, status_wire, started_at, finished_at, error, lineage)) => {
+        Some((id, strategy_id, status_wire, started_at, finished_at, error, lineage, action)) => {
             Ok(Some(Run {
                 id,
                 strategy_id,
@@ -263,6 +286,7 @@ pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, St
                 finished_at,
                 error,
                 strategy_lineage_id: lineage,
+                action,
             }))
         }
     }
@@ -273,7 +297,7 @@ pub(crate) fn list_runs_for_strategy(
     strategy_id: &str,
 ) -> Result<Vec<Run>, StateError> {
     let mut stmt = conn.prepare(
-        "SELECT id, strategy_id, status, started_at, finished_at, error, strategy_lineage_id \
+        "SELECT id, strategy_id, status, started_at, finished_at, error, strategy_lineage_id, action \
          FROM runs WHERE strategy_id = ?1 ORDER BY started_at ASC, id ASC",
     )?;
     let rows = stmt
@@ -286,13 +310,14 @@ pub(crate) fn list_runs_for_strategy(
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
                 r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<Result<Vec<_>, rusqlite::Error>>()?;
 
     rows.into_iter()
         .map(
-            |(id, strategy_id, status_wire, started_at, finished_at, error, lineage)| {
+            |(id, strategy_id, status_wire, started_at, finished_at, error, lineage, action)| {
                 Ok(Run {
                     id,
                     strategy_id,
@@ -301,6 +326,7 @@ pub(crate) fn list_runs_for_strategy(
                     finished_at,
                     error,
                     strategy_lineage_id: lineage,
+                    action,
                 })
             },
         )
@@ -365,6 +391,10 @@ pub struct RunSummary {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub action_count: i64,
+    /// v1.10: which bundle entry point was invoked. NULL = `execute`
+    /// (trigger or default manual); string = a named one-shot
+    /// `bundle.actions[name]` call. Surfaced in the UI run list.
+    pub action: Option<String>,
 }
 
 pub(crate) fn list_runs(
@@ -415,7 +445,8 @@ pub(crate) fn list_runs(
     // first; id is a ULID so it doubles as a stable same-second tie-break.
     let sql = format!(
         "SELECT r.id, r.strategy_id, r.status, r.started_at, r.finished_at, \
-                COUNT(ja.id) AS action_count \
+                COUNT(ja.id) AS action_count, \
+                r.action \
          FROM runs r \
          LEFT JOIN journal_actions ja ON ja.run_id = r.id \
          {where_sql} \
@@ -436,13 +467,14 @@ pub(crate) fn list_runs(
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, rusqlite::Error>>()?;
 
     rows.into_iter()
         .map(
-            |(run_id, strategy_id, status_wire, started_at, finished_at, action_count)| {
+            |(run_id, strategy_id, status_wire, started_at, finished_at, action_count, action)| {
                 Ok(RunSummary {
                     run_id,
                     strategy_id,
@@ -450,6 +482,7 @@ pub(crate) fn list_runs(
                     started_at,
                     finished_at,
                     action_count,
+                    action,
                 })
             },
         )
