@@ -21,6 +21,7 @@ pub mod erc20;
 pub mod error;
 pub mod native;
 pub mod normalize;
+pub mod prices;
 pub mod provider;
 pub mod read;
 pub mod simulate;
@@ -40,6 +41,7 @@ pub use erc20::{
 pub use error::EvmError;
 pub use native::{fetch_chain_id, native_balance, native_block_number};
 pub use normalize::{NormalizedAction, NormalizedActionKind, normalize_action};
+pub use prices::{NATIVE_SENTINEL, PriceCache, resolve_usd_micros};
 pub use provider::build_provider;
 pub use read::{
     BlockTag, ReadContractInput, get_code, get_native_balance, get_tx_receipt, read_contract,
@@ -51,3 +53,7 @@ pub use units::{format_units, format_units_from_str, parse_units};
 // (executor-mcp, strategy-js) can name `Arc<DynProvider>` without
 // taking a direct alloy dependency (Phase 4 D-02 isolation).
 pub use alloy::providers::DynProvider;
+// Re-export the alloy primitive types the host bindings actually take —
+// keeps strategy-js a single-namespace dependent and preserves the Phase 4
+// D-02 "alloy stays out of strategy-js" boundary.
+pub use alloy_primitives::{Address, U256};
