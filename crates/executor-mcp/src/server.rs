@@ -261,6 +261,10 @@ pub struct ExecutorServer {
     /// manual event. Backpressure is per-worker `try_send`.
     pub(crate) trigger_events_tx:
         tokio::sync::mpsc::Sender<crate::triggers::event::TriggerEvent>,
+    /// v1.7 (`ctx.price.usd`): shared USD price cache. Single source of
+    /// truth — used by `strategy_run` (RuntimeContext), `strategy://{id}/view`
+    /// (ViewHostInner), and the idle balance walker (`web_portfolio`).
+    pub price_cache: Arc<executor_evm::PriceCache>,
 }
 
 impl ExecutorServer {
@@ -299,6 +303,7 @@ impl ExecutorServer {
             mempool_wss_url: None,
             trigger_pool: Arc::new(Mutex::new(crate::triggers::pool::WorkerPool::new())),
             trigger_events_tx,
+            price_cache: Arc::new(executor_evm::PriceCache::new()),
         })
     }
 
@@ -548,9 +553,14 @@ impl ServerHandler for ExecutorServer {
         // degrade to `None` so non-view resources never fail over an
         // unreachable RPC.
         let provider = self.evm_provider().await.ok();
+        // v1.7 (`ctx.price.usd`): chain_id is best-effort — failure to
+        // resolve degrades the helper to a JS `null`, not a 500.
+        let chain_id = self.chain_id().await.ok();
         let evm = resources::ViewEvm {
             provider,
             evm_config: self.evm_config.clone(),
+            price_cache: Some(self.price_cache.clone()),
+            chain_id,
         };
         resources::read_resource_impl(request, ctx, self.state.clone(), evm).await
     }

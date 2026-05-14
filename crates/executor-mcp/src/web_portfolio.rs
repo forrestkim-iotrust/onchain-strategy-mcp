@@ -113,7 +113,10 @@ pub fn native_symbol_for(chain_id: Option<u64>) -> &'static str {
 }
 
 /// Build the `AssetDeclaration` JSON envelope. Optional `address` is `null`
-/// when the entry is a native asset.
+/// when the entry is a native asset. Optional `usd` is OMITTED entirely
+/// (not set to null) when the resolver had no quote — matches the v1.6
+/// plan's "missing field ⇒ amount-only" semantic.
+#[allow(clippy::too_many_arguments)]
 pub fn asset_decl(
     chain_id: u64,
     venue: &str,
@@ -122,16 +125,28 @@ pub fn asset_decl(
     raw: &str,
     decimals: u8,
     address: Option<&str>,
+    usd: Option<f64>,
 ) -> Value {
-    json!({
-        "chain_id": chain_id,
-        "venue": venue,
-        "asset": asset,
-        "amount": amount,
-        "raw": raw,
-        "decimals": decimals,
-        "address": address,
-    })
+    let mut obj = serde_json::Map::new();
+    obj.insert("chain_id".into(), Value::from(chain_id));
+    obj.insert("venue".into(), Value::String(venue.to_string()));
+    obj.insert("asset".into(), Value::String(asset.to_string()));
+    obj.insert("amount".into(), Value::String(amount.to_string()));
+    obj.insert("raw".into(), Value::String(raw.to_string()));
+    obj.insert("decimals".into(), Value::from(decimals));
+    obj.insert(
+        "address".into(),
+        match address {
+            Some(a) => Value::String(a.to_string()),
+            None => Value::Null,
+        },
+    );
+    if let Some(u) = usd
+        && let Some(n) = serde_json::Number::from_f64(u)
+    {
+        obj.insert("usd".into(), Value::Number(n));
+    }
+    Value::Object(obj)
 }
 
 /// Pull the `eth_getBalance` value for the burner as an `AssetDeclaration`.
@@ -141,6 +156,7 @@ pub fn asset_decl(
 async fn fetch_native(
     provider: Arc<DynProvider>,
     cfg: &EvmConfig,
+    price_cache: Option<&Arc<executor_evm::PriceCache>>,
     burner: &str,
     chain_id: u64,
 ) -> Result<Value, EvmError> {
@@ -150,7 +166,7 @@ async fn fetch_native(
         call_timeout: RPC_TIMEOUT,
         ..cfg.clone()
     };
-    let raw_value = native_balance(provider, &walk_cfg, burner, BlockTag::Latest).await?;
+    let raw_value = native_balance(provider.clone(), &walk_cfg, burner, BlockTag::Latest).await?;
     let raw_str = raw_value
         .as_str()
         .ok_or_else(|| EvmError::Decode {
@@ -159,6 +175,24 @@ async fn fetch_native(
         })?
         .to_string();
     let amount = format_units_from_str(&raw_str, 18)?;
+    let usd = if let Some(cache) = price_cache {
+        // Native sentinel = Address::ZERO; the resolver re-maps to WETH per chain.
+        let amount_u256 = executor_evm::U256::from_str_radix(&raw_str, 10).ok();
+        match amount_u256 {
+            Some(a) => executor_evm::resolve_usd_micros(
+                chain_id,
+                executor_evm::NATIVE_SENTINEL,
+                a,
+                &provider,
+                cache,
+            )
+            .await
+            .map(|m| (m as f64) / 1_000_000.0),
+            None => None,
+        }
+    } else {
+        None
+    };
     Ok(asset_decl(
         chain_id,
         "wallet",
@@ -167,6 +201,7 @@ async fn fetch_native(
         &raw_str,
         18,
         None,
+        usd,
     ))
 }
 
@@ -216,6 +251,7 @@ async fn fetch_erc20(
     provider: Arc<DynProvider>,
     cfg: &EvmConfig,
     cache: &TokenMetaCache,
+    price_cache: Option<&Arc<executor_evm::PriceCache>>,
     burner: &str,
     chain_id: u64,
     token: &str,
@@ -226,7 +262,7 @@ async fn fetch_erc20(
         ..cfg.clone()
     };
     let raw_value =
-        match erc20_balance_of(provider, &walk_cfg, token, burner, BlockTag::Latest).await {
+        match erc20_balance_of(provider.clone(), &walk_cfg, token, burner, BlockTag::Latest).await {
             Ok(v) => v,
             Err(e) => {
                 tracing::debug!(token = %token, error = %e, "erc20_balance_of failed; skipping");
@@ -239,6 +275,21 @@ async fn fetch_erc20(
         return None;
     }
     let amount = format_units_from_str(&raw_str, meta.decimals).ok()?;
+    let usd = if let Some(pcache) = price_cache {
+        let amount_u256 = executor_evm::U256::from_str_radix(&raw_str, 10).ok();
+        let token_addr =
+            <executor_evm::Address as std::str::FromStr>::from_str(token).ok();
+        match (amount_u256, token_addr) {
+            (Some(a), Some(t)) => {
+                executor_evm::resolve_usd_micros(chain_id, t, a, &provider, pcache)
+                    .await
+                    .map(|m| (m as f64) / 1_000_000.0)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
     Some(asset_decl(
         chain_id,
         "wallet",
@@ -247,6 +298,7 @@ async fn fetch_erc20(
         &raw_str,
         meta.decimals,
         Some(token),
+        usd,
     ))
 }
 
@@ -280,6 +332,7 @@ pub async fn run_balance_walk(
     provider: Option<Arc<DynProvider>>,
     cfg: &EvmConfig,
     cache: &TokenMetaCache,
+    price_cache: Option<&Arc<executor_evm::PriceCache>>,
     burner: &str,
     chain_id: Option<u64>,
     token_candidates: &[String],
@@ -313,7 +366,7 @@ pub async fn run_balance_walk(
     let mut status = BalanceWalkStatus::Ok;
 
     if let Some(cid) = chain_id_resolved {
-        match fetch_native(provider.clone(), cfg, burner, cid).await {
+        match fetch_native(provider.clone(), cfg, price_cache, burner, cid).await {
             Ok(v) => out.push(v),
             Err(e) => {
                 tracing::warn!(error = %e, "balance walk: native balance failed");
@@ -325,7 +378,7 @@ pub async fn run_balance_walk(
                 status = BalanceWalkStatus::Truncated;
                 break;
             }
-            if let Some(v) = fetch_erc20(provider.clone(), cfg, cache, burner, cid, token).await {
+            if let Some(v) = fetch_erc20(provider.clone(), cfg, cache, price_cache, burner, cid, token).await {
                 out.push(v);
             }
         }
@@ -512,6 +565,8 @@ mod tests {
         amount: &str,
         address: Option<&str>,
     ) -> Value {
+        // Tests construct entries manually (not via asset_decl) — keep
+        // them schema-shaped without a usd field, mirroring "amount-only".
         json!({
             "chain_id": chain_id,
             "venue": venue,
@@ -680,6 +735,7 @@ mod tests {
             None,
             &cfg,
             &cache,
+            None,
             "0x0000000000000000000000000000000000000001",
             Some(8453),
             &[],

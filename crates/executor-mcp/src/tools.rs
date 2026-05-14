@@ -455,6 +455,13 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
             Err(e) => return Err(map_evm_error(e, &run_id)),
         };
         let evm_config = self.evm_config.clone();
+        // v1.7 (`ctx.price.usd`): pre-resolve chain_id outside spawn_blocking
+        // so the JS sandbox sees the host's chain when callers omit it.
+        // `chain_id()` requires the tokio runtime and we're still async here;
+        // a None failure degrades pricing to JS `null` but the rest of the
+        // run proceeds unaffected.
+        let host_chain_id = self.chain_id().await.ok();
+        let price_cache = self.price_cache.clone();
         let state_for_run = self.state.clone();
         let source = strategy.source.clone();
         let sid_for_ctx = strategy.id.clone();
@@ -470,7 +477,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                     rid_for_ctx,
                     RuntimeContext::default_clock(),
                 )
-                .with_evm(evm_provider, evm_config);
+                .with_evm(evm_provider, evm_config)
+                .with_price_cache(price_cache, host_chain_id);
                 if let Some(ev) = event_for_ctx {
                     runtime_ctx = runtime_ctx.with_event(ev);
                 }
