@@ -10,13 +10,18 @@ use std::path::Path;
 
 pub(crate) const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS strategies (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    source      TEXT NOT NULL,
-    description TEXT,
-    tags        TEXT,
-    created_at  TEXT NOT NULL,
-    deleted_at  TEXT
+    id           TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    source       TEXT NOT NULL,
+    description  TEXT,
+    tags         TEXT,
+    created_at   TEXT NOT NULL,
+    deleted_at   TEXT,
+    -- v1.4 strategy bundle: optional records schema + view function.
+    -- NULL on rows registered before v1.4; those strategies fall back to
+    -- the generic balance-only view.
+    records_json TEXT,
+    view_source  TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_name_active
     ON strategies(name) WHERE deleted_at IS NULL;
@@ -144,6 +149,22 @@ CREATE TABLE IF NOT EXISTS trigger_events (
 CREATE INDEX IF NOT EXISTS idx_trigger_events_trigger_id ON trigger_events(trigger_id);
 CREATE INDEX IF NOT EXISTS idx_trigger_events_dedup
     ON trigger_events(trigger_id, dedup_key, fired_at);
+
+-- v1.4 strategy bundle: per-action records captured at confirm time.
+-- One row per (run, strategy_id, record_name) capture event. payload_json
+-- holds the evaluated capture map (per the strategy's records[].capture spec).
+CREATE TABLE IF NOT EXISTS strategy_records_capture (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id        TEXT NOT NULL REFERENCES runs(id),
+    strategy_id   TEXT NOT NULL REFERENCES strategies(id),
+    record_name   TEXT NOT NULL,
+    captured_at   TEXT NOT NULL,
+    payload_json  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_records_capture_strategy
+    ON strategy_records_capture(strategy_id, captured_at);
+CREATE INDEX IF NOT EXISTS idx_records_capture_run
+    ON strategy_records_capture(run_id);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {
@@ -155,5 +176,32 @@ pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {
          PRAGMA foreign_keys = ON;",
     )?;
     conn.execute_batch(SCHEMA_SQL)?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// Additive migrations for pre-existing DBs created on older binaries.
+/// Idempotent: each step checks current state before applying. The fresh-DB
+/// path runs `SCHEMA_SQL` first which already has the v1.4 columns, so these
+/// ALTERs only fire on upgrades from v1.3.x.
+fn migrate(conn: &Connection) -> Result<(), StateError> {
+    if !has_column(conn, "strategies", "records_json")? {
+        conn.execute_batch("ALTER TABLE strategies ADD COLUMN records_json TEXT;")?;
+    }
+    if !has_column(conn, "strategies", "view_source")? {
+        conn.execute_batch("ALTER TABLE strategies ADD COLUMN view_source TEXT;")?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, StateError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

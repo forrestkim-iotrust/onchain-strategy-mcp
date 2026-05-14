@@ -1,6 +1,6 @@
 //! Resource surface — declares the three URI template shapes
-//! (`strategy://{strategy_id}`, `execution://{execution_id}`,
-//! `journal://{execution_id}`).
+//! (`strategy://{strategy_id}`, `execution://{run_id}`,
+//! `journal://{run_id}`).
 //!
 //! Phase 1 returned `resource_not_found` for every read. Phase 2 wires
 //! `strategy://{id}` to the live `StateStore`: malformed ids and unknown
@@ -18,8 +18,11 @@
 
 use std::sync::Arc;
 
+use executor_core::schema::execution::RunStatus;
 use executor_core::schema::strategy::StrategyGetResponse;
-use executor_state::{StateError, StateStore};
+use executor_state::{
+    LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, RunListFilter, StateError, StateStore,
+};
 use rmcp::{
     ErrorData as McpError, RoleServer,
     model::{
@@ -32,7 +35,7 @@ use rmcp::{
 use serde_json::json;
 
 use crate::{
-    errors::{map_state_error, storage_error},
+    errors::{invalid_params, map_state_error, storage_error},
     tools::build_execution_report,
 };
 
@@ -103,9 +106,8 @@ spender = "0xa238dd80c259a72e81d7e4664a9801593f98d1c5"
 amount_cap = "1000000000"                                 # 1000 USDC
 ```
 
-`policy_get` returns the loaded view. `policy_update` is structurally
-declared but returns `-32010 unimplemented` in this version — edit the TOML
-and restart the server.
+`policy_get` returns the loaded view. There is no `policy_update` tool —
+edit `.local/policy.toml` directly and restart the server.
 "#;
 
 const DOC_EIP_7702: &str = r#"# EIP-7702 batching
@@ -249,6 +251,21 @@ pub(crate) async fn list_resource_templates_impl(
                 "application/json",
             ),
             make_template(
+                "execution://list",
+                "execution-list",
+                "Run summaries filtered by query string (newest-first). \
+                 Supported parameters: `strategy_id` (exact match on runs.strategy_id), \
+                 `since` (RFC3339 timestamp, exclusive lower bound on started_at), \
+                 `status` (one of `succeeded` | `failed` | `noop`; `noop` matches runs \
+                 whose journal recorded a noop outcome — i.e. RunStatus=Succeeded with a \
+                 journal_actions row of outcome=noop), \
+                 `limit` (default 50, hard cap 500). \
+                 Example: `execution://list?strategy_id=ab12...&status=failed&limit=10`. \
+                 Use this resource when you have a strategy id but no run id — the per-run \
+                 `execution://{run_id}` resource is the next hop for any returned summary.",
+                "application/json",
+            ),
+            make_template(
                 "journal://{run_id}",
                 "journal",
                 "Populated in Phase 3 (returns source_reads + actions + logs for the run).",
@@ -321,6 +338,19 @@ pub(crate) async fn read_resource_impl(
     if let Some(rid) = uri.strip_prefix("journal://") {
         let rid_owned = rid.to_string();
         return read_journal(uri, rid_owned, state).await;
+    }
+    // v1.4 Track C: `execution://list[?...]` MUST match BEFORE the
+    // generic `execution://{run_id}` branch — `list` would otherwise pass
+    // the malformed-id check in `validate_run_resource_id` (4 chars ≠ 26).
+    // Accept `execution://list` (no query) or `execution://list?<qs>`; reject
+    // anything that continues the path/word (e.g. `execution://list/foo`,
+    // `execution://listrunner`) so this branch can't shadow future URIs.
+    if uri == "execution://list" {
+        return read_execution_list(uri, String::new(), state).await;
+    }
+    if let Some(query) = uri.strip_prefix("execution://list?") {
+        let q = query.to_string();
+        return read_execution_list(uri, q, state).await;
     }
     if let Some(run_id) = uri.strip_prefix("execution://") {
         let run_id = run_id.to_string();
@@ -426,6 +456,241 @@ async fn read_execution(
     Ok(ReadResourceResult::new(vec![
         ResourceContents::text(body, uri).with_mime_type("application/json"),
     ]))
+}
+
+// ─────────── v1.4 Track C — execution://list ───────────
+//
+// URI: `execution://list?strategy_id=...&since=ISO8601&status=succeeded|failed|noop&limit=N`
+//
+// Filters: all four are optional and AND together. Empty filter → most-recent
+// 50 runs across all strategies. The handler enforces the v1.4 contract
+// guarantees:
+//
+// - Invalid `since` (not RFC3339) ⇒ `invalid_params` error, NOT a silent zero-row
+//   response. Agents shouldn't have to guess whether `since` was filtered out.
+// - Invalid `status` (not one of the three) ⇒ `invalid_params` error.
+// - `limit` defaults to 50; values >500 are hard-capped (state layer enforces).
+// - `limit` that fails to parse as `u64` ⇒ `invalid_params` error.
+// - Empty result set ⇒ `{ runs: [], count: 0 }` (success), NOT an error.
+//
+// The response shape:
+// ```json
+// {
+//   "runs": [ { run_id, strategy_id, status, started_at, finished_at, action_count }, ... ],
+//   "count": N,
+//   "filters_applied": { strategy_id?, since?, status?, limit }
+// }
+// ```
+//
+// `filters_applied` echoes the parsed filter values (after defaulting/capping)
+// so agents can confirm what the server actually used — critical when the
+// answer is "0 runs" and the agent needs to debug whether its filter was
+// misinterpreted.
+
+async fn read_execution_list(
+    uri: String,
+    query: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    let parsed = parse_execution_list_query(&query)?;
+    let ParsedExecutionListQuery {
+        strategy_id,
+        since,
+        status_label,
+        status_run,
+        journal_outcome,
+        limit,
+    } = parsed;
+
+    let filter = RunListFilter {
+        strategy_id: strategy_id.clone(),
+        since: since.clone(),
+        status: status_run,
+        journal_outcome: journal_outcome.clone(),
+        limit: Some(limit),
+    };
+
+    let summaries = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.list_runs(&filter)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let runs_json: Vec<serde_json::Value> = summaries
+        .iter()
+        .map(|s| {
+            let status_wire = serde_json::to_value(s.status).unwrap_or(json!("unknown"));
+            json!({
+                "run_id": s.run_id,
+                "strategy_id": s.strategy_id,
+                "status": status_wire,
+                "started_at": s.started_at,
+                "finished_at": s.finished_at,
+                "action_count": s.action_count,
+            })
+        })
+        .collect();
+
+    // Echo the effective filter set so agents can confirm what was applied.
+    // `status` is the wire label the caller passed (or `null`) — NOT the
+    // internal RunStatus mapping — so it round-trips cleanly.
+    let mut filters_applied = serde_json::Map::new();
+    if let Some(sid) = &strategy_id {
+        filters_applied.insert("strategy_id".to_string(), json!(sid));
+    }
+    if let Some(s) = &since {
+        filters_applied.insert("since".to_string(), json!(s));
+    }
+    if let Some(s) = &status_label {
+        filters_applied.insert("status".to_string(), json!(s));
+    }
+    filters_applied.insert("limit".to_string(), json!(limit));
+
+    let count = runs_json.len();
+    let body = json!({
+        "runs": runs_json,
+        "count": count,
+        "filters_applied": serde_json::Value::Object(filters_applied),
+    });
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize execution list: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
+struct ParsedExecutionListQuery {
+    strategy_id: Option<String>,
+    since: Option<String>,
+    /// The wire label the caller passed (e.g. `"succeeded"`), used for the
+    /// `filters_applied` echo in the response.
+    status_label: Option<String>,
+    /// Mapped `RunStatus` when `status_label` is `succeeded` or `failed`.
+    status_run: Option<RunStatus>,
+    /// Mapped `journal_actions.outcome` wire string when `status_label` is
+    /// `noop` — see [`RunListFilter::journal_outcome`].
+    journal_outcome: Option<String>,
+    /// Effective limit after defaulting / capping.
+    limit: u64,
+}
+
+fn parse_execution_list_query(qs: &str) -> Result<ParsedExecutionListQuery, McpError> {
+    let mut strategy_id: Option<String> = None;
+    let mut since: Option<String> = None;
+    let mut status_label: Option<String> = None;
+    let mut limit_raw: Option<String> = None;
+
+    if !qs.is_empty() {
+        for pair in qs.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (key, value) = match pair.split_once('=') {
+                Some((k, v)) => (k, v),
+                None => (pair, ""),
+            };
+            // Minimal percent-decoding — query values are typically clean
+            // (hex ids, RFC3339, integers). Reject `+` as space (form-encoding
+            // doesn't apply to URI query strings; `%20` is the spec form).
+            let value = percent_decode(value).map_err(|e| {
+                invalid_params(format!(
+                    "execution://list: malformed percent-encoding in `{key}`: {e}"
+                ))
+            })?;
+            match key {
+                "strategy_id" => strategy_id = Some(value),
+                "since" => since = Some(value),
+                "status" => status_label = Some(value),
+                "limit" => limit_raw = Some(value),
+                other => {
+                    return Err(invalid_params(format!(
+                        "execution://list: unknown query parameter `{other}` \
+                         (allowed: strategy_id, since, status, limit)"
+                    )));
+                }
+            }
+        }
+    }
+
+    // Validate `since` as RFC3339 — silent failure would mask filter bugs.
+    if let Some(s) = &since {
+        if chrono::DateTime::parse_from_rfc3339(s).is_err() {
+            return Err(invalid_params(format!(
+                "execution://list: `since` must be RFC3339 / ISO8601 (e.g. `2026-05-14T00:00:00Z`), got `{s}`"
+            )));
+        }
+    }
+
+    // Map status label → RunStatus / journal_outcome. `noop` doesn't map to a
+    // RunStatus variant — see `RunListFilter::journal_outcome` doc.
+    let (status_run, journal_outcome) = match status_label.as_deref() {
+        None => (None, None),
+        Some("succeeded") => (Some(RunStatus::Succeeded), None),
+        Some("failed") => (Some(RunStatus::Failed), None),
+        Some("noop") => (None, Some("noop".to_string())),
+        Some(other) => {
+            return Err(invalid_params(format!(
+                "execution://list: `status` must be one of `succeeded` | `failed` | `noop`, got `{other}`"
+            )));
+        }
+    };
+
+    // Parse + cap limit. Out-of-range u64 ⇒ invalid_params; >cap ⇒ silent clamp.
+    let limit = match limit_raw {
+        None => LIST_RUNS_DEFAULT_LIMIT,
+        Some(raw) => raw.parse::<u64>().map_err(|e| {
+            invalid_params(format!(
+                "execution://list: `limit` must be a non-negative integer, got `{raw}`: {e}"
+            ))
+        })?,
+    };
+    if limit == 0 {
+        return Err(invalid_params(
+            "execution://list: `limit` must be ≥ 1".to_string(),
+        ));
+    }
+    let limit = limit.min(LIST_RUNS_LIMIT_CAP);
+
+    Ok(ParsedExecutionListQuery {
+        strategy_id,
+        since,
+        status_label,
+        status_run,
+        journal_outcome,
+        limit,
+    })
+}
+
+/// Minimal percent-decoder for query-string values. Accepts `%XX` (case-
+/// insensitive hex); rejects malformed escapes with a descriptive error.
+/// We intentionally do NOT decode `+` to space — query strings are
+/// path-style, not form-style, in the MCP URI grammar.
+fn percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err(format!("truncated `%` escape at byte {i}"));
+            }
+            let hi = char::from(bytes[i + 1])
+                .to_digit(16)
+                .ok_or_else(|| format!("non-hex digit in `%` escape at byte {}", i + 1))?;
+            let lo = char::from(bytes[i + 2])
+                .to_digit(16)
+                .ok_or_else(|| format!("non-hex digit in `%` escape at byte {}", i + 2))?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|e| format!("not valid UTF-8 after percent-decode: {e}"))
 }
 
 fn validate_run_resource_id(uri: &str, run_id: &str) -> Result<(), McpError> {

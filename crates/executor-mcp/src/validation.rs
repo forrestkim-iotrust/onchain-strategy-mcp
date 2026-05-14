@@ -127,6 +127,10 @@ mod tests {
             source: source.into(),
             description: None,
             tags: None,
+            // v1.4 bundle fields — not exercised by validation tests.
+            records: None,
+            view: None,
+            dry_run: None,
         }
     }
 

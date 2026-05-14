@@ -182,7 +182,7 @@ receipt_timeout_ms = 120000
                 &mut proc,
                 3,
                 "execution_get",
-                json!({ "execution_id": run_id }),
+                json!({ "run_id": run_id }),
             )
             .await?,
         );

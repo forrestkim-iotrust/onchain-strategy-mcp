@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ExecutionIdInput",
-  "description": "Input for execution_get; the legacy field name accepts a run ID.",
+  "description": "Input for execution_get; identifies a run by its run ID.",
   "type": "object",
   "properties": {
-    "execution_id": {
+    "run_id": {
       "description": "Run ID returned from a previous `strategy_run`.",
       "type": "string"
     }
   },
   "required": [
-    "execution_id"
+    "run_id"
   ]
 }

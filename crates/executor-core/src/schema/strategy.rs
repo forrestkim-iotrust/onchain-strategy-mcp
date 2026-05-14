@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-#[schemars(description = "Register a JavaScript strategy (content-addressed; idempotent on same source).")]
+#[schemars(description = "Register a JavaScript strategy (content-addressed; idempotent on same bundle). \
+The required `source` is the `execute` function; supplying `records` and/or `view` upgrades the strategy \
+to a v1.4 self-documenting bundle so `strategy://{id}/view` returns rich state. Bundles without `records` \
+or `view` retain the legacy single-function semantics and the same id-hash they had pre-v1.4.")]
 pub struct StrategyRegisterInput {
     #[schemars(description = "Human-readable name; UNIQUE among non-deleted strategies.")]
     pub name: String,
@@ -22,6 +25,49 @@ pub struct StrategyRegisterInput {
     #[schemars(description = "Optional tags (max 16 items, each max 64 chars).")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// v1.4 strategy bundle: declarative `records` schema. The runtime captures \
+    /// matching action effects at confirm time so the strategy's `view` function \
+    /// can read them back. See `docs://strategy-bundle` for the records DSL.
+    #[schemars(description = "Optional records schema for v1.4 bundle. Array of \
+{ name, on, capture } specs declaring what to capture from confirmed action effects. \
+Stored as canonical JSON; max 32 KiB total.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub records: Option<Vec<RecordSpec>>,
+    /// v1.4 strategy bundle: optional `view` function source. Called by \
+    /// `strategy://{id}/view` resource with `(ctx, records)`; returns any JSON. \
+    /// Without it, the view resource falls back to a generic balance snapshot.
+    #[schemars(description = "Optional view function JS source. Same sandbox as \
+strategies; max 64 KiB.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// When true, run the registration through validation + sandbox sanity \
+    /// without DB insert. Returns the would-be id and any policy/sandbox \
+    /// warnings. No mutation, no idempotency token consumed.
+    #[schemars(description = "If true, simulate the register (validate + sandbox sanity) \
+without persisting. Returns the would-be strategy_id plus any warnings. Default false.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
+}
+
+/// One entry of a v1.4 bundle's `records` schema. Match against confirmed \
+/// action effects (`on`) and capture a set of fields into the journal \
+/// (`capture`). Both fields stay loosely typed (JSON values) so the records \
+/// DSL can evolve without re-baking schemas; the runtime validates shape at \
+/// register time.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(description = "v1.4 strategy bundle: one records-capture spec.")]
+pub struct RecordSpec {
+    #[schemars(description = "Lower-case identifier used as the field key in `view(ctx, records)` (e.g. \"supply\"). Must be unique within the bundle.")]
+    pub name: String,
+    #[schemars(description = "Match clause selecting which confirmed actions trigger this capture. \
+Object with `kind` (e.g. \"contractCall\", \"erc20Transfer\", \"log\") plus kind-specific filters \
+(`target`, `selector`, `token`, `from`, `to`, `address`, `topics`).")]
+    pub on: serde_json::Value,
+    #[schemars(description = "Map from output field name to a capture expression string. \
+Expressions resolve over `args[N]`, `logs.<Event>[<filter>].<field>`, `tx.hash|block|ts|gas_used`, \
+and `view.<helper>(args)`.")]
+    pub capture: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

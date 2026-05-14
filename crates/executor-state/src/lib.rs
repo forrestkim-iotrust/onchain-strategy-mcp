@@ -23,7 +23,9 @@ pub use executions::ExecutionActionEntry;
 pub use journal::{
     ActionEntry, DecisionEntry, DecisionGate, DecisionVerdict, LogEntry, SourceReadEntry,
 };
-pub use runs::{Run, RunRepo};
+pub use runs::{
+    LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, Run, RunListFilter, RunRepo, RunSummary,
+};
 pub use store::StateStore;
-pub use strategies::{RegisterOutcome, Strategy, StrategySummary};
+pub use strategies::{RegisterOutcome, Strategy, StrategySummary, hash_bundle, hash_source};
 pub use triggers::TriggerRegisterOutcome;

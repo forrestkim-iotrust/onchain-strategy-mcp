@@ -274,3 +274,152 @@ pub(crate) fn list_runs_for_strategy(
         )
         .collect()
 }
+
+// ─────────── v1.4 Track C — execution://list backing query ───────────
+//
+// `list_runs` powers the `execution://list?strategy_id&since&status&limit`
+// resource (see `executor-mcp::resources::read_execution_list`). Filters are
+// composed dynamically — `strategy_id` is exact-match, `since` is an
+// EXCLUSIVE lower bound on `started_at` (RFC3339 string compare), and
+// `status` is the wire-name of a [`RunStatus`]. Sort order is newest-first
+// (`started_at DESC, id DESC`); `id` is a ULID so the secondary key gives a
+// deterministic tie-break for same-second inserts.
+//
+// `action_count` is `COUNT(*)` on `journal_actions` joined by `run_id` — one
+// row per recorded outcome (`actions` / `noop` / `*_error` / `*_denied`),
+// NOT one per executed action. The MCP layer is responsible for the
+// semantic-name interpretation; here we only ship the raw count so callers
+// don't have to round-trip a second query.
+
+/// Hard cap on the number of summary rows `list_runs` will ever emit, even
+/// when the caller passes a larger `limit`. Mirrors the v1.4 design contract
+/// (`execution://list` resource).
+pub const LIST_RUNS_LIMIT_CAP: u64 = 500;
+/// Default `limit` applied when the caller does not specify one.
+pub const LIST_RUNS_DEFAULT_LIMIT: u64 = 50;
+
+/// Filter set for [`list_runs`]. All fields are optional; `None` means
+/// "no constraint on this axis".
+#[derive(Debug, Clone, Default)]
+pub struct RunListFilter {
+    /// Exact-match filter on `runs.strategy_id`.
+    pub strategy_id: Option<String>,
+    /// Exclusive lower bound on `runs.started_at` (RFC3339 string).
+    /// Caller is responsible for validating the timestamp shape — `list_runs`
+    /// does a raw string compare and SQLite's collation will happily compare
+    /// any string.
+    pub since: Option<String>,
+    /// Exact-match filter on `runs.status`.
+    pub status: Option<RunStatus>,
+    /// Optional filter requiring at least one `journal_actions.outcome` row
+    /// for the run to equal this wire-string (e.g. `"noop"`). The v1.4
+    /// `execution://list?status=noop` filter routes through this field
+    /// because `RunStatus` has no `Noop` variant — a no-op strategy has
+    /// `RunStatus::Succeeded` plus a `journal_actions.outcome = 'noop'` row.
+    pub journal_outcome: Option<String>,
+    /// Max rows to return. `None` → [`LIST_RUNS_DEFAULT_LIMIT`].
+    /// Values above [`LIST_RUNS_LIMIT_CAP`] are silently clamped down.
+    pub limit: Option<u64>,
+}
+
+/// Summary row returned by [`list_runs`]. Lighter than [`Run`] so the
+/// resource layer doesn't pay a `serde::Value` cost per row; `action_count`
+/// is a `COUNT(*)` on `journal_actions` keyed by `run_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunSummary {
+    pub run_id: String,
+    pub strategy_id: String,
+    pub status: RunStatus,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub action_count: i64,
+}
+
+pub(crate) fn list_runs(
+    conn: &Connection,
+    filter: &RunListFilter,
+) -> Result<Vec<RunSummary>, StateError> {
+    // Compose WHERE + params dynamically. Each clause is gated on its
+    // `Option::is_some()` so an empty filter matches all rows.
+    let mut where_clauses: Vec<&'static str> = Vec::new();
+    let mut bound: Vec<rusqlite::types::Value> = Vec::new();
+
+    if let Some(sid) = &filter.strategy_id {
+        where_clauses.push("r.strategy_id = ?");
+        bound.push(rusqlite::types::Value::Text(sid.clone()));
+    }
+    if let Some(since) = &filter.since {
+        where_clauses.push("r.started_at > ?");
+        bound.push(rusqlite::types::Value::Text(since.clone()));
+    }
+    if let Some(status) = filter.status {
+        where_clauses.push("r.status = ?");
+        bound.push(rusqlite::types::Value::Text(status_to_wire(status).to_string()));
+    }
+    if let Some(outcome) = &filter.journal_outcome {
+        // EXISTS subquery is correlated to the run id from the outer query.
+        // This is faster than a join + DISTINCT for journal_outcome=noop on
+        // a workload where most runs have a small fixed number of action rows.
+        where_clauses
+            .push("EXISTS (SELECT 1 FROM journal_actions ja2 WHERE ja2.run_id = r.id AND ja2.outcome = ?)");
+        bound.push(rusqlite::types::Value::Text(outcome.clone()));
+    }
+
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", where_clauses.join(" AND "))
+    };
+
+    let limit = filter
+        .limit
+        .unwrap_or(LIST_RUNS_DEFAULT_LIMIT)
+        .min(LIST_RUNS_LIMIT_CAP);
+    bound.push(rusqlite::types::Value::Integer(limit as i64));
+
+    // LEFT JOIN with COUNT(*) on journal_actions so runs with zero journaled
+    // actions still appear (count = 0). GROUP BY pinned to runs.id keeps the
+    // aggregate scoped per row. ORDER BY (started_at DESC, id DESC) — newest
+    // first; id is a ULID so it doubles as a stable same-second tie-break.
+    let sql = format!(
+        "SELECT r.id, r.strategy_id, r.status, r.started_at, r.finished_at, \
+                COUNT(ja.id) AS action_count \
+         FROM runs r \
+         LEFT JOIN journal_actions ja ON ja.run_id = r.id \
+         {where_sql} \
+         GROUP BY r.id \
+         ORDER BY r.started_at DESC, r.id DESC \
+         LIMIT ?"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_iter: Vec<&dyn rusqlite::ToSql> =
+        bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let rows = stmt
+        .query_map(params_iter.as_slice(), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, rusqlite::Error>>()?;
+
+    rows.into_iter()
+        .map(
+            |(run_id, strategy_id, status_wire, started_at, finished_at, action_count)| {
+                Ok(RunSummary {
+                    run_id,
+                    strategy_id,
+                    status: status_from_wire(&status_wire)?,
+                    started_at,
+                    finished_at,
+                    action_count,
+                })
+            },
+        )
+        .collect()
+}

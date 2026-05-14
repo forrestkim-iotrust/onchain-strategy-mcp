@@ -130,8 +130,8 @@ use `await` inside a strategy.
 - **Triggers:** `trigger_register`, `trigger_list`, `trigger_get`,
   `trigger_set_enabled`, `trigger_delete`, `trigger_events`
 - **Execution:** `execution_get` (receipt-backed report keyed by run id)
-- **Policy:** `policy_get` (read-only; `policy_update` returns -32010
-  unimplemented — edit `.local/policy.toml` by hand)
+- **Policy:** `policy_get` (read-only). There is no `policy_update` tool —
+  policy is edited via `.local/policy.toml` only, then the server is restarted.
 - **EVM reads:** `evm_receipt`, `evm_view` — `evm_view` runs ad-hoc JS in
   the same sandbox strategies use (`ctx.evm.nativeBalance` /
   `ctx.evm.erc20Balance` / `ctx.evm.readContract` / `ctx.evm.code`), so

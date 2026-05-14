@@ -21,6 +21,12 @@ pub struct Strategy {
     pub tags: Option<Vec<String>>,
     pub created_at: String,
     pub deleted_at: Option<String>,
+    /// v1.4 strategy bundle: canonical JSON for the `records` schema.
+    /// NULL for legacy (pre-v1.4) registrations.
+    pub records_json: Option<String>,
+    /// v1.4 strategy bundle: JS source for the `view` function. NULL for
+    /// legacy registrations; consumers fall back to a generic balance view.
+    pub view_source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +37,10 @@ pub struct StrategySummary {
     pub tags: Option<Vec<String>>,
     pub created_at: String,
     pub deleted_at: Option<String>,
+    /// True when the row carries v1.4 records schema or view source. Used by
+    /// callers to know whether `strategy://{id}/view` returns bundle output
+    /// vs. generic fallback.
+    pub has_bundle: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -42,10 +52,49 @@ pub enum RegisterOutcome {
     AlreadyExists(Strategy),
 }
 
-pub fn hash_source(source: &str) -> String {
+/// Content-addressed strategy id.
+///
+/// Back-compat invariant: when no bundle fields are present (legacy
+/// pre-v1.4 register call), this returns the same hash as the v1.0 form
+/// (`sha256(source)`). Existing strategy ids therefore stay stable across
+/// the v1.4 upgrade.
+///
+/// When `records_json` and/or `view_source` is present, the hash mixes
+/// them in with explicit length-prefixed framing so that distinct bundle
+/// trios collide-free even if one component is empty.
+pub fn hash_bundle(
+    source: &str,
+    records_json: Option<&str>,
+    view_source: Option<&str>,
+) -> String {
+    if records_json.is_none() && view_source.is_none() {
+        // Legacy path: source-only hash, byte-for-byte compatible with v1.0..v1.3.
+        let mut h = Sha256::new();
+        h.update(source.as_bytes());
+        return hex::encode(h.finalize());
+    }
+    // Bundle path: length-prefixed concat of three sections.
     let mut h = Sha256::new();
-    h.update(source.as_bytes());
+    h.update(b"osmcp-bundle-v1\n");
+    write_section(&mut h, "execute", source);
+    write_section(&mut h, "records", records_json.unwrap_or(""));
+    write_section(&mut h, "view", view_source.unwrap_or(""));
     hex::encode(h.finalize())
+}
+
+fn write_section(h: &mut Sha256, tag: &str, body: &str) {
+    h.update(tag.as_bytes());
+    h.update(b":");
+    h.update((body.len() as u64).to_be_bytes());
+    h.update(b"\n");
+    h.update(body.as_bytes());
+    h.update(b"\n");
+}
+
+/// Legacy alias retained so existing callers (and tests) keep compiling.
+/// Same byte-for-byte output as `hash_bundle(source, None, None)`.
+pub fn hash_source(source: &str) -> String {
+    hash_bundle(source, None, None)
 }
 
 pub(crate) fn now_rfc3339() -> String {
@@ -60,6 +109,7 @@ fn decode_tags(raw: Option<String>) -> Option<Vec<String>> {
     raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn map_strategy(
     id: String,
     name: String,
@@ -68,6 +118,8 @@ fn map_strategy(
     tags_raw: Option<String>,
     created_at: String,
     deleted_at: Option<String>,
+    records_json: Option<String>,
+    view_source: Option<String>,
 ) -> Strategy {
     Strategy {
         id,
@@ -77,19 +129,25 @@ fn map_strategy(
         tags: decode_tags(tags_raw),
         created_at,
         deleted_at,
+        records_json,
+        view_source,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn register(
     conn: &Connection,
     name: &str,
     source: &str,
     description: Option<&str>,
     tags: Option<&[String]>,
+    records_json: Option<&str>,
+    view_source: Option<&str>,
 ) -> Result<RegisterOutcome, StateError> {
-    let id = hash_source(source);
+    let id = hash_bundle(source, records_json, view_source);
 
-    // 1. Same id already in DB → idempotent (D-01b same-source).
+    // 1. Same id already in DB → idempotent (D-01b same-source, extended to
+    //    bundle in v1.4: same trio → same id → idempotent).
     if let Some(existing) = get_by_id(conn, &id)? {
         return Ok(RegisterOutcome::AlreadyExists(existing));
     }
@@ -110,9 +168,9 @@ pub(crate) fn register(
     let now = now_rfc3339();
     let tags_json = encode_tags(tags);
     conn.execute(
-        "INSERT INTO strategies(id, name, source, description, tags, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![&id, name, source, description, tags_json, &now],
+        "INSERT INTO strategies(id, name, source, description, tags, created_at, records_json, view_source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![&id, name, source, description, tags_json, &now, records_json, view_source],
     )?;
 
     Ok(RegisterOutcome::Created(Strategy {
@@ -123,6 +181,8 @@ pub(crate) fn register(
         tags: tags.map(|t| t.to_vec()),
         created_at: now,
         deleted_at: None,
+        records_json: records_json.map(|s| s.to_string()),
+        view_source: view_source.map(|s| s.to_string()),
     }))
 }
 
@@ -131,11 +191,16 @@ pub(crate) fn list(
     include_deleted: bool,
 ) -> Result<Vec<StrategySummary>, StateError> {
     // Explicit column set — `source` is intentionally absent (T-02-01-03 / D-07a).
+    // `records_json` and `view_source` are pulled as boolean presence flags
+    // (so list responses can advertise `has_bundle` without dragging the JS
+    // source through every listing).
     let sql = if include_deleted {
-        "SELECT id, name, description, tags, created_at, deleted_at \
+        "SELECT id, name, description, tags, created_at, deleted_at, \
+                records_json IS NOT NULL OR view_source IS NOT NULL \
          FROM strategies ORDER BY created_at DESC"
     } else {
-        "SELECT id, name, description, tags, created_at, deleted_at \
+        "SELECT id, name, description, tags, created_at, deleted_at, \
+                records_json IS NOT NULL OR view_source IS NOT NULL \
          FROM strategies WHERE deleted_at IS NULL ORDER BY created_at DESC"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -148,6 +213,7 @@ pub(crate) fn list(
                 tags: decode_tags(r.get::<_, Option<String>>(3)?),
                 created_at: r.get(4)?,
                 deleted_at: r.get(5)?,
+                has_bundle: r.get::<_, i64>(6)? != 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -156,8 +222,9 @@ pub(crate) fn list(
 
 pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
-        "SELECT id, name, source, description, tags, created_at, deleted_at \
-         FROM strategies WHERE id = ?1",
+        "SELECT id, name, source, description, tags, created_at, deleted_at, \
+                records_json, view_source \
+         FROM strategies WHERE id = ?1 LIMIT 1",
         params![id],
         |r| {
             Ok(map_strategy(
@@ -168,6 +235,8 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>,
                 r.get(4)?,
                 r.get(5)?,
                 r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
             ))
         },
     )
@@ -177,7 +246,8 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Strategy>,
 
 pub(crate) fn get_by_name(conn: &Connection, name: &str) -> Result<Option<Strategy>, StateError> {
     conn.query_row(
-        "SELECT id, name, source, description, tags, created_at, deleted_at \
+        "SELECT id, name, source, description, tags, created_at, deleted_at, \
+                records_json, view_source \
          FROM strategies WHERE name = ?1 AND deleted_at IS NULL",
         params![name],
         |r| {
@@ -189,6 +259,8 @@ pub(crate) fn get_by_name(conn: &Connection, name: &str) -> Result<Option<Strate
                 r.get(4)?,
                 r.get(5)?,
                 r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
             ))
         },
     )

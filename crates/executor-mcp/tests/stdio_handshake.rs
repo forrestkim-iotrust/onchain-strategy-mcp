@@ -67,8 +67,7 @@ async fn tools_list_emits_full_surface() -> Result<()> {
         "strategy_run",
         "execution_get",
         "policy_get",
-        "policy_update",
-        // v1.2 Trigger Core (Stream C): 7 new tools.
+        // v1.2 Trigger Core (Stream C): 6 trigger tools.
         "trigger_register",
         "trigger_list",
         "trigger_get",
@@ -81,10 +80,14 @@ async fn tools_list_emits_full_surface() -> Result<()> {
             "missing tool: {expected} — got: {names:?}"
         );
     }
+    assert!(
+        !names.contains(&"policy_update"),
+        "policy_update was removed in v1.4 (Track F); got: {names:?}"
+    );
     assert_eq!(
         tools.len(),
-        16,
-        "expected exactly 16 tools (8 base + 2 evm read/view + 6 trigger), got {}",
+        15,
+        "expected exactly 15 tools (7 base + 2 evm read/view + 6 trigger), got {}",
         tools.len()
     );
     for t in tools {
@@ -103,49 +106,37 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     Ok(())
 }
 
-// VALIDATION.md 1-02-02 — narrowed in Plan 02-02:
-// `strategy_register` and `strategy_delete` now hit real storage in Phase 2,
-// so only the still-phase-gated tools remain.
+// VALIDATION.md 1-02-02 — narrowed in Plan 02-02 and again in v1.4 Track F:
+// `policy_update` was the last phase-gated placeholder. v1.4 removes the tool
+// entirely (honesty-over-completeness, design principle P6); policy is edited
+// via `.local/policy.toml` only. The test below asserts that calling the
+// dropped tool surfaces as a normal "unknown tool" error rather than as the
+// old `-32010 unimplemented` envelope.
 #[tokio::test]
-async fn unimplemented_tools_return_phase_hint() -> Result<()> {
-    // Plan 03-03: strategy_run_once was promoted to strategy_run (Phase 3,
-    // real handler). Only `policy_update` remains as a placeholder for Phase 5.
-    let cases: [(&str, u64); 1] = [("policy_update", 5)];
-    for (tool, expected_phase) in cases {
-        let mut proc = common::spawn_server_with_state(":memory:").await?;
-        let _ = initialize(&mut proc).await?;
+async fn dropped_policy_update_returns_unknown_tool() -> Result<()> {
+    let _ = EXPECTED_UNIMPL_CODE; // kept for other tests; no longer asserted here
+    let mut proc = common::spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
 
-        let args = match tool {
-            "policy_update" => json!({}),
-            _ => unreachable!(),
-        };
-        send(
-            &mut proc,
-            json!({
-                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": { "name": tool, "arguments": args }
-            }),
-        )
-        .await?;
-        let r = recv(&mut proc).await?;
-        let err = &r["error"];
-        assert_eq!(
-            err["code"], EXPECTED_UNIMPL_CODE,
-            "tool {tool}: expected code {EXPECTED_UNIMPL_CODE}, got {}",
-            err["code"]
-        );
-        assert_eq!(
-            err["data"]["code"], "unimplemented",
-            "tool {tool}: data.code"
-        );
-        assert_eq!(
-            err["data"]["phase"], expected_phase,
-            "tool {tool}: expected phase {expected_phase}, got {}",
-            err["data"]["phase"]
-        );
-        assert_eq!(err["data"]["tool"], tool, "tool {tool}: data.tool mismatch");
-        proc.child.kill().await?;
-    }
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": { "name": "policy_update", "arguments": {} }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    assert!(
+        r.get("error").is_some(),
+        "policy_update was removed in v1.4; expected a JSON-RPC error, got: {r}"
+    );
+    let err = &r["error"];
+    assert_ne!(
+        err["code"], EXPECTED_UNIMPL_CODE,
+        "policy_update must no longer return -32010 unimplemented; got: {err}"
+    );
+    proc.child.kill().await?;
     Ok(())
 }
 
@@ -231,6 +222,11 @@ async fn resources_surface_matches_contract() -> Result<()> {
         template_uris.contains(&"execution://{run_id}"),
         "missing execution template; got {template_uris:?}"
     );
+    // v1.4 Track C: filtered run-summary listing.
+    assert!(
+        template_uris.contains(&"execution://list"),
+        "missing execution://list template; got {template_uris:?}"
+    );
     assert!(
         template_uris.contains(&"journal://{run_id}"),
         "missing journal template; got {template_uris:?}"
@@ -305,6 +301,9 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         "trigger_patterns",
         "example_strategies",
         "common_pitfalls",
+        // v1.4 Track E1 — server-prefetch workflow prompts.
+        "safety_review",
+        "author_strategy",
     ] {
         assert!(
             names.contains(&required),
@@ -361,7 +360,12 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         "review body did not reference id + policy_get: {text}"
     );
 
-    // prompts/get getting_started → must return non-trivial orientation body.
+    // prompts/get getting_started → v1.4 Track E1 prefetched orientation:
+    // inlines the live strategy_list (empty-state placeholder here, since the
+    // server boots with an in-memory store and no registered strategies) +
+    // the loaded policy summary (also empty here — no [policy].path) + the
+    // 5-step playbook. Markers: the prefetched "Registered strategies"
+    // header, the empty-state placeholder, the playbook H2.
     send(
         &mut proc,
         json!({
@@ -376,8 +380,99 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         .expect("messages array");
     let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
     assert!(
-        text.len() > 200 && text.contains("strategy_list"),
-        "getting_started body too short or missing strategy_list reference"
+        text.len() > 200,
+        "getting_started body too short: {} chars",
+        text.len()
+    );
+    assert!(
+        text.contains("Registered strategies") && text.contains("strategy_list"),
+        "getting_started missing prefetched strategy_list header: {text}"
+    );
+    assert!(
+        text.contains("First-action playbook"),
+        "getting_started missing playbook H2: {text}"
+    );
+    assert!(
+        text.contains("Active policy"),
+        "getting_started missing policy block: {text}"
+    );
+
+    // v1.4 Track E1: prompts/get safety_review with a proposed source that
+    // exercises the static-analysis surface (ctx.actions.contractCall + a
+    // trailing semicolon pitfall). Assert: itemized extracted action +
+    // pitfall finding + verdict block present.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 7, "method": "prompts/get",
+            "params": {
+                "name": "safety_review",
+                "arguments": {
+                    "source": "((ctx) => [ctx.actions.contractCall({ address: \"0xdead\", abi: [], function: \"supply\", args: [] })]);"
+                }
+            }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let messages = r["result"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("Extracted `ctx.actions.*` calls"),
+        "safety_review missing action extraction header: {text}"
+    );
+    assert!(
+        text.contains("ctx.actions.contractCall") && text.contains("0xdead"),
+        "safety_review didn't surface the extracted action: {text}"
+    );
+    assert!(
+        text.contains("Static-analysis findings") && text.contains("Trailing"),
+        "safety_review didn't flag the trailing semicolon: {text}"
+    );
+    assert!(
+        text.contains("## Verdict"),
+        "safety_review missing verdict block: {text}"
+    );
+    assert!(
+        text.contains("Active policy"),
+        "safety_review missing inline policy: {text}"
+    );
+
+    // v1.4 Track E1: prompts/get author_strategy with a funnel-style intent
+    // should select the eth-funnel example and include the bundle skeleton.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 8, "method": "prompts/get",
+            "params": {
+                "name": "author_strategy",
+                "arguments": { "intent": "ETH to USDC Aave funnel" }
+            }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let messages = r["result"]["messages"]
+        .as_array()
+        .expect("messages array");
+    let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("Bundle skeleton") && text.contains("execute") && text.contains("records") && text.contains("view"),
+        "author_strategy missing bundle skeleton with execute/records/view: {text}"
+    );
+    assert!(
+        text.contains("examples://strategies/eth-funnel"),
+        "author_strategy didn't route funnel intent to eth-funnel: {text}"
+    );
+    assert!(
+        text.contains("ETH to USDC Aave funnel"),
+        "author_strategy didn't echo the intent: {text}"
+    );
+    assert!(
+        text.contains("docs://strategy-bundle"),
+        "author_strategy missing docs pointer: {text}"
     );
 
     proc.child.kill().await?;
@@ -442,22 +537,27 @@ async fn stdout_is_strict_jsonrpc() -> Result<()> {
 async fn schema_contract_round_trip() -> Result<()> {
     use executor_core::schema::execution::ExecutionIdInput;
     use executor_core::schema::policy::PolicyUpdateInput;
-    use executor_core::schema::prompt_args::{ReviewEvmStrategyArgs, WriteEvmStrategyArgs};
+    use executor_core::schema::prompt_args::{
+        AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, WriteEvmStrategyArgs,
+    };
     use executor_core::schema::strategy::{
         StrategyIdInput, StrategyRegisterInput, StrategyRunOnceInput,
     };
 
-    let cases: [(&str, Value); 7] = [
+    let cases: [(&str, Value); 9] = [
         (
             "StrategyRegisterInput",
             json!({ "name": "x", "source": "// noop" }),
         ),
         ("StrategyIdInput", json!({ "strategy_id": "s-1" })),
         ("StrategyRunOnceInput", json!({ "strategy_id": "s-1" })),
-        ("ExecutionIdInput", json!({ "execution_id": "e-1" })),
+        ("ExecutionIdInput", json!({ "run_id": "e-1" })),
         ("PolicyUpdateInput", json!({})),
         ("WriteEvmStrategyArgs", json!({ "intent": "transfer usdc" })),
         ("ReviewEvmStrategyArgs", json!({ "strategy_id": "s-1" })),
+        // v1.4 Track E1 args
+        ("SafetyReviewArgs", json!({ "source": "((ctx) => \"noop\")" })),
+        ("AuthorStrategyArgs", json!({ "intent": "yield snapshot" })),
     ];
 
     // Each `from_value` call is the round-trip: agent-shaped JSON → our
@@ -470,6 +570,8 @@ async fn schema_contract_round_trip() -> Result<()> {
     let _: PolicyUpdateInput = serde_json::from_value(cases[4].1.clone())?;
     let _: WriteEvmStrategyArgs = serde_json::from_value(cases[5].1.clone())?;
     let _: ReviewEvmStrategyArgs = serde_json::from_value(cases[6].1.clone())?;
+    let _: SafetyReviewArgs = serde_json::from_value(cases[7].1.clone())?;
+    let _: AuthorStrategyArgs = serde_json::from_value(cases[8].1.clone())?;
 
     // Shape sanity — samples are JSON objects, not scalars or arrays.
     for (name, sample) in &cases {
@@ -915,7 +1017,7 @@ async fn execution_get_returns_not_found_when_empty() -> Result<()> {
         &mut proc,
         2,
         "execution_get",
-        json!({ "execution_id": "01HGXNONEXISTENTRUNIDXXXXX" }),
+        json!({ "run_id": "01HGXNONEXISTENTRUNIDXXXXX" }),
     )
     .await?;
     let err = &r["error"];
@@ -957,7 +1059,7 @@ async fn execution_status_surfaces_match() -> Result<()> {
             &mut proc,
             2,
             "execution_get",
-            json!({ "execution_id": run_id }),
+            json!({ "run_id": run_id }),
         )
         .await?,
     );
@@ -1021,7 +1123,7 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
             &mut proc,
             2,
             "execution_get",
-            json!({ "execution_id": run_id }),
+            json!({ "run_id": run_id }),
         )
         .await?;
         let body = extract_json_result(&r);
@@ -1064,7 +1166,7 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
             &mut proc,
             2,
             "execution_get",
-            json!({ "execution_id": run_id }),
+            json!({ "run_id": run_id }),
         )
         .await?;
         let body = extract_json_result(&r);
@@ -1092,7 +1194,7 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
             &mut proc,
             2,
             "execution_get",
-            json!({ "execution_id": run_id }),
+            json!({ "run_id": run_id }),
         )
         .await?;
         let body = extract_json_result(&r);

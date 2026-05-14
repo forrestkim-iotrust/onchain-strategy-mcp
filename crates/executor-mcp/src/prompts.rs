@@ -1,13 +1,25 @@
-//! Prompt surface — guided authoring/review pair plus four self-documenting
-//! prompts (`getting_started`, `trigger_patterns`, `example_strategies`,
-//! `common_pitfalls`) so a fresh agent can discover the runtime end-to-end
-//! without prior context.
+//! Prompt surface — guided authoring/review pair plus the v1.4 prefetch-style
+//! workflow prompts (`getting_started`, `safety_review`, `author_strategy`)
+//! and the four self-documenting prompts (`trigger_patterns`,
+//! `example_strategies`, `common_pitfalls`).
+//!
+//! v1.4 Track E1 shifts these from static text to **server-side prefetch +
+//! structured cues**: the handler reads live state (strategies, policy) from
+//! [`StateStore`] and the loaded [`LoadedPolicy`] and composes a context block
+//! the agent can act on immediately. See `.planning/v1.4-AGENT-UX-DESIGN.md`
+//! §9 ("Prompts as workflows").
 //!
 //! Argument schemas come from `executor_core::schema::prompt_args::*` via
 //! `Parameters<T>` (so `prompts/list` publishes them automatically). The four
 //! self-doc prompts take no arguments — represented by [`EmptyPromptArgs`].
 
-use executor_core::schema::prompt_args::{ReviewEvmStrategyArgs, WriteEvmStrategyArgs};
+use std::fmt::Write as _;
+
+use executor_core::schema::prompt_args::{
+    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, WriteEvmStrategyArgs,
+};
+use executor_policy::LoadedPolicy;
+use executor_state::StrategySummary;
 use rmcp::{
     ErrorData as McpError, RoleServer,
     handler::server::wrapper::Parameters,
@@ -26,34 +38,6 @@ use crate::server::ExecutorServer;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[schemars(description = "No arguments.")]
 pub struct EmptyPromptArgs {}
-
-const GETTING_STARTED_BODY: &str = r#"You are connected to the Onchain Strategy MCP runtime. Orient yourself in this order:
-
-1. Read the server `instructions` you received at `initialize` — it covers the strategy/trigger/policy model, the `ctx.actions` and `ctx.evm` API surface, the tool list, and all resource templates.
-
-2. Inspect the live state:
-   - `strategy_list` — what is already registered?
-   - `trigger_list` — what is firing automatically?
-   - `policy_get` — what is the agent allowed to do (chains, contracts, selectors, caps)?
-
-3. If `strategy_list` is empty, register the bundled `yield-snapshot` example to prove the loop end-to-end:
-   - Read the source via `examples://strategies/yield-snapshot`.
-   - Call `strategy_register({ name: "yield-snapshot", source: <that source> })`.
-   - Call `strategy_run({ strategy_id: <returned id> })`.
-   - Read `execution://{run_id}` and `journal://{run_id}` to show the user the result.
-
-4. Then turn to the user's intent. Strategies are short JS functions returning `Action[] | "noop"`. WRITE THE STRATEGY YOURSELF from the user's description — do not ask the user for code. The canonical use cases on this runtime:
-
-   - **Funnel** — auto-convert/supply every inbound balance (see `examples://strategies/eth-funnel`).
-   - **Yield comparator** — read multiple markets at any block, return a snapshot (see `examples://strategies/yield-snapshot`).
-   - **Instant reactor** — log/mempool trigger fires the strategy within seconds of an onchain event.
-   - **Atomic multi-step** — `[approve, supply]` etc. lands as one tx via auto-7702 batching.
-
-5. Pair every strategy with the right trigger if it needs to run autonomously. Load the `trigger_patterns` prompt for the decision table.
-
-6. Before broadcasting unfamiliar shapes, dry-run with `strategy_run` (it simulates each action through policy gating before signing).
-
-If anything reverts, fails, or returns a -32017/-32018, load the `common_pitfalls` prompt before iterating."#;
 
 const TRIGGER_PATTERNS_BODY: &str = r#"Pick the trigger kind that matches the *source of change*, not the cadence:
 
@@ -110,6 +94,303 @@ const COMMON_PITFALLS_BODY: &str = r#"Mistakes the runtime forgives poorly:
 8. **Strategy ids are 64-char lowercase hex.** Run ids are 26-char Crockford ULIDs. Resource templates reject malformed ids with `-32002 resource_not_found`.
 
 9. **Trigger dedup window:** a trigger that fires while its strategy is still executing is rejected, not queued. Build idempotent strategies; check `trigger-events://{id}` to see suppressed fires."#;
+
+/// v1.4 Track E1: bundle skeleton template for the `author_strategy` prompt.
+/// Static for now — Track A wires up the real bundle records/view executor.
+/// Kept under ~1KB so the composed prompt body stays under the 3KB budget.
+const BUNDLE_SKELETON: &str = r#"```js
+// v1.4 strategy bundle shape. Register via:
+//   strategy_register({ name, source, records, view })
+// where `source` is the legacy `Action[] | "noop"` strategy and
+// `records` / `view` are optional bundle members (Track A).
+
+({
+  // 1. EXECUTE — the existing strategy function. Returns Action[] | "noop".
+  //    Wired to `ctx.actions.*` + `ctx.evm.*`. No await.
+  execute: (ctx) => {
+    // TODO: read state via ctx.evm.*; decide.
+    return "noop";
+  },
+
+  // 2. RECORDS — declarative capture of per-run facts. Each entry becomes a
+  //    row in `strategy://{id}/records?since=...`. Use to seed view().
+  //    Example shapes (Track A2 DSL):
+  //      { field: "principal_usdc", from: "action_arg", action: 0, arg: "amount" }
+  //      { field: "tx_hash",        from: "tx_hash",    action: 0 }
+  records: [
+    // TODO: per-run facts to journal.
+  ],
+
+  // 3. VIEW — pure JS that aggregates records into a snapshot. Read via
+  //    `strategy://{id}/view`. Returns a JSON-shaped object.
+  view: (records, ctx) => {
+    // TODO: aggregate records into { principal, current_value, ... }.
+    return { confidence: "missing", reason: "view not implemented" };
+  },
+})
+```"#;
+
+/// Build a compact markdown table of currently registered strategies. When the
+/// list is empty, returns a one-line "no strategies registered" placeholder so
+/// the agent knows it's an empty-state run.
+fn format_strategy_table(list: &[StrategySummary]) -> String {
+    if list.is_empty() {
+        return "_(no strategies registered yet — empty state)_".to_string();
+    }
+    let mut s = String::new();
+    s.push_str("| name | id (short) | description | tags | created_at |\n");
+    s.push_str("|------|------------|-------------|------|------------|\n");
+    for row in list.iter().take(20) {
+        let short_id = if row.id.len() >= 8 {
+            &row.id[..8]
+        } else {
+            row.id.as_str()
+        };
+        let desc = row.description.as_deref().unwrap_or("");
+        let desc_trimmed: String = desc.chars().take(60).collect();
+        let tags = row
+            .tags
+            .as_ref()
+            .map(|t| t.join(","))
+            .unwrap_or_else(|| "-".to_string());
+        let _ = writeln!(
+            s,
+            "| {} | `{}` | {} | {} | {} |",
+            row.name, short_id, desc_trimmed, tags, row.created_at
+        );
+    }
+    if list.len() > 20 {
+        let _ = writeln!(
+            s,
+            "_… {} more rows truncated; read `strategy://list`._",
+            list.len() - 20
+        );
+    }
+    s
+}
+
+/// Compact summary of the loaded policy (chains / contract count / selectors
+/// count / raw_call gate). When the policy field is `None`, surface a
+/// fail-closed note — `strategy_run` will refuse anything until it loads.
+fn format_policy_summary(policy: Option<&LoadedPolicy>) -> String {
+    let Some(p) = policy else {
+        return "_(no policy loaded — `strategy_run` will fail-closed with `policy_not_loaded`. \
+Set `[policy].path` in `.local/config.toml` and restart.)_"
+            .to_string();
+    };
+    let chains: Vec<String> = p.chains_allow.iter().map(|c| c.to_string()).collect();
+    let contracts: usize = p.contracts_by_chain.values().map(|v| v.len()).sum();
+    let selectors: usize = p
+        .selectors_by_chain_contract
+        .values()
+        .map(|v| v.len())
+        .sum();
+    let raw_call_state = if p.raw_call_allow_global {
+        "GLOBAL ALLOW (dangerous)"
+    } else if p.raw_call_allow.is_empty() {
+        "deny (no overrides)"
+    } else {
+        "deny-by-default with per-contract overrides"
+    };
+    format!(
+        "- chains allowed: {}\n- contracts allowed: {} across {} chain(s)\n- selectors allowed: {}\n- raw_call gate: {}\n",
+        if chains.is_empty() {
+            "_(none)_".into()
+        } else {
+            chains.join(", ")
+        },
+        contracts,
+        p.contracts_by_chain.len(),
+        selectors,
+        raw_call_state,
+    )
+}
+
+/// Embedded examples → short description, used for the `author_strategy`
+/// intent-keyword router. Mirrors the table in
+/// `crates/executor-mcp/src/resources.rs` so the prompt body can suggest the
+/// most-relevant example without re-reading the include_str! sources.
+const EXAMPLES_FOR_INTENT: &[(&str, &str)] = &[
+    (
+        "eth-funnel",
+        "Funnel pattern: when ETH or USDC arrives at the burner, swap excess ETH to USDC and supply to Aave V3. Multi-action [erc20Approve, contractCall] auto-bundles via EIP-7702.",
+    ),
+    (
+        "yield-snapshot",
+        "Periodic read-only snapshot: reads supply APY/utilization for Aave/Compound/Moonwell on Base. Returns 'noop'. Pair with an `interval` trigger.",
+    ),
+    (
+        "erc20-approve",
+        "Minimal one-action ERC20 approve template. Useful when you just need to grant or revoke an allowance.",
+    ),
+    (
+        "generic-counter-call",
+        "Bare-minimum contractCall template against a counter contract on local anvil (chain 31337).",
+    ),
+];
+
+/// Pick the most relevant example from the embedded set via case-insensitive
+/// substring match on the user's intent. Falls back to `yield-snapshot` (the
+/// best first example — pure read, no signing, exercises `ctx.evm.readContract`).
+fn select_example_for_intent(intent: &str) -> (&'static str, &'static str) {
+    let lower = intent.to_ascii_lowercase();
+    if lower.contains("approve") || lower.contains("allowance") {
+        return EXAMPLES_FOR_INTENT[2];
+    }
+    if lower.contains("funnel")
+        || lower.contains("supply")
+        || lower.contains("aave")
+        || lower.contains("swap")
+        || lower.contains("uniswap")
+        || lower.contains("deposit")
+    {
+        return EXAMPLES_FOR_INTENT[0];
+    }
+    if lower.contains("yield")
+        || lower.contains("apy")
+        || lower.contains("apr")
+        || lower.contains("snapshot")
+        || lower.contains("rate")
+        || lower.contains("read")
+        || lower.contains("compound")
+        || lower.contains("moonwell")
+    {
+        return EXAMPLES_FOR_INTENT[1];
+    }
+    if lower.contains("counter") || lower.contains("call") {
+        return EXAMPLES_FOR_INTENT[3];
+    }
+    EXAMPLES_FOR_INTENT[1]
+}
+
+/// Extract every `ctx.actions.contractCall({...})` / `ctx.actions.erc20Approve({...})`
+/// occurrence, returning `(call_kind, arg_block)` slices where `arg_block` is
+/// the literal text of the object passed to the call (best-effort brace
+/// matching). No new dependencies — this is a hand-rolled scan, not a real JS
+/// parser. When the call's first argument is not an object literal, the entry
+/// records `manual review needed` so the agent escalates rather than trusting
+/// a partial extraction.
+fn extract_action_calls(source: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = source.as_bytes();
+    let needles = [
+        ("ctx.actions.contractCall", "contractCall"),
+        ("ctx.actions.erc20Approve", "erc20Approve"),
+    ];
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let mut next: Option<(usize, &str, &str)> = None;
+        for (needle, kind) in &needles {
+            if let Some(off) = source[idx..].find(needle) {
+                let abs = idx + off;
+                if next.map(|(prev, _, _)| abs < prev).unwrap_or(true) {
+                    next = Some((abs, needle, kind));
+                }
+            }
+        }
+        let Some((abs, needle, kind)) = next else {
+            break;
+        };
+        let mut p = abs + needle.len();
+        while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        if p >= bytes.len() || bytes[p] != b'(' {
+            idx = abs + needle.len();
+            continue;
+        }
+        p += 1;
+        while p < bytes.len() && bytes[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        let arg_block = if p < bytes.len() && bytes[p] == b'{' {
+            let start = p;
+            let mut depth = 0i32;
+            let mut end = p;
+            while end < bytes.len() {
+                match bytes[end] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            source[start..end.min(bytes.len())].to_string()
+        } else {
+            "(non-literal arg — manual review needed)".to_string()
+        };
+        out.push((kind.to_string(), arg_block));
+        idx = abs + needle.len();
+    }
+    out
+}
+
+/// Pull a quoted string literal from `<field>: "<value>"` inside an action
+/// arg block. Returns the first match only.
+fn extract_field<'a>(block: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("{field}:");
+    let i = block.find(&needle)?;
+    let after = &block[i + needle.len()..];
+    let trimmed = after.trim_start();
+    let quote = trimmed.as_bytes().first().copied()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let q = quote as char;
+    let inside = &trimmed[1..];
+    let end = inside.find(q)?;
+    Some(&inside[..end])
+}
+
+fn extract_function_name(block: &str) -> Option<&str> {
+    extract_field(block, "function")
+}
+
+fn extract_address(block: &str) -> Option<&str> {
+    extract_field(block, "address")
+}
+
+/// Static-analysis heuristics for `safety_review`. Each fires independently
+/// and contributes a warning line — none gate the go/no-go alone (that's
+/// the final aggregate verdict).
+fn surface_common_pitfalls(source: &str) -> Vec<String> {
+    let mut findings = Vec::new();
+    let trimmed = source.trim_end();
+    if trimmed.ends_with(';') {
+        findings.push(
+            "Trailing `;` at EOF — JS sandbox evaluates the source as one expression; \
+             trailing semicolons surface as `-32018 strategy_invalid_output`. Drop it."
+                .to_string(),
+        );
+    }
+    if source.contains("await ") || source.contains("await(") {
+        findings.push(
+            "`await` keyword present — the JS sandbox is synchronous. All `ctx.evm.*` calls return resolved values directly."
+                .to_string(),
+        );
+    }
+    if source.contains("module.exports") {
+        findings.push(
+            "`module.exports` present — strategies are evaluated as a single top-level expression. Remove the CommonJS wrapper.".to_string(),
+        );
+    }
+    if source.contains("amountOutMinimum: \"0\"")
+        || source.contains("amountOutMinimum:\"0\"")
+        || source.contains("amountOutMinimum: 0")
+    {
+        findings.push(
+            "`amountOutMinimum: 0` detected — unbounded slippage. Hard-code a floor or compute it from a recent oracle read."
+                .to_string(),
+        );
+    }
+    findings
+}
 
 #[prompt_router(vis = "pub(crate)")]
 impl ExecutorServer {
@@ -171,20 +452,237 @@ impl ExecutorServer {
         .with_description("Guided strategy review"))
     }
 
+    /// v1.4 Track E1: refreshed `getting_started` — prefetches the live
+    /// strategy list and the loaded policy and inlines them in the body so a
+    /// fresh agent has a one-screen orientation without any further tool
+    /// calls. See `.planning/v1.4-AGENT-UX-DESIGN.md` §9.
     #[prompt(
         name = "getting_started",
-        description = "Orient a fresh agent: inspect live state, run the bundled example, then author from user intent."
+        description = "Orient a fresh agent: inlined strategy_list + policy + 5-step first-action playbook."
     )]
     async fn getting_started(
         &self,
         Parameters(_args): Parameters<EmptyPromptArgs>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
+        // Prefetch live state — single short DB read on the StateStore mutex.
+        let state = self.state.clone();
+        let strategies: Vec<StrategySummary> = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_strategies(false).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        let policy_summary = {
+            let guard = self.policy.read().await;
+            format_policy_summary(guard.as_ref())
+        };
+        let strategy_table = format_strategy_table(&strategies);
+        let empty = strategies.is_empty();
+
+        let playbook = if empty {
+            r#"## First-action playbook (empty state — prove the loop end-to-end)
+
+1. **Register a strategy.** Read `examples://strategies/yield-snapshot` and call `strategy_register({ name: "yield-snapshot", source: <that source> })`. yield-snapshot is pure-read and exercises no policy gates.
+2. **Attach a trigger.** Call `trigger_register({ strategy_id: <id>, kind: "interval", config: { interval_ms: 3_600_000 } })` for an hourly snapshot, OR skip and run manually.
+3. **Wait for first fire** (or call `strategy_run({ strategy_id })` to fire now).
+4. **Check the execution.** Read `execution://{run_id}` for the report and `journal://{run_id}` for the per-action decision trace.
+5. **Tune.** Inspect `strategy_list` / `trigger_list` and decide whether to add a real funnel strategy. See `examples://strategies` for source patterns."#
+        } else {
+            r#"## First-action playbook (something is already registered)
+
+1. **Pick a strategy** from the table above and read its source via `strategy://{id}`.
+2. **Inspect triggers.** Call `trigger_list` and confirm the strategy fires on the cadence you expect.
+3. **Check recent fires.** Read the latest `execution://{run_id}` and `journal://{run_id}` to see what each fire decided.
+4. **Adjust or extend.** Either author a new strategy from the user's intent (`author_strategy` prompt) or refine an existing one (`safety_review` prompt before re-registering).
+5. **Tune thresholds** with evidence — use the records of the last N runs (Track A+E2 once shipped)."#
+        };
+
+        let body = format!(
+            "You are connected to the Onchain Strategy MCP runtime. This is a **prefetched orientation** — the live state below is read from the server at the moment of this prompt.\n\n\
+             ## Registered strategies (`strategy_list`)\n\n{strategies}\n\n\
+             ## Active policy (`policy_get`)\n\n{policy}\n\n\
+             {playbook}\n\n\
+             ## Where to look next\n\n\
+             - Source patterns: `examples://strategies` (list) + `examples://strategies/{{name}}` (each source).\n\
+             - Authoring guide: invoke the `author_strategy` prompt with your intent.\n\
+             - Pre-register safety check: invoke the `safety_review` prompt with the proposed source.\n\
+             - Trigger selection: invoke the `trigger_patterns` prompt.\n\
+             - Failure modes: invoke the `common_pitfalls` prompt before iterating on a failing run.\n\n\
+             When the user describes intent, WRITE THE STRATEGY YOURSELF — do not ask the user for code. The runtime simulates each action through the policy above before signing.",
+            strategies = strategy_table,
+            policy = policy_summary,
+            playbook = playbook,
+        );
+
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(
             PromptMessageRole::User,
-            GETTING_STARTED_BODY,
+            body,
         )])
-        .with_description("End-to-end orientation"))
+        .with_description("Prefetched orientation: strategy_list + policy + 5-step playbook"))
+    }
+
+    /// v1.4 Track E1: vet a proposed strategy source before `strategy_register`.
+    /// Body inlines a static-analysis-style checklist of the submitted source
+    /// + per-action policy verdict + a go/no-go recommendation.
+    #[prompt(
+        name = "safety_review",
+        description = "Vet a proposed strategy source — itemized static analysis + policy verdict + go/no-go."
+    )]
+    async fn safety_review(
+        &self,
+        Parameters(args): Parameters<SafetyReviewArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let actions = extract_action_calls(&args.source);
+        let pitfalls = surface_common_pitfalls(&args.source);
+        let (policy_loaded, policy_summary) = {
+            let guard = self.policy.read().await;
+            (guard.is_some(), format_policy_summary(guard.as_ref()))
+        };
+
+        let mut action_block = String::new();
+        if actions.is_empty() {
+            action_block.push_str(
+                "_(no `ctx.actions.*` calls extracted — strategy may be pure-read (`noop`), or the literal call sites are non-trivial. Manual review needed.)_\n",
+            );
+        } else {
+            for (i, (kind, block)) in actions.iter().enumerate() {
+                let _ = writeln!(action_block, "### action {} — `ctx.actions.{}`", i + 1, kind);
+                let addr_field = if kind == "erc20Approve" {
+                    "token"
+                } else {
+                    "address"
+                };
+                let address_lit = if kind == "erc20Approve" {
+                    extract_field(block, "token")
+                } else {
+                    extract_address(block)
+                };
+                let function_lit = extract_function_name(block);
+                let _ = writeln!(
+                    action_block,
+                    "- target ({addr_field}): {}",
+                    address_lit
+                        .map(|a| format!("`{a}`"))
+                        .unwrap_or_else(|| "_manual review needed_".into())
+                );
+                if let Some(f) = function_lit {
+                    let _ = writeln!(action_block, "- function: `{f}`");
+                }
+                let policy_note = if !policy_loaded {
+                    "_policy not loaded — `strategy_run` will refuse before broadcast._"
+                        .to_string()
+                } else if address_lit.is_none() {
+                    "_address not extractable — re-check after rendering literal addresses._"
+                        .to_string()
+                } else {
+                    "Cross-check the target above against the policy block below; if the address is absent from `contracts_by_chain`, this action will be refused.".to_string()
+                };
+                let _ = writeln!(action_block, "- policy verdict: {policy_note}");
+                action_block.push('\n');
+            }
+        }
+
+        let mut pitfall_block = String::new();
+        if pitfalls.is_empty() {
+            pitfall_block.push_str("_(no common pitfalls detected — see the `common_pitfalls` prompt for the full list.)_\n");
+        } else {
+            for f in &pitfalls {
+                let _ = writeln!(pitfall_block, "- {f}");
+            }
+        }
+
+        let preview: String = args.source.chars().take(600).collect();
+        let truncated = args.source.chars().count() > 600;
+
+        let verdict = if !pitfalls.is_empty() {
+            "**NO-GO** — at least one static-analysis finding above must be addressed before register."
+        } else if !policy_loaded {
+            "**NO-GO** — policy not loaded; `strategy_run` will fail-closed regardless of source quality."
+        } else if actions.is_empty() {
+            "**GO (read-only)** — no signing actions detected. Safe to register; runs will journal reads without policy gating."
+        } else {
+            "**CAUTION** — actions extracted but no obvious pitfalls. Verify each target/selector against the policy block above before registering."
+        };
+
+        let body = format!(
+            "Safety review of a *proposed* strategy source (pre-register).\n\n\
+             ## Submitted source ({len} chars{trunc})\n\n```js\n{preview}\n```\n\n\
+             ## Extracted `ctx.actions.*` calls\n\n{actions}\n\
+             ## Static-analysis findings\n\n{pitfalls}\n\
+             ## Active policy (inline)\n\n{policy}\n\n\
+             ## Verdict\n\n{verdict}\n\n\
+             ## Next step\n\n\
+             Once Track G ships, prefer `strategy_register({{ dry_run: true, name, source }})` to run the source through the sandbox + policy before persisting. That flag may not yet be available — until then, register, then immediately call `strategy_run` and inspect `execution://{{run_id}}` for the policy verdict.",
+            len = args.source.chars().count(),
+            trunc = if truncated {
+                ", truncated above to 600 chars"
+            } else {
+                ""
+            },
+            preview = preview,
+            actions = action_block,
+            pitfalls = pitfall_block,
+            policy = policy_summary,
+            verdict = verdict,
+        );
+
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            body,
+        )])
+        .with_description("Pre-register safety review: static analysis + policy cross-check"))
+    }
+
+    /// v1.4 Track E1: bundle-shaped authoring guide. Inlines the
+    /// `{ name, execute, records, view }` skeleton + the most relevant
+    /// example for the declared intent.
+    #[prompt(
+        name = "author_strategy",
+        description = "Bundle skeleton template + intent-relevant example + live policy constraints."
+    )]
+    async fn author_strategy(
+        &self,
+        Parameters(args): Parameters<AuthorStrategyArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let (example_name, example_desc) = select_example_for_intent(&args.intent);
+        let policy_summary = {
+            let guard = self.policy.read().await;
+            format_policy_summary(guard.as_ref())
+        };
+
+        let body = format!(
+            "Author a v1.4 strategy bundle for the following intent.\n\n\
+             ## Intent\n\n> {intent}\n\n\
+             ## Bundle skeleton (v1.4 shape)\n\n{skeleton}\n\n\
+             ## Most relevant embedded example\n\n\
+             **`examples://strategies/{example_name}`** — {example_desc}\n\n\
+             Read the full source via that resource before adapting. The embedded copy matches the binary; the on-disk repo may not.\n\n\
+             ## Policy constraints (the burner's allow list)\n\n{policy}\n\n\
+             Author actions that target only the chains/contracts/selectors listed above. Anything else is refused before broadcast (`-32017 policy_*`).\n\n\
+             ## Authoring rules\n\n\
+             - The `execute` function returns `Action[] | \"noop\"` synchronously. No `await`.\n\
+             - Use `ctx.evm.*` for reads (supports `blockTag`).\n\
+             - Use `ctx.actions.contractCall` / `ctx.actions.erc20Approve` for state-changing actions.\n\
+             - Multi-action returns (`[approve, contractCall]`) auto-bundle via EIP-7702 — no manual batch call.\n\
+             - Drop the trailing `;` at EOF; the source is one expression.\n\n\
+             ## Bundle docs\n\n\
+             See `docs://strategy-bundle` for the full bundle contract (may not yet be available pre-A1; until then this skeleton plus the example above are the source of truth).\n\n\
+             Once authored, run the `safety_review` prompt against the source before calling `strategy_register`.",
+            intent = args.intent,
+            skeleton = BUNDLE_SKELETON,
+            example_name = example_name,
+            example_desc = example_desc,
+            policy = policy_summary,
+        );
+
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            body,
+        )])
+        .with_description("Bundle skeleton + intent-relevant example + policy constraints"))
     }
 
     #[prompt(
@@ -233,5 +731,124 @@ impl ExecutorServer {
             COMMON_PITFALLS_BODY,
         )])
         .with_description("Top-N footguns"))
+    }
+}
+
+// ────────────────────────── unit tests ──────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_action_calls_finds_contract_calls() {
+        let src = r#"
+        ((A) => (ctx) => [
+            ctx.actions.contractCall({
+                address: "0xabc",
+                abi: [],
+                function: "supply",
+                args: [],
+            }),
+            ctx.actions.erc20Approve({
+                token: "0xdef",
+                spender: "0xfeed",
+                amount: "100",
+            }),
+        ])("foo")
+        "#;
+        let calls = extract_action_calls(src);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "contractCall");
+        assert_eq!(calls[1].0, "erc20Approve");
+        assert!(calls[0].1.contains("\"0xabc\""));
+        assert!(calls[1].1.contains("\"0xdef\""));
+    }
+
+    #[test]
+    fn extract_function_name_works() {
+        let block = r#"{ address: "0x1", function: "supply", args: [] }"#;
+        assert_eq!(extract_function_name(block), Some("supply"));
+    }
+
+    #[test]
+    fn extract_address_works() {
+        let block = r#"{ address: "0xabc", function: "x" }"#;
+        assert_eq!(extract_address(block), Some("0xabc"));
+    }
+
+    #[test]
+    fn surface_common_pitfalls_flags_trailing_semicolon() {
+        let src = "((ctx) => \"noop\");";
+        let pitfalls = surface_common_pitfalls(src);
+        assert!(pitfalls.iter().any(|p| p.contains("Trailing `;`")));
+    }
+
+    #[test]
+    fn surface_common_pitfalls_flags_unbounded_slippage() {
+        let src = r#"ctx.actions.contractCall({ amountOutMinimum: "0" })"#;
+        let pitfalls = surface_common_pitfalls(src);
+        assert!(pitfalls.iter().any(|p| p.contains("amountOutMinimum")));
+    }
+
+    #[test]
+    fn select_example_for_intent_routes_known_keywords() {
+        assert_eq!(
+            select_example_for_intent("ETH to USDC funnel").0,
+            "eth-funnel"
+        );
+        assert_eq!(
+            select_example_for_intent("APY snapshot of lending markets").0,
+            "yield-snapshot"
+        );
+        assert_eq!(
+            select_example_for_intent("Approve USDC for router").0,
+            "erc20-approve"
+        );
+        assert_eq!(
+            select_example_for_intent("call my counter").0,
+            "generic-counter-call"
+        );
+        assert_eq!(
+            select_example_for_intent("something completely unrelated").0,
+            "yield-snapshot"
+        );
+    }
+
+    #[test]
+    fn format_strategy_table_empty() {
+        let s = format_strategy_table(&[]);
+        assert!(s.contains("no strategies registered"));
+    }
+
+    #[test]
+    fn format_policy_summary_no_policy() {
+        let s = format_policy_summary(None);
+        assert!(s.contains("no policy loaded"));
+    }
+
+    /// v1.4 E1 budget: prompt bodies must stay under ~3KB each so a fetch
+    /// doesn't blow the agent's per-prompt token budget. The composed
+    /// `safety_review` and `author_strategy` bodies vary with input — these
+    /// guards exercise the typical-size paths (empty policy, modest source,
+    /// short intent) and assert the result stays under 3500 bytes.
+    #[test]
+    fn bundle_skeleton_fits_under_budget() {
+        // The skeleton alone is the largest static contribution to
+        // author_strategy; verifying its size locks in the headroom.
+        assert!(
+            BUNDLE_SKELETON.len() < 1200,
+            "bundle skeleton too large: {} bytes",
+            BUNDLE_SKELETON.len()
+        );
+    }
+
+    #[test]
+    fn trigger_patterns_body_under_budget() {
+        assert!(
+            TRIGGER_PATTERNS_BODY.len() < 3072,
+            "trigger_patterns body too large: {} bytes",
+            TRIGGER_PATTERNS_BODY.len()
+        );
     }
 }

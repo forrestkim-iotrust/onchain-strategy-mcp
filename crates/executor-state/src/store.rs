@@ -36,6 +36,10 @@ impl StateStore {
 
     // ---- Strategy façade ----
 
+    /// Back-compat thin wrapper: registers a legacy (source-only) strategy.
+    /// Hash and id are byte-for-byte identical to v1.0..v1.3 — passing
+    /// `None`/`None` for records/view here is what keeps existing
+    /// `strategy_id` values stable across the v1.4 upgrade.
     pub fn register_strategy(
         &mut self,
         name: &str,
@@ -43,7 +47,32 @@ impl StateStore {
         description: Option<&str>,
         tags: Option<&[String]>,
     ) -> Result<strategies::RegisterOutcome, StateError> {
-        strategies::register(&self.conn, name, source, description, tags)
+        strategies::register(&self.conn, name, source, description, tags, None, None)
+    }
+
+    /// v1.4 bundle register. Pass `records_json` (canonical JSON of the
+    /// `records` schema) and/or `view_source` (the `view` function JS source)
+    /// to opt into self-describing strategy semantics. The strategy id mixes
+    /// all three (execute + records + view) so distinct bundles never collide.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_strategy_bundle(
+        &mut self,
+        name: &str,
+        source: &str,
+        description: Option<&str>,
+        tags: Option<&[String]>,
+        records_json: Option<&str>,
+        view_source: Option<&str>,
+    ) -> Result<strategies::RegisterOutcome, StateError> {
+        strategies::register(
+            &self.conn,
+            name,
+            source,
+            description,
+            tags,
+            records_json,
+            view_source,
+        )
     }
 
     pub fn list_strategies(
@@ -129,6 +158,18 @@ impl StateStore {
         strategy_id: &str,
     ) -> Result<Vec<runs::Run>, StateError> {
         runs::list_runs_for_strategy(&self.conn, strategy_id)
+    }
+
+    /// v1.4 Track C: filtered, paginated run-summary listing for the
+    /// `execution://list` MCP resource. See [`runs::RunListFilter`] for filter
+    /// semantics; `limit` defaults to [`runs::LIST_RUNS_DEFAULT_LIMIT`] (50)
+    /// and is hard-capped at [`runs::LIST_RUNS_LIMIT_CAP`] (500). Results
+    /// are sorted newest-first by `(started_at DESC, id DESC)`.
+    pub fn list_runs(
+        &self,
+        filter: &runs::RunListFilter,
+    ) -> Result<Vec<runs::RunSummary>, StateError> {
+        runs::list_runs(&self.conn, filter)
     }
 
     /// D-12: transition-guarded status update. See

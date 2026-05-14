@@ -19,3 +19,26 @@ pub struct ReviewEvmStrategyArgs {
     #[schemars(description = "Strategy id whose source should be reviewed.")]
     pub strategy_id: String,
 }
+
+/// v1.4 Track E1: `safety_review` accepts a proposed strategy source string
+/// (not a registered id) — the prompt body inlines static-analysis of that
+/// source against the loaded policy before the agent calls `strategy_register`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Arguments for the `safety_review` prompt — vets a proposed strategy source before register."
+)]
+pub struct SafetyReviewArgs {
+    #[schemars(description = "Proposed strategy source (JS) to evaluate against the loaded policy.")]
+    pub source: String,
+}
+
+/// v1.4 Track E1: `author_strategy` accepts free-text intent and returns a
+/// bundle skeleton + the most relevant embedded example.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Arguments for the `author_strategy` prompt — bundle-shaped authoring guide."
+)]
+pub struct AuthorStrategyArgs {
+    #[schemars(description = "Free-text user intent (e.g. \"ETH→USDC→Aave funnel\").")]
+    pub intent: String,
+}

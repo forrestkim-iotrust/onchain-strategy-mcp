@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "StrategyRegisterInput",
-  "description": "Register a JavaScript strategy (content-addressed; idempotent on same source).",
+  "description": "Register a JavaScript strategy (content-addressed; idempotent on same bundle). The required `source` is the `execute` function; supplying `records` and/or `view` upgrades the strategy to a v1.4 self-documenting bundle so `strategy://{id}/view` returns rich state. Bundles without `records` or `view` retain the legacy single-function semantics and the same id-hash they had pre-v1.4.",
   "type": "object",
   "properties": {
     "description": {
@@ -11,9 +11,26 @@
         "null"
       ]
     },
+    "dry_run": {
+      "description": "If true, simulate the register (validate + sandbox sanity) without persisting. Returns the would-be strategy_id plus any warnings. Default false.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "name": {
       "description": "Human-readable name; UNIQUE among non-deleted strategies.",
       "type": "string"
+    },
+    "records": {
+      "description": "Optional records schema for v1.4 bundle. Array of { name, on, capture } specs declaring what to capture from confirmed action effects. Stored as canonical JSON; max 32 KiB total.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/RecordSpec"
+      }
     },
     "source": {
       "description": "JavaScript source — executed in a sandbox starting Phase 3. Max 256 KiB.",
@@ -28,11 +45,42 @@
       "items": {
         "type": "string"
       }
+    },
+    "view": {
+      "description": "Optional view function JS source. Same sandbox as strategies; max 64 KiB.",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "additionalProperties": false,
   "required": [
     "name",
     "source"
-  ]
+  ],
+  "$defs": {
+    "RecordSpec": {
+      "description": "v1.4 strategy bundle: one records-capture spec.",
+      "type": "object",
+      "properties": {
+        "capture": {
+          "description": "Map from output field name to a capture expression string. Expressions resolve over `args[N]`, `logs.<Event>[<filter>].<field>`, `tx.hash|block|ts|gas_used`, and `view.<helper>(args)`."
+        },
+        "name": {
+          "description": "Lower-case identifier used as the field key in `view(ctx, records)` (e.g. \"supply\"). Must be unique within the bundle.",
+          "type": "string"
+        },
+        "on": {
+          "description": "Match clause selecting which confirmed actions trigger this capture. Object with `kind` (e.g. \"contractCall\", \"erc20Transfer\", \"log\") plus kind-specific filters (`target`, `selector`, `token`, `from`, `to`, `address`, `topics`)."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "on",
+        "capture"
+      ]
+    }
+  }
 }

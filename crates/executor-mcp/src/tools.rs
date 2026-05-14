@@ -5,7 +5,8 @@
 //!     strategy_delete, execution_get (returns not_found until runs are
 //!     inserted — Plan 02-03 wires `strategy_run_once` to start emitting runs).
 //!   - Still placeholders: strategy_run_once (Phase 6), policy_get (Phase 5,
-//!     returns empty shape), policy_update (Phase 5, unimplemented_err).
+//!     returns empty shape). v1.4: `policy_update` tool removed — policy is
+//!     edited via `.local/policy.toml` only.
 
 use alloy_primitives::{Address, U256};
 use executor_core::schema::{
@@ -14,7 +15,6 @@ use executor_core::schema::{
         ActionDecision, ExecutionActionReport, ExecutionGetResponse, ExecutionIdInput, GateVerdict,
         JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
     },
-    policy::PolicyUpdateInput,
     strategy::{
         StrategyDeleteResponse, StrategyGetInput, StrategyGetResponse, StrategyIdInput,
         StrategyListItem, StrategyListResponse, StrategyRegisterInput, StrategyRegisterResponse,
@@ -50,7 +50,7 @@ use crate::{
     errors::{
         invalid_params, map_evm_error, map_policy_error, map_runtime_error, map_simulation_error,
         map_state_error, policy_not_loaded, storage_error, strategy_deleted,
-        strategy_invalid_output, strategy_runtime_error, unimplemented_err,
+        strategy_invalid_output, strategy_runtime_error,
     },
     server::ExecutorServer,
     validation::{
@@ -160,7 +160,10 @@ impl ExecutorServer {
 
     #[tool(
         name = "strategy_register",
-        description = "Register a JavaScript strategy (content-addressed; idempotent on same source; returns `already_exists` + `existing_*` fields when the source was previously registered)."
+        description = "Register a JavaScript strategy (content-addressed; idempotent on same bundle). \
+Supplying `records` and/or `view` opts into the v1.4 self-documenting bundle — `strategy://{id}/view` \
+then returns rich state (principal, accrued interest, cycle counts, etc.) instead of the generic \
+balance fallback. Pass `dry_run: true` to validate without persisting (returns the would-be id)."
     )]
     async fn strategy_register(
         &self,
@@ -169,22 +172,63 @@ impl ExecutorServer {
         // 1. D-09 handler-side re-check (schema maxLength is advisory).
         validate_register(&input).map_err(invalid_params)?;
 
-        // 2. Hand the blocking DB call to the blocking pool (Pattern 2).
+        // 2. Canonicalise the bundle pieces. `records` becomes a stable JSON
+        //    string so the strategy_id hash is reproducible across machines.
+        let records_json = match input.records.as_ref() {
+            None => None,
+            Some(specs) => Some(
+                serde_json::to_string(specs)
+                    .map_err(|e| invalid_params(format!("records serialize: {e}")))?,
+            ),
+        };
+        let view_source = input.view.clone();
+        let dry_run = input.dry_run.unwrap_or(false);
+
+        // 3. dry_run short-circuit: compute the would-be id and return early
+        //    without touching the DB (P5/P6 design — destructive ops must be
+        //    explicit, registration is destructive in the sense that it
+        //    consumes a unique name + content-address slot).
+        if dry_run {
+            let would_be_id = executor_state::hash_bundle(
+                &input.source,
+                records_json.as_deref(),
+                view_source.as_deref(),
+            );
+            let resp = serde_json::json!({
+                "dry_run": true,
+                "would_be_strategy_id": would_be_id,
+                "name": input.name,
+                "has_bundle": records_json.is_some() || view_source.is_some(),
+            });
+            return json_result(&resp);
+        }
+
+        // 4. Hand the blocking DB call to the blocking pool (Pattern 2).
+        //    Route through the bundle-aware register so records/view are
+        //    persisted and folded into the id hash.
         let state = self.state.clone();
+        let name = input.name.clone();
+        let source = input.source.clone();
+        let description = input.description.clone();
+        let tags = input.tags.clone();
+        let records_for_blocking = records_json.clone();
+        let view_for_blocking = view_source.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let mut store = state.blocking_lock();
-            store.register_strategy(
-                &input.name,
-                &input.source,
-                input.description.as_deref(),
-                input.tags.as_deref(),
+            store.register_strategy_bundle(
+                &name,
+                &source,
+                description.as_deref(),
+                tags.as_deref(),
+                records_for_blocking.as_deref(),
+                view_for_blocking.as_deref(),
             )
         })
         .await
         .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
         .map_err(map_state_error)?;
 
-        // 3. Shape the response (D-01b / D-07).
+        // 5. Shape the response (D-01b / D-07).
         let resp = match outcome {
             RegisterOutcome::Created(s) => StrategyRegisterResponse {
                 strategy_id: s.id,
@@ -315,7 +359,7 @@ impl ExecutorServer {
         &self,
         Parameters(input): Parameters<ExecutionIdInput>,
     ) -> Result<CallToolResult, McpError> {
-        build_execution_report(self.state.clone(), input.execution_id)
+        build_execution_report(self.state.clone(), input.run_id)
             .await
             .and_then(|report| json_result(&report))
     }
@@ -794,17 +838,6 @@ impl ExecutorServer {
         .await?;
 
         Ok((run_id, outcome))
-    }
-
-    #[tool(
-        name = "policy_update",
-        description = "Replace the current policy. NOT YET IMPLEMENTED — lands in Phase 5."
-    )]
-    async fn policy_update(
-        &self,
-        Parameters(_input): Parameters<PolicyUpdateInput>,
-    ) -> Result<CallToolResult, McpError> {
-        Err(unimplemented_err("policy_update", 5))
     }
 
     #[tool(

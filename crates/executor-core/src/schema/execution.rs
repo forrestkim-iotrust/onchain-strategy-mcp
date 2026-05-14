@@ -5,11 +5,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[schemars(description = "Input for execution_get; the legacy field name accepts a run ID.")]
+#[schemars(description = "Input for execution_get; identifies a run by its run ID.")]
 pub struct ExecutionIdInput {
     /// Run ID returned from a previous `strategy_run`.
     #[schemars(description = "Run ID returned from a previous `strategy_run`.")]
-    pub execution_id: String,
+    pub run_id: String,
 }
 
 /// Placeholder. Phase 6에서 rlp 인코딩된 tx payload 필드 추가.
