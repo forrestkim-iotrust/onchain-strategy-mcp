@@ -514,6 +514,23 @@ impl ExecutorServer {
         .await
         .cloned()
     }
+
+    /// v1.11 Track E2: assemble a [`resources::ViewEvm`] for resource
+    /// dispatch off the read-only paths (prompts, web). Mirrors the inline
+    /// construction in `read_resource` but lives on the server so the
+    /// prompt module can call it without duplicating the field plumbing.
+    /// Provider acquisition is fallible (RPC); degrades to `None` so
+    /// non-view callers never fail on an unreachable RPC.
+    pub(crate) async fn build_view_evm(&self) -> resources::ViewEvm {
+        let provider = self.evm_provider().await.ok();
+        let chain_id = self.chain_id().await.ok();
+        resources::ViewEvm {
+            provider,
+            evm_config: self.evm_config.clone(),
+            price_cache: Some(self.price_cache.clone()),
+            chain_id,
+        }
+    }
 }
 
 // NOTE: Phase 1's `Default for ExecutorServer` and no-arg `new()` are REMOVED.

@@ -42,3 +42,14 @@ pub struct AuthorStrategyArgs {
     #[schemars(description = "Free-text user intent (e.g. \"ETH→USDC→Aave funnel\").")]
     pub intent: String,
 }
+
+/// v1.11 Track E2: `triage_run` accepts a run id and composes execution +
+/// journal + receipts + policy decisions into a structured forensics report.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Arguments for the `triage_run` prompt — composes a run-forensics report."
+)]
+pub struct TriageRunArgs {
+    #[schemars(description = "Run id (26-char Crockford ULID) to triage.")]
+    pub run_id: String,
+}

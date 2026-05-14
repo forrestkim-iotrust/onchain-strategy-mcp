@@ -14,9 +14,11 @@
 //! self-doc prompts take no arguments — represented by [`EmptyPromptArgs`].
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use executor_core::schema::prompt_args::{
-    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, WriteEvmStrategyArgs,
+    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, TriageRunArgs,
+    WriteEvmStrategyArgs,
 };
 use executor_policy::LoadedPolicy;
 use executor_state::StrategySummary;
@@ -29,7 +31,9 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
+use crate::resources::dispatch_uri_to_json;
 use crate::server::ExecutorServer;
 
 /// Argless prompt payload. rmcp's `#[prompt]` macro requires a `Parameters<T>`
@@ -732,6 +736,719 @@ impl ExecutorServer {
         )])
         .with_description("Top-N footguns"))
     }
+
+    /// v1.11 Track E2: compose execution + journal + receipts + policy
+    /// decisions for a specific `run_id` into a structured "why did this
+    /// happen" report. One prompt call answers questions like "어제 실패한
+    /// 거 왜 실패했어?" without forcing the agent to chain
+    /// `execution://`, `journal://`, `evm_receipt`, `policy://current`
+    /// reads itself.
+    #[prompt(
+        name = "triage_run",
+        description = "Forensics report for a single run: execution + journal + receipts + likely cause."
+    )]
+    async fn triage_run(
+        &self,
+        Parameters(args): Parameters<TriageRunArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let run_id = args.run_id.trim().to_string();
+        if !is_ulid_shape(&run_id) {
+            return Err(McpError::new(
+                rmcp::model::ErrorCode(-32602),
+                format!("invalid run_id: {run_id}"),
+                Some(json!({
+                    "code": "invalid_params",
+                    "kind": "invalid_params",
+                    "detail": format!("run_id `{run_id}` is not a 26-char Crockford ULID"),
+                    "hint": "call execution://list?status=failed&limit=10 to find a valid run_id",
+                })),
+            ));
+        }
+
+        let state = self.state.clone();
+        let evm = self.build_view_evm().await;
+
+        // Prefetch execution + journal in order. If execution is not found
+        // surface as invalid_params (we already validated the shape — a
+        // missing row is the agent's data error, not server malformed).
+        let execution = match dispatch_uri_to_json(
+            format!("execution://{run_id}"),
+            state.clone(),
+            evm.clone(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(McpError::new(
+                    rmcp::model::ErrorCode(-32602),
+                    format!("run {run_id} not found"),
+                    Some(json!({
+                        "code": "invalid_params",
+                        "kind": "invalid_params",
+                        "detail": e.message,
+                        "hint": "call execution://list?status=failed&limit=10 to find a valid run_id",
+                    })),
+                ));
+            }
+        };
+        let journal = dispatch_uri_to_json(
+            format!("journal://{run_id}"),
+            state.clone(),
+            evm.clone(),
+        )
+        .await
+        .unwrap_or_else(|_| json!({ "actions": [], "decisions": [], "source_reads": [], "logs": [] }));
+
+        // Per-action receipt fetch, wrapped in 2s timeout. RPC errors degrade
+        // to a placeholder receipt so the report still renders.
+        let provider = self.evm_provider().await.ok();
+        let journal_actions = journal
+            .get("actions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut receipts_by_tx: std::collections::HashMap<String, ReceiptFetch> =
+            std::collections::HashMap::new();
+        let mut rpc_error_seen = false;
+        for a in &journal_actions {
+            if let Some(tx) = extract_tx_hash_from_action(a) {
+                if receipts_by_tx.contains_key(&tx) {
+                    continue;
+                }
+                let fetched = fetch_receipt_with_timeout(provider.clone(), &tx).await;
+                if matches!(fetched, ReceiptFetch::Error(_) | ReceiptFetch::Timeout) {
+                    rpc_error_seen = true;
+                }
+                receipts_by_tx.insert(tx, fetched);
+            }
+        }
+        // Also walk execution.actions[].tx_hash so a journaled action that
+        // didn't carry tx_hash in its payload_json still gets a receipt if
+        // the execution row has one.
+        let exec_actions = execution
+            .get("actions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for a in &exec_actions {
+            if let Some(tx) = a.get("tx_hash").and_then(Value::as_str) {
+                let tx = tx.to_string();
+                if receipts_by_tx.contains_key(&tx) {
+                    continue;
+                }
+                let fetched = fetch_receipt_with_timeout(provider.clone(), &tx).await;
+                if matches!(fetched, ReceiptFetch::Error(_) | ReceiptFetch::Timeout) {
+                    rpc_error_seen = true;
+                }
+                receipts_by_tx.insert(tx, fetched);
+            }
+        }
+
+        // Resolve strategy name from `strategy://{id}` when possible — best
+        // effort, falls back to "(unknown)".
+        let strategy_id = execution
+            .get("strategy_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let strategy_name = if strategy_id.is_empty() {
+            None
+        } else {
+            dispatch_uri_to_json(format!("strategy://{strategy_id}"), state.clone(), evm.clone())
+                .await
+                .ok()
+                .and_then(|v| {
+                    v.get("strategy")
+                        .and_then(|s| s.get("name"))
+                        .and_then(Value::as_str)
+                        .map(|s| s.to_string())
+                })
+        };
+
+        let body = format_triage_report(
+            &run_id,
+            strategy_name.as_deref(),
+            &execution,
+            &journal,
+            &exec_actions,
+            &journal_actions,
+            &receipts_by_tx,
+            rpc_error_seen,
+        );
+
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            body,
+        )])
+        .with_description("Run forensics: execution + journal + receipts + likely cause"))
+    }
+}
+
+// ───────────────── v1.11 Track E2 — triage_run helpers ─────────────────
+
+/// 26-char Crockford ULID shape check. Matches the runtime's
+/// `validate_run_resource_id` posture (alphanumeric, length-26) but lives
+/// here so the prompt can surface a tailored `invalid_params` hint before
+/// any resource dispatch fires.
+fn is_ulid_shape(s: &str) -> bool {
+    s.len() == 26 && s.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Per-tx receipt fetch outcome. `Found` carries the alloy-serialised
+/// receipt JSON; `NotFound` means the node returned `null`; `Timeout` /
+/// `Error` mean RPC degraded and the report should mention it.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Error.0 retained for future surface (currently only matched as a marker)
+enum ReceiptFetch {
+    Found(Value),
+    NotFound,
+    Timeout,
+    Error(String),
+    NoProvider,
+}
+
+async fn fetch_receipt_with_timeout(
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    tx_hash: &str,
+) -> ReceiptFetch {
+    let provider = match provider {
+        Some(p) => p,
+        None => return ReceiptFetch::NoProvider,
+    };
+    let hash = match tx_hash.parse::<alloy_primitives::B256>() {
+        Ok(h) => h,
+        Err(e) => return ReceiptFetch::Error(format!("tx_hash parse: {e}")),
+    };
+    match tokio::time::timeout(
+        Duration::from_millis(2000),
+        executor_evm::get_tx_receipt(provider, hash),
+    )
+    .await
+    {
+        Err(_) => ReceiptFetch::Timeout,
+        Ok(Err(e)) => ReceiptFetch::Error(format!("{e}")),
+        Ok(Ok(None)) => ReceiptFetch::NotFound,
+        Ok(Ok(Some(v))) => ReceiptFetch::Found(v),
+    }
+}
+
+/// Extract `tx_hash` from a journal action's `payload_json` string. Returns
+/// `None` for actions without a tx (validation_error, simulation_failure,
+/// pre-broadcast policy_denied).
+fn extract_tx_hash_from_action(a: &Value) -> Option<String> {
+    let payload_str = a.get("payload_json").and_then(Value::as_str)?;
+    let payload: Value = serde_json::from_str(payload_str).ok()?;
+    payload
+        .get("tx_hash")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+}
+
+fn short_hex(s: &str) -> String {
+    if s.len() <= 10 {
+        return s.to_string();
+    }
+    if let Some(rest) = s.strip_prefix("0x") {
+        if rest.len() > 8 {
+            return format!("0x{}…{}", &rest[..4], &rest[rest.len() - 4..]);
+        }
+    }
+    format!("{}…{}", &s[..4], &s[s.len() - 4..])
+}
+
+fn duration_str(started: Option<&str>, finished: Option<&str>) -> String {
+    let (Some(s), Some(f)) = (started, finished) else {
+        return "—".into();
+    };
+    let Ok(s_ts) = chrono::DateTime::parse_from_rfc3339(s) else {
+        return "—".into();
+    };
+    let Ok(f_ts) = chrono::DateTime::parse_from_rfc3339(f) else {
+        return "—".into();
+    };
+    let dur = f_ts.signed_duration_since(s_ts);
+    let ms = dur.num_milliseconds();
+    if ms.abs() < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", (ms as f64) / 1000.0)
+    }
+}
+
+/// Classify an action row (from `journal.actions` payload) plus matched
+/// execution row into succeeded / failed / other for the report split.
+fn classify_action_status(exec_row: Option<&Value>) -> ActionStatus {
+    let Some(row) = exec_row else {
+        return ActionStatus::Other;
+    };
+    match row.get("status").and_then(Value::as_str).unwrap_or("") {
+        "succeeded" => ActionStatus::Succeeded,
+        "failed" => ActionStatus::Failed,
+        _ => ActionStatus::Other,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionStatus {
+    Succeeded,
+    Failed,
+    Other,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_triage_report(
+    run_id: &str,
+    strategy_name: Option<&str>,
+    execution: &Value,
+    journal: &Value,
+    exec_actions: &[Value],
+    journal_actions: &[Value],
+    receipts_by_tx: &std::collections::HashMap<String, ReceiptFetch>,
+    rpc_error_seen: bool,
+) -> String {
+    let strategy_id = execution
+        .get("strategy_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let status = execution
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let started = execution.get("started_at").and_then(Value::as_str);
+    let finished = execution.get("finished_at").and_then(Value::as_str);
+    let action_name = execution.get("action").and_then(Value::as_str);
+    let entry = action_name.unwrap_or("execute");
+    let strategy_short = if strategy_id.is_empty() {
+        "—".to_string()
+    } else {
+        short_hex(strategy_id)
+    };
+
+    // Header
+    let mut out = String::new();
+    let _ = writeln!(out, "# Run {run_id} — triage report");
+    out.push('\n');
+    let _ = writeln!(out, "## What ran");
+    let _ = writeln!(
+        out,
+        "- Strategy: `{}` (id `{}`)",
+        strategy_name.unwrap_or("(unknown)"),
+        strategy_short
+    );
+    let _ = writeln!(out, "- Entry point: {entry}");
+    let _ = writeln!(
+        out,
+        "- Started: {} · Finished: {} · Duration: {}",
+        started.unwrap_or("—"),
+        finished.unwrap_or("—"),
+        duration_str(started, finished),
+    );
+    // Decide the high-level outcome label. Match the table the spec asks
+    // for (succeeded/failed/noop). For status=`succeeded` we also peek at
+    // the journal actions for a `noop` outcome since RunStatus::Succeeded
+    // covers both signing-success and a pure-read no-op.
+    let any_noop = journal_actions
+        .iter()
+        .any(|a| a.get("outcome").and_then(Value::as_str) == Some("noop"));
+    let outcome_label = match status {
+        "succeeded" if any_noop && exec_actions.is_empty() => "noop",
+        "succeeded" => "succeeded",
+        "failed" | "policy_denied" | "simulation_denied" => "failed",
+        other => other,
+    };
+    let _ = writeln!(out, "- Outcome: {outcome_label}");
+    // Trigger context — best-effort from the execution payload (today's
+    // wire shape doesn't expose trigger id on `execution://`, so we just
+    // mark it manual unless the journal source_reads have a hint).
+    let trigger_hint = journal
+        .get("source_reads")
+        .and_then(Value::as_array)
+        .and_then(|reads| reads.iter().find(|r| r.get("kind").and_then(Value::as_str) == Some("trigger_fire")))
+        .and_then(|r| r.get("target").and_then(Value::as_str))
+        .map(|t| t.to_string());
+    let trigger_line = match trigger_hint {
+        Some(t) => format!("- Trigger: {t}"),
+        None => "- Trigger: manual".to_string(),
+    };
+    let _ = writeln!(out, "{trigger_line}");
+    out.push('\n');
+
+    // Build a lookup: action_index -> exec_row.
+    let mut exec_by_idx: std::collections::HashMap<u64, &Value> = std::collections::HashMap::new();
+    for r in exec_actions {
+        if let Some(i) = r.get("action_index").and_then(Value::as_u64) {
+            exec_by_idx.insert(i, r);
+        }
+    }
+
+    // What succeeded
+    let _ = writeln!(out, "## What succeeded");
+    let mut any_succeeded = false;
+    for (i, exec_row) in exec_actions
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| classify_action_status(Some(r)) == ActionStatus::Succeeded)
+    {
+        any_succeeded = true;
+        let idx = exec_row
+            .get("action_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(i as u64);
+        let tx_hash = exec_row.get("tx_hash").and_then(Value::as_str);
+        let gas_used = exec_row.get("gas_used").and_then(Value::as_str);
+        let (target, selector) =
+            extract_target_and_selector(journal_actions.get(idx as usize));
+        let block_number = tx_hash
+            .and_then(|h| receipts_by_tx.get(h))
+            .and_then(|r| match r {
+                ReceiptFetch::Found(v) => v
+                    .get("blockNumber")
+                    .and_then(|b| b.as_str().map(String::from).or_else(|| b.as_u64().map(|n| format!("{n}")))),
+                _ => None,
+            });
+        let _ = writeln!(
+            out,
+            "- action[{idx}] → target `{}` · selector `{}` · tx `{}` · gas {} · block {}",
+            target.as_deref().unwrap_or("—"),
+            selector.as_deref().unwrap_or("—"),
+            tx_hash.map(short_hex).unwrap_or_else(|| "—".into()),
+            gas_used.unwrap_or("—"),
+            block_number.unwrap_or_else(|| "—".into()),
+        );
+    }
+    if !any_succeeded {
+        let _ = writeln!(out, "_(none)_");
+    }
+    out.push('\n');
+
+    // Decisions index (action_index -> Vec of decisions)
+    let decisions = journal
+        .get("decisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // What failed
+    let _ = writeln!(out, "## What failed");
+    let mut any_failed = false;
+    for (i, exec_row) in exec_actions
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| classify_action_status(Some(r)) == ActionStatus::Failed)
+    {
+        any_failed = true;
+        let idx = exec_row
+            .get("action_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(i as u64);
+        let tx_hash = exec_row.get("tx_hash").and_then(Value::as_str);
+        let gas_used = exec_row.get("gas_used").and_then(Value::as_str);
+        let (target, selector) =
+            extract_target_and_selector(journal_actions.get(idx as usize));
+        let revert_reason = revert_reason_for(exec_row, tx_hash, receipts_by_tx);
+        let _ = writeln!(
+            out,
+            "- action[{idx}] → target `{}` · selector `{}` · tx `{}` · revert `{}` · gas {}",
+            target.as_deref().unwrap_or("—"),
+            selector.as_deref().unwrap_or("—"),
+            tx_hash.map(short_hex).unwrap_or_else(|| "—".into()),
+            revert_reason.as_deref().unwrap_or("—"),
+            gas_used.unwrap_or("—"),
+        );
+        let gating: Vec<&Value> = decisions
+            .iter()
+            .filter(|d| d.get("action_index").and_then(Value::as_i64) == Some(idx as i64))
+            .collect();
+        for d in gating {
+            let verdict = d.get("verdict").and_then(Value::as_str).unwrap_or("—");
+            let rule = d.get("rule").and_then(Value::as_str).unwrap_or("—");
+            let detail = d.get("detail").and_then(Value::as_str).unwrap_or("—");
+            let _ = writeln!(
+                out,
+                "  - decision: verdict `{verdict}` · rule `{rule}` · detail `{detail}`"
+            );
+        }
+    }
+    // Also surface any failure that didn't materialise as an execution_action
+    // row — e.g. policy_denied before broadcast. Look for journal actions
+    // whose outcome is a known failure variant without a matching exec row.
+    let failure_outcomes = ["validation_error", "runtime_error", "simulation_failure", "policy_denied"];
+    for (i, jrow) in journal_actions.iter().enumerate() {
+        let outcome = jrow
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !failure_outcomes.contains(&outcome) {
+            continue;
+        }
+        if exec_by_idx.contains_key(&(i as u64)) {
+            continue;
+        }
+        any_failed = true;
+        let _ = writeln!(
+            out,
+            "- journal[{i}] → outcome `{outcome}` (no broadcast)"
+        );
+    }
+    // Surface pre-action policy denials (action_index = -1 / null gating).
+    let pre_denials: Vec<&Value> = decisions
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.get("verdict").and_then(Value::as_str),
+                Some("deny") | Some("fail")
+            )
+                && d.get("action_index")
+                    .and_then(Value::as_i64)
+                    .map(|i| i < 0)
+                    .unwrap_or(false)
+        })
+        .collect();
+    for d in pre_denials {
+        any_failed = true;
+        let rule = d.get("rule").and_then(Value::as_str).unwrap_or("—");
+        let detail = d.get("detail").and_then(Value::as_str).unwrap_or("—");
+        let _ = writeln!(
+            out,
+            "- decision (pre-broadcast): verdict `deny` · rule `{rule}` · detail `{detail}`"
+        );
+    }
+    if !any_failed {
+        let _ = writeln!(out, "_(none)_");
+    }
+    out.push('\n');
+
+    // Likely cause + Next actions
+    let (cause, next_actions) = derive_likely_cause(
+        execution,
+        &decisions,
+        exec_actions,
+        journal_actions,
+        receipts_by_tx,
+        rpc_error_seen,
+        strategy_id,
+    );
+    let _ = writeln!(out, "## Likely cause");
+    let _ = writeln!(out, "{cause}");
+    out.push('\n');
+    let _ = writeln!(out, "## Next actions");
+    for line in next_actions {
+        let _ = writeln!(out, "- {line}");
+    }
+
+    out
+}
+
+/// Best-effort target + selector extraction from a journal action's
+/// payload_json. Returns the target contract (`address` or `token`) and
+/// the function selector (`function` name for contract_call, `"approve"`
+/// for erc20Approve).
+fn extract_target_and_selector(action: Option<&Value>) -> (Option<String>, Option<String>) {
+    let Some(action) = action else {
+        return (None, None);
+    };
+    let Some(payload_str) = action.get("payload_json").and_then(Value::as_str) else {
+        return (None, None);
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(payload_str) else {
+        return (None, None);
+    };
+    // contract_call shape
+    let addr = payload
+        .get("action")
+        .and_then(|a| a.get("address"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("action")
+                .and_then(|a| a.get("token"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("address").and_then(Value::as_str))
+        .or_else(|| payload.get("token").and_then(Value::as_str))
+        .map(|s| short_hex(s));
+    let func = payload
+        .get("action")
+        .and_then(|a| a.get("function"))
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("function").and_then(Value::as_str))
+        .or_else(|| {
+            // erc20Approve: no `function`, but it's always `approve(address,uint256)`.
+            payload.get("action").and_then(|a| a.get("spender")).map(|_| "approve")
+        })
+        .map(|s| s.to_string());
+    (addr, func)
+}
+
+/// Pull a revert reason out of either the execution row's `error_detail`
+/// or the receipt's `revertReason` field (alloy attaches it when present).
+fn revert_reason_for(
+    exec_row: &Value,
+    tx_hash: Option<&str>,
+    receipts_by_tx: &std::collections::HashMap<String, ReceiptFetch>,
+) -> Option<String> {
+    if let Some(d) = exec_row.get("error_detail").and_then(Value::as_str) {
+        return Some(d.to_string());
+    }
+    if let Some(d) = exec_row.get("error_kind").and_then(Value::as_str) {
+        return Some(d.to_string());
+    }
+    let tx = tx_hash?;
+    if let Some(ReceiptFetch::Found(v)) = receipts_by_tx.get(tx) {
+        if let Some(r) = v.get("revertReason").and_then(Value::as_str) {
+            return Some(r.to_string());
+        }
+    }
+    None
+}
+
+/// Heuristic: returns `(likely_cause_paragraph, next_actions_bullets)`
+/// using the priority order documented in the v1.11 Track E2 spec.
+fn derive_likely_cause(
+    execution: &Value,
+    decisions: &[Value],
+    exec_actions: &[Value],
+    journal_actions: &[Value],
+    receipts_by_tx: &std::collections::HashMap<String, ReceiptFetch>,
+    rpc_error_seen: bool,
+    strategy_id: &str,
+) -> (String, Vec<String>) {
+    // 1. Policy deny — any decision row with verdict=deny.
+    if let Some((idx, rule, detail)) = decisions.iter().find_map(|d| {
+        if matches!(
+                d.get("verdict").and_then(Value::as_str),
+                Some("deny") | Some("fail")
+            ) {
+            let i = d.get("action_index").and_then(Value::as_i64).unwrap_or(-1);
+            let rule = d.get("rule").and_then(Value::as_str).unwrap_or("(unknown)");
+            let detail = d.get("detail").and_then(Value::as_str).unwrap_or("(no detail)");
+            Some((i, rule.to_string(), detail.to_string()))
+        } else {
+            None
+        }
+    }) {
+        let cause = format!(
+            "Policy gate blocked at action[{idx}]: rule `{rule}` — `{detail}`. \
+             Inspect `policy://current` and consider `policy_set` to relax the offending clause."
+        );
+        let actions = vec![
+            "Read `policy://current` to see the active allow-list.".into(),
+            format!(
+                "If the rule should change, call `policy_set` with a narrower clause covering rule `{rule}`."
+            ),
+            "Re-run via `strategy_run({{strategy_id}})` after `policy_set`.".into(),
+        ];
+        return (cause, actions);
+    }
+
+    // 2. Failed action whose revert mentions insufficient/allowance/balance.
+    let failed_with_pre = exec_actions.iter().find_map(|r| {
+        if r.get("status").and_then(Value::as_str) != Some("failed") {
+            return None;
+        }
+        let tx_hash = r.get("tx_hash").and_then(Value::as_str);
+        let reason = revert_reason_for(r, tx_hash, receipts_by_tx)?;
+        let lower = reason.to_lowercase();
+        if lower.contains("insufficient") || lower.contains("allowance") || lower.contains("balance") {
+            Some(reason)
+        } else {
+            None
+        }
+    });
+    if let Some(reason) = failed_with_pre {
+        let cause = format!(
+            "On-chain pre-condition not met: `{reason}`. Check `runtime://status` \
+             (RPC + signer) and the strategy's pre-trade validation logic."
+        );
+        let actions = vec![
+            "Read `runtime://status` and confirm RPC + signer are healthy.".into(),
+            "Re-read the strategy source via `strategy://{id}` and add a pre-trade balance/allowance check.".into(),
+            "Inspect the failing action's pre-state via `evm_view` against the target contract.".into(),
+        ];
+        return (cause, actions);
+    }
+
+    // 3. Failed action with receipt status=0 and no decoded reason.
+    let opaque_revert = exec_actions.iter().find_map(|r| {
+        if r.get("status").and_then(Value::as_str) != Some("failed") {
+            return None;
+        }
+        let tx_hash = r.get("tx_hash").and_then(Value::as_str)?;
+        let receipt = receipts_by_tx.get(tx_hash)?;
+        let ReceiptFetch::Found(v) = receipt else {
+            return None;
+        };
+        let status_zero = v.get("status").and_then(Value::as_str) == Some("0x0")
+            || v.get("status").and_then(Value::as_u64) == Some(0)
+            || r.get("receipt_status").and_then(Value::as_str) == Some("reverted");
+        let has_reason = v
+            .get("revertReason")
+            .map(|x| !x.is_null())
+            .unwrap_or(false)
+            || r.get("error_detail")
+                .and_then(Value::as_str)
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
+        if status_zero && !has_reason {
+            Some(tx_hash.to_string())
+        } else {
+            None
+        }
+    });
+    if let Some(tx) = opaque_revert {
+        let cause = format!(
+            "Transaction `{}` reverted without a string reason — likely an `if (...) revert();` \
+             in the target contract. Inspect via `evm_view` against the contract's pre-state.",
+            short_hex(&tx)
+        );
+        let actions = vec![
+            "Run `evm_view` with a `(ctx) => ctx.evm.readContract({...})` snippet against the gating contract state.".into(),
+            "Compare expected vs actual storage slots before the call.".into(),
+        ];
+        return (cause, actions);
+    }
+
+    // 4. Outcome=noop and no actions emitted.
+    let outcome = execution.get("status").and_then(Value::as_str).unwrap_or("");
+    let any_noop = journal_actions
+        .iter()
+        .any(|a| a.get("outcome").and_then(Value::as_str) == Some("noop"));
+    if (outcome == "succeeded" || outcome == "noop") && any_noop && exec_actions.is_empty() {
+        let cause = format!(
+            "Strategy returned `noop` — the entry condition didn't match. Inspect the strategy source via `strategy://{strategy_id}`."
+        );
+        let actions = vec![
+            format!("Read `strategy://{strategy_id}` and re-check the entry condition."),
+            "Re-fire via `strategy_run` once the condition is expected to match.".into(),
+        ];
+        return (cause, actions);
+    }
+
+    // 5. RPC error during receipt fetch.
+    if rpc_error_seen {
+        let cause = "Couldn't fetch one or more receipts; RPC may be degraded. Check `runtime://status.rpc`.".to_string();
+        let actions = vec![
+            "Read `runtime://status` and confirm `rpc` is healthy.".into(),
+            "Re-trigger the prompt once the RPC has recovered to populate the receipt fields.".into(),
+        ];
+        return (cause, actions);
+    }
+
+    // 6. Default
+    let cause = format!(
+        "Surface inspection insufficient. Read `journal://{}` for the full record.",
+        execution
+            .get("run_id")
+            .and_then(Value::as_str)
+            .unwrap_or("{run_id}")
+    );
+    let actions = vec![
+        "Read the full `journal://{run_id}` payload.".into(),
+        "Read `execution://list?strategy_id=...` for sibling runs to compare.".into(),
+    ];
+    (cause, actions)
 }
 
 // ────────────────────────── unit tests ──────────────────────────
