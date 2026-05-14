@@ -386,6 +386,24 @@ impl Sandbox {
                 .set("readContract", read_contract_fn)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
+            // v1.8 `ctx.evm.getLogs` — block-range / topic filter wrapping
+            // `eth_getLogs`. Bound regardless of provider presence; strategies
+            // that invoke it against a `None`-provider host get a typed JS
+            // error (same envelope as `ctx.evm.readContract`).
+            {
+                let provider_local = provider_clone.clone();
+                let cfg_local = evm_cfg_clone.clone();
+                let buf_local = evm_reads.clone();
+                let f = Function::new(
+                    c.clone(),
+                    make_get_logs_closure(provider_local, cfg_local, buf_local),
+                )
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+                evm_obj
+                    .set("getLogs", f)
+                    .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            }
+
             // Phase 4 D-06 / D-07 / CTX-02 / CTX-03 / CTX-04: ERC20 + native
             // helper bindings. Structured forms live under
             // `ctx.evm.readErc20.*` and `ctx.evm.readNative.*`; the flat
@@ -529,6 +547,22 @@ impl Sandbox {
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
             ctx_obj
                 .set("address", address_obj)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+
+            // v1.8 `ctx.abi.*` — pure host-side decoders for raw event log
+            // payloads. No provider, no journal, no async. Currently exposes
+            // `decodeUint256(hexData, offsetBytes?)` so strategies summing
+            // non-indexed uint256 fields from `ctx.evm.getLogs` can avoid
+            // hand-rolling bigint parsing in JS.
+            let abi_obj = Object::new(c.clone())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            let decode_uint256_fn = Function::new(c.clone(), make_decode_uint256_closure())
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            abi_obj
+                .set("decodeUint256", decode_uint256_fn)
+                .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
+            ctx_obj
+                .set("abi", abi_obj)
                 .map_err(|e| classify_qjs_error(&c, e, &timed_out))?;
 
             // v1.7 (`ctx.price.usd`): one helper. Synchronous from JS;
@@ -1536,6 +1570,417 @@ fn native_block_number_host_binding<'js>(
         });
 
     json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+// ─── v1.8: ctx.evm.getLogs + ctx.abi.decodeUint256 ──────────────────────────
+
+/// Closure factory for `ctx.evm.getLogs`. Mirrors the
+/// `make_read_contract_closure` shape so the install site is uniform with
+/// every other `ctx.evm.*` helper.
+fn make_get_logs_closure(
+    provider: Option<std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: executor_evm::EvmConfig,
+    evm_reads: Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> impl for<'js> Fn(rquickjs::Object<'js>) -> rquickjs::Result<rquickjs::Value<'js>> + 'static {
+    move |args: rquickjs::Object<'_>| {
+        get_logs_host_binding(&args, provider.as_ref(), &cfg, &evm_reads)
+    }
+}
+
+/// v1.8 host binding for `ctx.evm.getLogs(filter)`.
+///
+/// `filter` shape:
+/// ```text
+/// {
+///   address: string | string[],
+///   fromBlock?: string | number,  // default "earliest"
+///   toBlock?:   string | number,  // default "latest"
+///   topics?:    Array<string | string[] | null>,
+///   blockTag?:  string            // alias: pins both fromBlock + toBlock
+/// }
+/// ```
+///
+/// Behaviour:
+/// - Validates address(es) and topics as 0x-prefixed hex up-front (alloy
+///   helpers).
+/// - Rejects unknown keys to keep the contract narrow.
+/// - 5s RPC timeout (shared `EvmConfig::call_timeout`); on timeout throws a
+///   typed JS error with the wire-safe `EvmError::Display`.
+/// - Hard 5000-log cap; the underlying `executor_evm::get_logs` surfaces
+///   `EvmError::Decode { category: "get_logs_too_many" }` which we re-throw
+///   with the "narrow fromBlock or topics" hint appended.
+/// - D-13 journals one `evm_logs` row per call.
+fn get_logs_host_binding<'js>(
+    args: &Object<'js>,
+    provider: Option<&std::sync::Arc<executor_evm::DynProvider>>,
+    cfg: &executor_evm::EvmConfig,
+    evm_reads: &Rc<RefCell<Vec<crate::runtime::EvmReadRecord>>>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use executor_evm::read::{GetLogsInput, LogBlockTag, TopicSlot};
+    let ctx = args.ctx().clone();
+
+    let provider = match provider {
+        Some(p) => p.clone(),
+        None => {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.evm.getLogs not available: no provider configured",
+            ));
+        }
+    };
+
+    // Reject unknown keys so future shape evolutions are noisy not silent.
+    const KNOWN: &[&str] = &["address", "fromBlock", "toBlock", "topics", "blockTag"];
+    for prop in args.props::<String, rquickjs::Value>() {
+        let (k, _v) = prop.map_err(|e| throw_js_error(&ctx, &format!("filter iter: {e}")))?;
+        if !KNOWN.contains(&k.as_str()) {
+            return Err(throw_js_error(
+                &ctx,
+                &format!(
+                    "ctx.evm.getLogs: unknown key {k:?}; accepted keys: \
+                     address, fromBlock, toBlock, topics, blockTag"
+                ),
+            ));
+        }
+    }
+
+    // address: string | string[]
+    let address_v: rquickjs::Value = args.get("address")?;
+    if address_v.is_undefined() || address_v.is_null() {
+        return Err(throw_js_error(
+            &ctx,
+            "ctx.evm.getLogs: 'address' is required (string or string[])",
+        ));
+    }
+    let mut addresses: Vec<String> = Vec::new();
+    if let Some(s) = address_v.as_string() {
+        let one = s.to_string()?;
+        if !executor_evm::address::is_address(&one) {
+            return Err(throw_js_error(
+                &ctx,
+                &format!("ctx.evm.getLogs: 'address' is not a valid 0x address: {one:?}"),
+            ));
+        }
+        addresses.push(one);
+    } else if let Some(arr) = address_v.as_array() {
+        for i in 0..arr.len() {
+            let item: rquickjs::Value = arr
+                .get::<rquickjs::Value>(i)
+                .map_err(|e| throw_js_error(&ctx, &format!("address[{i}]: {e}")))?;
+            let s_js = item.as_string().ok_or_else(|| {
+                throw_js_error(
+                    &ctx,
+                    &format!("ctx.evm.getLogs: address[{i}] must be a string"),
+                )
+            })?;
+            let s = s_js.to_string()?;
+            if !executor_evm::address::is_address(&s) {
+                return Err(throw_js_error(
+                    &ctx,
+                    &format!(
+                        "ctx.evm.getLogs: address[{i}] is not a valid 0x address: {s:?}"
+                    ),
+                ));
+            }
+            addresses.push(s);
+        }
+        if addresses.is_empty() {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.evm.getLogs: 'address' array must contain at least one entry",
+            ));
+        }
+    } else {
+        return Err(throw_js_error(
+            &ctx,
+            "ctx.evm.getLogs: 'address' must be a string or string[]",
+        ));
+    }
+
+    // blockTag (alias for both fromBlock + toBlock).
+    let block_tag_alias: Option<LogBlockTag> = match args.get::<_, rquickjs::Value>("blockTag") {
+        Ok(v) if v.is_undefined() || v.is_null() => None,
+        Ok(v) => Some(parse_log_block_tag(&v).map_err(|e| throw_js_error(&ctx, &e))?),
+        Err(_) => None,
+    };
+
+    let (from_block, to_block) = if let Some(alias) = block_tag_alias {
+        (alias, alias)
+    } else {
+        let from = match args.get::<_, rquickjs::Value>("fromBlock") {
+            Ok(v) if v.is_undefined() || v.is_null() => LogBlockTag::Earliest,
+            Ok(v) => parse_log_block_tag(&v).map_err(|e| {
+                throw_js_error(&ctx, &format!("ctx.evm.getLogs: 'fromBlock' {e}"))
+            })?,
+            Err(_) => LogBlockTag::Earliest,
+        };
+        let to = match args.get::<_, rquickjs::Value>("toBlock") {
+            Ok(v) if v.is_undefined() || v.is_null() => LogBlockTag::Latest,
+            Ok(v) => parse_log_block_tag(&v).map_err(|e| {
+                throw_js_error(&ctx, &format!("ctx.evm.getLogs: 'toBlock' {e}"))
+            })?,
+            Err(_) => LogBlockTag::Latest,
+        };
+        (from, to)
+    };
+
+    // topics — optional array of (string | string[] | null) entries.
+    let topics_v: rquickjs::Value = match args.get::<_, rquickjs::Value>("topics") {
+        Ok(v) => v,
+        Err(_) => rquickjs::Value::new_undefined(ctx.clone()),
+    };
+    let mut topic_slots: Vec<TopicSlot> = Vec::new();
+    if !topics_v.is_undefined() && !topics_v.is_null() {
+        let arr = topics_v.as_array().ok_or_else(|| {
+            throw_js_error(
+                &ctx,
+                "ctx.evm.getLogs: 'topics' must be an array (slots may be null/string/string[])",
+            )
+        })?;
+        if arr.len() > 4 {
+            return Err(throw_js_error(
+                &ctx,
+                &format!(
+                    "ctx.evm.getLogs: 'topics' has {} entries; eth_getLogs supports up to 4",
+                    arr.len()
+                ),
+            ));
+        }
+        for i in 0..arr.len() {
+            let item: rquickjs::Value = arr
+                .get::<rquickjs::Value>(i)
+                .map_err(|e| throw_js_error(&ctx, &format!("topics[{i}]: {e}")))?;
+            // Walk through serde_json so the shape rules are centralized in
+            // `TopicSlot::from_json` (and reusable from any future caller).
+            let as_json = qjs_value_to_json(&item)
+                .map_err(|e| throw_js_error(&ctx, &format!("topics[{i}]: {e}")))?;
+            let slot = TopicSlot::from_json(&as_json)
+                .map_err(|e| throw_js_error(&ctx, &format!("topics[{i}]: {e}")))?;
+            topic_slots.push(slot);
+        }
+    }
+
+    let input = GetLogsInput {
+        addresses: addresses.clone(),
+        from_block,
+        to_block,
+        topics: topic_slots,
+    };
+
+    // Bridge async → sync (mirrors `read_contract_host_binding`).
+    let result: Result<serde_json::Value, executor_evm::EvmError> =
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => handle.block_on(executor_evm::get_logs(provider.clone(), cfg, input)),
+            Err(_) => {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        throw_js_error(
+                            &ctx,
+                            &format!("evm rpc error: runtime build failed: {e}"),
+                        )
+                    })?;
+                rt.block_on(executor_evm::get_logs(provider.clone(), cfg, input))
+            }
+        };
+
+    let json = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let stable = e.to_string();
+            tracing::warn!(
+                detail = %e.detail_for_log(),
+                kind = %e.data_kind(),
+                "ctx.evm.getLogs failed"
+            );
+            // Append the "narrow the filter" hint for the cap-exceeded case so
+            // a strategy author who hits 5000+ matches sees actionable advice.
+            let final_msg = if matches!(
+                &e,
+                executor_evm::EvmError::Decode { category, .. } if category == "get_logs_too_many"
+            ) {
+                format!(
+                    "{stable}: response exceeded {} logs — narrow fromBlock or topics",
+                    executor_evm::GET_LOGS_MAX_RESULTS
+                )
+            } else {
+                stable
+            };
+            return Err(throw_js_error(&ctx, &final_msg));
+        }
+    };
+
+    // D-13 journal row (kind="evm_logs"). Target encodes the first address +
+    // a stable "getLogs" suffix so audit trails are greppable.
+    let first_addr_lower = addresses[0].to_lowercase();
+    let target = format!("{first_addr_lower}:getLogs");
+    let payload = serde_json::json!({
+        "helper":   "getLogs",
+        "addresses": addresses,
+        "from_block": log_block_tag_to_json(from_block),
+        "to_block":   log_block_tag_to_json(to_block),
+        "topic_count": json.as_array().map(|a| a.len()).unwrap_or(0),
+    });
+    evm_reads
+        .borrow_mut()
+        .push(crate::runtime::EvmReadRecord {
+            target,
+            payload_json: payload,
+        });
+
+    json_to_qjs_value(&ctx, &json).map_err(|e| throw_js_error(&ctx, &e))
+}
+
+/// Parse a JS value as a [`executor_evm::LogBlockTag`]. Accepts:
+/// - `"latest" | "pending" | "earliest" | "finalized" | "safe"`
+/// - decimal string (`"12345"`) or hex string (`"0x3039"`)
+/// - JS Number (non-negative integer)
+fn parse_log_block_tag(v: &rquickjs::Value<'_>) -> Result<executor_evm::LogBlockTag, String> {
+    use executor_evm::LogBlockTag;
+    if let Some(s) = v.as_string() {
+        let s: String = s.to_string().map_err(|e| e.to_string())?;
+        return match s.as_str() {
+            "latest" => Ok(LogBlockTag::Latest),
+            "pending" => Ok(LogBlockTag::Pending),
+            "earliest" => Ok(LogBlockTag::Earliest),
+            "finalized" => Ok(LogBlockTag::Finalized),
+            "safe" => Ok(LogBlockTag::Safe),
+            other => {
+                // Hex (0x-prefixed) or decimal.
+                let parsed = if let Some(h) = other.strip_prefix("0x").or_else(|| other.strip_prefix("0X")) {
+                    u64::from_str_radix(h, 16).ok()
+                } else {
+                    other.parse::<u64>().ok()
+                };
+                parsed
+                    .map(LogBlockTag::Number)
+                    .ok_or_else(|| format!(
+                        "must be 'latest'|'pending'|'earliest'|'finalized'|'safe'|<decimal|hex number>, got {other:?}"
+                    ))
+            }
+        };
+    }
+    if let Some(n) = v.as_int() {
+        if n < 0 {
+            return Err(format!("number must be non-negative, got {n}"));
+        }
+        return Ok(LogBlockTag::Number(n as u64));
+    }
+    if let Some(n) = v.as_float() {
+        if n < 0.0 || !n.is_finite() || n.fract() != 0.0 {
+            return Err(format!("number must be a finite non-negative integer, got {n}"));
+        }
+        return Ok(LogBlockTag::Number(n as u64));
+    }
+    Err("must be a string tag or non-negative integer".into())
+}
+
+fn log_block_tag_to_json(tag: executor_evm::LogBlockTag) -> serde_json::Value {
+    use executor_evm::LogBlockTag;
+    match tag {
+        LogBlockTag::Latest => serde_json::Value::String("latest".into()),
+        LogBlockTag::Pending => serde_json::Value::String("pending".into()),
+        LogBlockTag::Earliest => serde_json::Value::String("earliest".into()),
+        LogBlockTag::Finalized => serde_json::Value::String("finalized".into()),
+        LogBlockTag::Safe => serde_json::Value::String("safe".into()),
+        LogBlockTag::Number(n) => serde_json::Value::from(n),
+    }
+}
+
+/// `ctx.abi.decodeUint256(hexData: string, offsetBytes?: number) -> string`
+///
+/// Pulls a 32-byte big-endian uint256 from a hex blob (typically a log's
+/// `data` field). Output is the decimal string representation — matches the
+/// D-03 uint256 convention used everywhere else (`erc20Balance`, etc.).
+///
+/// `offsetBytes` defaults to 0. Throws on:
+/// - non-string `hexData`
+/// - non-integer / negative `offsetBytes`
+/// - odd-length / invalid hex
+/// - `offsetBytes + 32` exceeding the byte length
+fn make_decode_uint256_closure()
+-> impl for<'js> Fn(rquickjs::function::Rest<rquickjs::Value<'js>>) -> rquickjs::Result<rquickjs::Value<'js>>
++ 'static {
+    move |args: rquickjs::function::Rest<rquickjs::Value<'_>>| {
+        let raw = args.0;
+        // We need a Ctx for throwing; the rquickjs Function glue guarantees
+        // a context is always available via the first arg or via `Rest`'s
+        // underlying call frame. Be defensive when empty.
+        let ctx = match raw.first() {
+            Some(v) => v.ctx().clone(),
+            None => return Err(rquickjs::Error::Exception),
+        };
+        if raw.is_empty() {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.abi.decodeUint256: expects at least 1 arg (hexData)",
+            ));
+        }
+        let hex_str = raw[0]
+            .as_string()
+            .ok_or_else(|| throw_js_error(&ctx, "ctx.abi.decodeUint256: 'hexData' must be a string"))?
+            .to_string()?;
+        let offset_bytes: usize = if raw.len() > 1 {
+            let v = &raw[1];
+            if v.is_undefined() || v.is_null() {
+                0
+            } else if let Some(i) = v.as_int() {
+                if i < 0 {
+                    return Err(throw_js_error(
+                        &ctx,
+                        "ctx.abi.decodeUint256: 'offsetBytes' must be non-negative",
+                    ));
+                }
+                i as usize
+            } else if let Some(f) = v.as_float() {
+                if !f.is_finite() || f < 0.0 || f.fract() != 0.0 {
+                    return Err(throw_js_error(
+                        &ctx,
+                        "ctx.abi.decodeUint256: 'offsetBytes' must be a non-negative integer",
+                    ));
+                }
+                f as usize
+            } else {
+                return Err(throw_js_error(
+                    &ctx,
+                    "ctx.abi.decodeUint256: 'offsetBytes' must be a non-negative integer",
+                ));
+            }
+        } else {
+            0
+        };
+
+        let stripped = hex_str
+            .strip_prefix("0x")
+            .or_else(|| hex_str.strip_prefix("0X"))
+            .unwrap_or(&hex_str);
+        if !stripped.len().is_multiple_of(2) || !stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(throw_js_error(
+                &ctx,
+                "ctx.abi.decodeUint256: 'hexData' must be even-length 0x-prefixed hex",
+            ));
+        }
+        let bytes: Vec<u8> = (0..stripped.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&stripped[i..i + 2], 16).unwrap())
+            .collect();
+        if offset_bytes + 32 > bytes.len() {
+            return Err(throw_js_error(
+                &ctx,
+                &format!(
+                    "ctx.abi.decodeUint256: offsetBytes {offset_bytes} + 32 > data length {}",
+                    bytes.len()
+                ),
+            ));
+        }
+        let slice: [u8; 32] = bytes[offset_bytes..offset_bytes + 32].try_into().unwrap();
+        let u = executor_evm::U256::from_be_bytes(slice);
+        let s = u.to_string();
+        Ok(rquickjs::String::from_str(ctx.clone(), &s)
+            .map_err(|e| throw_js_error(&ctx, &format!("string alloc: {e}")))?
+            .into_value())
+    }
 }
 
 /// v1.7 `ctx.price.usd` closure factory. Captures (provider, cfg, cache,
