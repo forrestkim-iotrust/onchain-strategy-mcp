@@ -40,6 +40,15 @@ Stored as canonical JSON; max 32 KiB total.")]
 strategies; max 64 KiB.")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
+    /// v1.10 strategy bundle: optional map of named one-shot helpers. Each \
+    /// entry is `name → JS source`; the value evaluates to `(ctx, args) => Action[]` \
+    /// (same shape as `execute`). Invoked manually via \
+    /// `strategy_run({strategy_id, action: "name"})`; triggers cannot pick \
+    /// actions. Reserved names: `execute`, `view`, `records`, `default`.
+    #[schemars(description = "Optional named one-shot helpers, `{name: js_source}`. \
+Invoke via `strategy_run({action: \"name\"})`. Reserved names rejected.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<std::collections::HashMap<String, String>>,
     /// When true, run the registration through validation + sandbox sanity \
     /// without DB insert. Returns the would-be id and any policy/sandbox \
     /// warnings. No mutation, no idempotency token consumed.
@@ -86,6 +95,15 @@ pub struct StrategyIdInput {
 pub struct StrategyRunInput {
     #[schemars(description = "Strategy id (lower-case hex SHA-256, 64 chars).")]
     pub strategy_id: String,
+    /// v1.10 named actions: optional bundle entry point. When omitted (or
+    /// `null`), invokes the bundle's `execute` function — same as the
+    /// trigger pathway. When set, must match a key in `bundle.actions`;
+    /// empty/whitespace/reserved/unknown names are rejected with
+    /// `unknown_action`. Triggers cannot pick action names; this field is
+    /// manual-call only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Named action to invoke instead of `execute`. Manual-only.")]
+    pub action: Option<String>,
 }
 
 /// Deprecated alias preserved for one phase. Phase 4 may delete it.
@@ -204,6 +222,13 @@ pub struct StrategyListItem {
     /// v1.8: 1-based version of this row within its lineage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    /// v1.10: sorted names of the bundle's `actions[*]` entries (the
+    /// manual-only one-shots). Empty when the bundle declared none. Lets
+    /// list-time consumers (UI badges, agent discovery) advertise which
+    /// `strategy_run({action})` calls are valid without dragging the full
+    /// JS source into the list response.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

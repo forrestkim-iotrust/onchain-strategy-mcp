@@ -4,6 +4,16 @@
   "description": "Register a JavaScript strategy (content-addressed; idempotent on same bundle). The required `source` is the `execute` function; supplying `records` and/or `view` upgrades the strategy to a v1.4 self-documenting bundle so `strategy://{id}/view` returns rich state. Bundles without `records` or `view` retain the legacy single-function semantics and the same id-hash they had pre-v1.4.",
   "type": "object",
   "properties": {
+    "actions": {
+      "description": "Optional named one-shot helpers, `{name: js_source}`. Invoke via `strategy_run({action: \"name\"})`. Reserved names rejected.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "description": {
       "description": "Optional free-form description (max 4096 chars).",
       "type": [

@@ -471,6 +471,59 @@ the output prettier without any extra work:
 
 None of this is enforced; it's only display polish.
 
+## actions (v1.10) — named one-shot helpers
+
+v1.10 adds a fourth optional slot to the bundle: `actions`, a map of
+`{name: js_source}` declaring **manual-only one-shot** functions sharing
+the bundle's records pool and lineage.
+
+```js
+{
+  execute: (ctx) => Action[] | "noop",   // trigger-driven, same as before
+  records: [...],                         // shared with actions
+  view:    (ctx, r) => ({...}),           // shared with actions
+  actions: {                              // NEW
+    withdrawAll: (ctx) => Action[],       // shape identical to execute
+    sellDust:    (ctx) => Action[],
+  }
+}
+```
+
+Invocation:
+
+```jsonc
+// existing — runs `execute`
+strategy_run({strategy_id})
+
+// v1.10 — runs `bundle.actions.withdrawAll`
+strategy_run({strategy_id, action: "withdrawAll"})
+```
+
+Rules:
+
+- **records is shared.** Both `execute` and any `actions[*]` write to the
+  same capture pool keyed by `records[].name`. Your `view` sees the
+  combined history — no per-action namespacing.
+- **lineage is preserved.** Re-registering a bundle that only changes
+  `actions` bumps the version (and the strategy_id hash) but keeps the
+  same `lineage_id`; attached triggers and historical records follow.
+- **Triggers cannot pick actions.** A trigger always invokes `execute`.
+  This is a hard policy gate so a misconfigured trigger can't auto-fire
+  `withdrawAll` or similar destructive one-shots. Manual call only.
+- **`runs.action`** stamps every run row with the entry point invoked.
+  `NULL` = `execute`; otherwise the action name. The web UI's run list
+  surfaces this in the `entry` column.
+- **Reserved action names** that the bundle declaration rejects:
+  `execute`, `view`, `records`, `default`. Empty / whitespace-only names
+  and empty source bodies are likewise rejected at register time.
+- **Errors at run time** (unknown name / reserved / empty) surface as
+  `-32602 invalid_params` with `data.kind = "unknown_action"` and a
+  `data.available_actions` list so the agent can self-correct.
+
+Discoverability: the `actions` field on `strategy://{id}` lists the
+declared action names; `strategy_register` likewise echoes them in the
+response when `dry_run` is true.
+
 ## Where to next
 
 - `examples://strategies/eth-funnel-bundle` — the eth-funnel pattern as a
@@ -916,6 +969,17 @@ fn enrich_strategy_body(
         contracts_touched_value.as_ref(),
         policy_value.as_ref(),
     );
+    // v1.10: surface the bundle's named action keys so agents discover
+    // what they can pass as `strategy_run({action: "..."})` without
+    // peeking at the JS source. Sorted, BTreeMap-natural order.
+    let action_names: Vec<String> = s
+        .actions_json
+        .as_deref()
+        .and_then(|j| {
+            serde_json::from_str::<std::collections::BTreeMap<String, serde_json::Value>>(j).ok()
+        })
+        .map(|m| m.into_keys().collect())
+        .unwrap_or_default();
 
     let resp = StrategyGetResponse {
         strategy_id: s.id,
@@ -937,6 +1001,15 @@ fn enrich_strategy_body(
         m.insert(
             "policy_alignment".to_string(),
             crate::alignment::to_json(&alignment),
+        );
+        m.insert(
+            "actions".to_string(),
+            serde_json::Value::Array(
+                action_names
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
         );
     }
     Ok(body)
@@ -1033,6 +1106,8 @@ async fn read_execution_list(
                 "started_at": s.started_at,
                 "finished_at": s.finished_at,
                 "action_count": s.action_count,
+                // v1.10: NULL → execute path; string → manual `strategy_run({action})`.
+                "action": s.action,
             })
         })
         .collect();

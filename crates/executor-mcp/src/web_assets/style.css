@@ -240,6 +240,23 @@ table.t tr:last-child td { border-bottom: none; }
 .badge.partial { color: var(--partial); border-color: #d8ccac; background: #f7f1e0; }
 .badge.tag     { color: var(--body); }
 
+/* ─── v1.10 named-action chips ──────────────────────────── */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--hairline2);
+  border-radius: 11px;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--soft);
+  cursor: default;
+}
+
 /* ─── Expand/collapse ───────────────────────────────────── */
 .disclose {
   cursor: pointer;

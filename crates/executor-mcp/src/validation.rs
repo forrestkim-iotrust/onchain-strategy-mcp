@@ -130,6 +130,8 @@ mod tests {
             // v1.4 bundle fields — not exercised by validation tests.
             records: None,
             view: None,
+            // v1.10 named actions — likewise not exercised here.
+            actions: None,
             dry_run: None,
         }
     }

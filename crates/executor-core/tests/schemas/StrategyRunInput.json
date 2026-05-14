@@ -4,6 +4,13 @@
   "description": "Execute a registered JavaScript strategy once in a sandbox.",
   "type": "object",
   "properties": {
+    "action": {
+      "description": "Named action to invoke instead of `execute`. Manual-only.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "strategy_id": {
       "description": "Strategy id (lower-case hex SHA-256, 64 chars).",
       "type": "string"

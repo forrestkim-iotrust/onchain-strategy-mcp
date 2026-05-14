@@ -157,7 +157,11 @@ impl Dispatcher {
                 }
             };
             let result = server
-                .run_strategy_with_event(&target_id, Some(e.payload.clone()))
+                // v1.10: triggers always invoke `execute` — they cannot
+                // pick a named action. This is a hard policy gate so a
+                // misconfigured trigger cannot auto-fire withdraw / other
+                // destructive one-shots.
+                .run_strategy_with_event(&target_id, Some(e.payload.clone()), None)
                 .await;
             match result {
                 Ok((run_id, _outcome)) => {

@@ -19,6 +19,13 @@
       "description": "List item — note: `source` is intentionally absent (D-07a).",
       "type": "object",
       "properties": {
+        "action_names": {
+          "description": "v1.10: sorted names of the bundle's `actions[*]` entries (the\nmanual-only one-shots). Empty when the bundle declared none. Lets\nlist-time consumers (UI badges, agent discovery) advertise which\n`strategy_run({action})` calls are valid without dragging the full\nJS source into the list response.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "created_at": {
           "type": "string"
         },

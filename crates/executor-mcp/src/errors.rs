@@ -83,6 +83,36 @@ pub mod hints {
     pub const STRATEGY_BUNDLE_DOCS: &str = "see docs://strategy-bundle";
 }
 
+/// v1.10: build an `unknown_action` error. Surfaces as `-32602 invalid_params`
+/// (the caller passed a name that doesn't resolve to a bundle action) with
+/// `data.kind = "unknown_action"`, the offending `action` name, and the
+/// strategy's `available_actions` so the agent can self-correct without a
+/// second round-trip. Used both for missing names AND reserved-key
+/// collisions (`execute`, `view`, `records`, `default`).
+pub fn unknown_action(
+    strategy_id: &str,
+    action: &str,
+    available_actions: &[String],
+    hint: impl Into<String>,
+) -> McpError {
+    let hint = require_hint(hint.into());
+    McpError::new(
+        ErrorCode::INVALID_PARAMS,
+        format!(
+            "unknown action '{action}' on strategy {strategy_id}; available: [{}]",
+            available_actions.join(", "),
+        ),
+        Some(json!({
+            "code": "invalid_params",
+            "kind": "unknown_action",
+            "strategy_id": strategy_id,
+            "action": action,
+            "available_actions": available_actions,
+            "hint": hint,
+        })),
+    )
+}
+
 /// Build a `STRATEGY_DELETED` (-32011) error. Carries `data.code = "strategy_deleted"`
 /// and `data.strategy_id` so agents can re-register before retrying.
 pub fn strategy_deleted(strategy_id: &str, hint: impl Into<String>) -> McpError {

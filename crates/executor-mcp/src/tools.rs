@@ -54,13 +54,20 @@ use crate::{
     errors::{
         invalid_params, map_evm_error, map_policy_error, map_runtime_error, map_simulation_error,
         map_state_error, policy_not_loaded, storage_error, strategy_deleted,
-        strategy_invalid_output, strategy_runtime_error,
+        strategy_invalid_output, strategy_runtime_error, unknown_action,
     },
     server::ExecutorServer,
     validation::{
         validate_action_kind_allowlisted, validate_register, validate_strategy_id_format,
     },
 };
+
+/// v1.10: action names colliding with bundle field keys are rejected at the
+/// register boundary AND when passed to `strategy_run` so a typo can never
+/// silently route around `execute`. Kept centralised here so both call
+/// sites agree.
+pub(crate) const RESERVED_ACTION_KEYS: &[&str] =
+    &["execute", "view", "records", "default"];
 
 // ─────────── v1.2 Trigger Core inline input types ───────────
 
@@ -170,6 +177,53 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         let view_source = input.view.clone();
         let dry_run = input.dry_run.unwrap_or(false);
 
+        // v1.10 named actions: canonicalise + validate.
+        //   - Reject empty map (use `None` to mean "no actions").
+        //   - Reject blank / reserved names so `strategy_run({action:"execute"})`
+        //     can't silently route into a user-declared shadow.
+        //   - Reject empty source bodies — every action must be runnable.
+        //   - Re-serialise via BTreeMap so the canonical JSON has stable key
+        //     order; this is what gets folded into the strategy_id hash.
+        let actions_json: Option<String> = match input.actions.as_ref() {
+            None => None,
+            Some(map) if map.is_empty() => None,
+            Some(map) => {
+                use std::collections::BTreeMap;
+                let mut canonical: BTreeMap<String, String> = BTreeMap::new();
+                for (raw_name, raw_src) in map.iter() {
+                    let name = raw_name.trim();
+                    if name.is_empty() {
+                        return Err(invalid_params(
+                            "actions: name must be non-empty (got whitespace-only key)",
+                        ));
+                    }
+                    if RESERVED_ACTION_KEYS.contains(&name) {
+                        return Err(invalid_params(format!(
+                            "actions: '{name}' is reserved (execute / view / records / default); rename it"
+                        )));
+                    }
+                    if raw_src.trim().is_empty() {
+                        return Err(invalid_params(format!(
+                            "actions['{name}']: JS source must be non-empty"
+                        )));
+                    }
+                    if canonical.contains_key(name) {
+                        // Whitespace-equivalent duplicates collapse onto each
+                        // other; surface the conflict instead of silently
+                        // dropping one.
+                        return Err(invalid_params(format!(
+                            "actions: duplicate name after trim: '{name}'"
+                        )));
+                    }
+                    canonical.insert(name.to_string(), raw_src.clone());
+                }
+                Some(
+                    serde_json::to_string(&canonical)
+                        .map_err(|e| invalid_params(format!("actions serialize: {e}")))?,
+                )
+            }
+        };
+
         // 3. v1.5 Track 1B: static extraction. Runs AFTER validate_register so
         //    we don't waste regex passes on rejected inputs, BEFORE any DB
         //    touch so dry_run can echo the extraction without persistence.
@@ -206,6 +260,14 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         //    explicit, registration is destructive in the sense that it
         //    consumes a unique name + content-address slot).
         if dry_run {
+            // v1.10: dry_run echoes the legacy `hash_bundle` (no lineage, no
+            // actions) so existing pre-v1.10 agents see the same id they'd
+            // see in real registers of pre-v1.10 bundles. Bundles that
+            // declare `actions` will get a different id at real-register
+            // time (v1.8/v1.10 lineage-folded hash) — that's a known
+            // limitation we accept here because dry_run is advisory and
+            // the response already includes `has_actions` so the agent
+            // can tell.
             let would_be_id = executor_state::hash_bundle(
                 &input.source,
                 records_json.as_deref(),
@@ -216,6 +278,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 "would_be_strategy_id": would_be_id,
                 "name": input.name,
                 "has_bundle": records_json.is_some() || view_source.is_some(),
+                "has_actions": actions_json.is_some(),
                 "contracts_touched": contracts_touched_value,
                 "policy_alignment": alignment_value,
             });
@@ -234,6 +297,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         let records_for_blocking = records_json.clone();
         let view_for_blocking = view_source.clone();
         let contracts_for_blocking = contracts_touched_json_str.clone();
+        let actions_for_blocking = actions_json.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let mut store = state.blocking_lock();
             store.register_strategy_bundle(
@@ -244,9 +308,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 records_for_blocking.as_deref(),
                 view_for_blocking.as_deref(),
                 Some(contracts_for_blocking.as_str()),
-                // v1.10 actions wiring will land in the next sub-task; legacy
-                // and v1.4–v1.9 callers pass None and keep existing hashes.
-                None,
+                actions_for_blocking.as_deref(),
             )
         })
         .await
@@ -412,12 +474,14 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         // STEP 1: validate input format (D-09).
         validate_strategy_id_format(&input.strategy_id).map_err(invalid_params)?;
 
-        // v1.2 Trigger Core (Stream D): delegate to the shared
-        // `run_strategy_with_event` pipeline. The MCP tool surfaces `event = None`;
-        // the trigger dispatcher passes `Some(payload)` so strategies can read
-        // `ctx.event`.
+        // v1.2 Trigger Core (Stream D) / v1.10 named actions: delegate to the
+        // shared `run_strategy_with_event` pipeline. The MCP tool surfaces
+        // `event = None` (the trigger dispatcher passes `Some(payload)` so
+        // strategies can read `ctx.event`). When `input.action` is set we
+        // route the call to `bundle.actions[name]` instead of `execute`;
+        // triggers never pass action — manual-only by design.
         let (run_id, outcome) = self
-            .run_strategy_with_event(&input.strategy_id, None)
+            .run_strategy_with_event(&input.strategy_id, None, input.action.as_deref())
             .await?;
 
         // Re-read the run row to populate the response envelope.
@@ -451,6 +515,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         &self,
         strategy_id: &str,
         event: Option<serde_json::Value>,
+        action: Option<&str>,
     ) -> Result<(String, StrategyOutcome), McpError> {
         // STEP B (early — D-15 fail-closed): snapshot the policy. Cloning here
         // keeps the RwLock guard out of the spawn_blocking / .await boundary
@@ -480,12 +545,80 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
             ));
         }
 
-        // STEP 3: insert run (Queued).
+        // STEP 2b (v1.10 named actions): resolve the JS source we will run.
+        // - `action = None` → run the bundle's `execute` body (existing path
+        //   — same byte-for-byte source as trigger-driven runs).
+        // - `action = Some(name)` → look up `bundle.actions[name]` and use
+        //   that source instead. Empty / whitespace / reserved / unknown
+        //   names are rejected at the boundary with `unknown_action` so
+        //   the agent gets a helpful list of valid choices.
+        let trimmed_action: Option<String> = action.map(|s| s.trim().to_string());
+        let available_actions: Vec<String> = strategy
+            .actions_json
+            .as_deref()
+            .and_then(|j| {
+                serde_json::from_str::<std::collections::BTreeMap<String, String>>(j).ok()
+            })
+            .map(|m| m.into_keys().collect())
+            .unwrap_or_default();
+        let resolved_source: String = match &trimmed_action {
+            None => strategy.source.clone(),
+            Some(name) if name.is_empty() => {
+                return Err(unknown_action(
+                    &strategy.id,
+                    "",
+                    &available_actions,
+                    "omit `action` to run execute, or pass a non-empty name from `available_actions`",
+                ));
+            }
+            Some(name) if RESERVED_ACTION_KEYS.contains(&name.as_str()) => {
+                return Err(unknown_action(
+                    &strategy.id,
+                    name,
+                    &available_actions,
+                    "this name is reserved (execute / view / records / default); rename the action and re-register",
+                ));
+            }
+            Some(name) => {
+                // Bundle has no actions at all → tell the agent which to
+                // declare. Bundle has actions but not this name → list the
+                // valid choices.
+                let actions_map: std::collections::BTreeMap<String, String> = strategy
+                    .actions_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .unwrap_or_default();
+                match actions_map.get(name) {
+                    Some(src) => src.clone(),
+                    None => {
+                        return Err(unknown_action(
+                            &strategy.id,
+                            name,
+                            &available_actions,
+                            if available_actions.is_empty() {
+                                "this bundle declares no actions; re-register with an `actions` map"
+                            } else {
+                                "pass one of `available_actions`, or omit `action` to run execute"
+                            },
+                        ));
+                    }
+                }
+            }
+        };
+
+        // STEP 3: insert run (Queued). v1.10: stamp `runs.action` so the UI
+        // / audit trail can distinguish manual one-shot calls from
+        // trigger / default-execute runs. NULL = execute path.
         let state = self.state.clone();
         let sid_for_run = strategy.id.clone();
+        let action_for_run = trimmed_action.clone();
         let run_id: String = tokio::task::spawn_blocking(move || {
             let mut store = state.blocking_lock();
-            store.insert_run(&sid_for_run, RunStatus::Queued)
+            store.insert_run_with_action(
+                &sid_for_run,
+                RunStatus::Queued,
+                action_for_run.as_deref(),
+            )
         })
         .await
         .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
@@ -522,7 +655,10 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         let host_chain_id = self.chain_id().await.ok();
         let price_cache = self.price_cache.clone();
         let state_for_run = self.state.clone();
-        let source = strategy.source.clone();
+        // v1.10: when `action` was specified we already resolved the source
+        // to `bundle.actions[name]` above; otherwise we run the bundle's
+        // `execute` body (identical to the pre-v1.10 trigger path).
+        let source = resolved_source;
         let sid_for_ctx = strategy.id.clone();
         let sname_for_ctx = strategy.name.clone();
         let rid_for_ctx = run_id.clone();
@@ -1228,6 +1364,7 @@ pub(crate) fn summary_to_item(s: StrategySummary) -> StrategyListItem {
         deleted_at: s.deleted_at,
         lineage_id: Some(s.lineage_id),
         version: Some(s.version),
+        action_names: s.action_names,
     }
 }
 

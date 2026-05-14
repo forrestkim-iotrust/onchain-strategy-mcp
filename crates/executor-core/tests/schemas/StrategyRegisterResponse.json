@@ -89,6 +89,11 @@
       "description": "v1.8: details of the version a register call superseded.",
       "type": "object",
       "properties": {
+        "previous_actions_changed": {
+          "description": "v1.10: whether the bundle's `actions` map changed across the bump.\nTrue iff the previous and current rows have different canonical\n`actions_json`. False on legacy bundles that never used actions.",
+          "type": "boolean",
+          "default": false
+        },
         "previous_execute_changed": {
           "type": "boolean"
         },

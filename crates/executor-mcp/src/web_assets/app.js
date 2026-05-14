@@ -787,6 +787,29 @@
     }
     root.appendChild(triggersSec);
 
+    // v1.10 actions: named one-shot helpers the bundle exposes. Rendered
+    // as chips so an operator can see at a glance what `strategy_run(...,
+    // action: "...")` will accept. Empty bundles skip the section entirely
+    // so the legacy single-execute layout stays clean.
+    if (d && Array.isArray(d.actions) && d.actions.length > 0) {
+      const actionsSec = el("div", { class: "section" });
+      actionsSec.appendChild(el("div", { class: "section-head" }, [
+        el("span", { text: "named actions" }),
+        el("span", { class: "mono dim", text: d.actions.length + " declared" }),
+      ]));
+      const body = el("div", { class: "section-body" });
+      const chips = el("div", { class: "chips" });
+      d.actions.forEach((name) => {
+        chips.appendChild(el("span", { class: "chip mono", text: name, title:
+          'manual one-shot: strategy_run({strategy_id, action: "' + name + '"})' }));
+      });
+      body.appendChild(chips);
+      body.appendChild(el("div", { class: "dim", style: "margin-top:8px",
+        text: "triggers cannot pick named actions — manual invocation only." }));
+      actionsSec.appendChild(body);
+      root.appendChild(actionsSec);
+    }
+
     // Cache miss on first navigation — render placeholder; pollOnce will
     // populate the cache on its next tick and the resulting render will
     // pick up the data.
@@ -1092,6 +1115,7 @@
       el("th"),
       el("th", { text: "run id" }),
       el("th", { text: "strategy" }),
+      el("th", { text: "entry" }),
       el("th", { text: "status" }),
       el("th", { class: "num", text: "actions" }),
       el("th", { text: "started" }),
@@ -1112,6 +1136,12 @@
         text: stratName,
       }));
       tr.appendChild(stratTd);
+      // v1.10 entry-point column: "execute" for trigger / default runs,
+      // the action name for manual `strategy_run({action: "..."})` calls.
+      // Dim the execute label so the eye picks out the named-action rows.
+      const entryLabel = r.action ? String(r.action) : "execute";
+      const entryClass = r.action ? "mono" : "mono dim";
+      tr.appendChild(el("td", { class: entryClass, text: entryLabel }));
       tr.appendChild(el("td", null, [statusBadge(r.status)]));
       tr.appendChild(el("td", { class: "num mono", text: String(r.action_count != null ? r.action_count : 0) }));
       tr.appendChild(el("td", { class: "mono", title: r.started_at || "",
@@ -1126,7 +1156,7 @@
       tbody.appendChild(tr);
       if (open) {
         const detailRow = el("tr");
-        const td = el("td", { colspan: 7 });
+        const td = el("td", { colspan: 8 });
         const inner = el("div", { class: "nested" });
         inner.appendChild(el("div", { class: "dim", text: "loading run detail…" }));
         td.appendChild(inner);
