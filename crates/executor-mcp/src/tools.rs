@@ -20,7 +20,7 @@ use executor_core::schema::{
         JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
     },
     strategy::{
-        StrategyDeleteResponse, StrategyGetResponse, StrategyIdInput,
+        StrategyDeleteResponse, StrategyIdInput,
         StrategyListItem, StrategyRegisterInput, StrategyRegisterResponse,
         StrategyRunInput,
     },
@@ -180,7 +180,28 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         let contracts_touched_json_str = serde_json::to_string(&contracts_touched_value)
             .map_err(|e| invalid_params(format!("contracts_touched serialize: {e}")))?;
 
-        // 4. dry_run short-circuit: compute the would-be id and return early
+        // 4. Compute alignment against the active policy (v1.5 Track 1C).
+        //    Snapshot the active policy body once; reuse in dry-run AND the
+        //    real-write path so the alignment field is consistent regardless
+        //    of which branch we take below.
+        let policy_value: Option<serde_json::Value> = {
+            let state = self.state.clone();
+            let active = tokio::task::spawn_blocking(move || {
+                let store = state.blocking_lock();
+                store.get_active_policy()
+            })
+            .await
+            .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+            .map_err(map_state_error)?;
+            active.and_then(|rev| serde_json::from_str(&rev.body_json).ok())
+        };
+        let alignment = crate::alignment::compute_alignment(
+            Some(&contracts_touched_value),
+            policy_value.as_ref(),
+        );
+        let alignment_value = crate::alignment::to_json(&alignment);
+
+        // 5. dry_run short-circuit: compute the would-be id and return early
         //    without touching the DB (P5/P6 design — destructive ops must be
         //    explicit, registration is destructive in the sense that it
         //    consumes a unique name + content-address slot).
@@ -196,6 +217,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 "name": input.name,
                 "has_bundle": records_json.is_some() || view_source.is_some(),
                 "contracts_touched": contracts_touched_value,
+                "policy_alignment": alignment_value,
             });
             return json_result(&resp);
         }
@@ -246,6 +268,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 existing_tags: None,
                 deleted_at: s.deleted_at,
                 contracts_touched: Some(contracts_touched_value),
+                policy_alignment: Some(alignment_value),
             },
             RegisterOutcome::AlreadyExists(s) => {
                 // Read the existing row's cached extraction. NULL on legacy
@@ -257,6 +280,12 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                     .as_deref()
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_else(|| contracts_touched_value.clone());
+                // Recompute alignment against the existing extraction so the
+                // verdict reflects what the cached row would actually run.
+                let existing_alignment = crate::alignment::compute_alignment(
+                    Some(&existing_extraction),
+                    policy_value.as_ref(),
+                );
                 StrategyRegisterResponse {
                     strategy_id: s.id.clone(),
                     name: s.name.clone(),
@@ -267,6 +296,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                     existing_tags: s.tags,
                     deleted_at: s.deleted_at,
                     contracts_touched: Some(existing_extraction),
+                    policy_alignment: Some(crate::alignment::to_json(&existing_alignment)),
                 }
             }
         };
@@ -822,11 +852,17 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
             crate::policy_boot::parse_policy_json(&input.policy)
                 .map_err(map_policy_error_for_set)?;
 
-        // 2. Snapshot the previous active revision (for diff + response).
+        // 2. Snapshot the previous active revision + the live active strategy
+        //    set in one blocking pass. We need the strategies' cached
+        //    `contracts_touched_json` to compute the impact block's
+        //    `newly_satisfied_strategies` / `newly_unsatisfied_strategies`
+        //    (v1.5 Track 1C) by diffing alignment under old-vs-new policy.
         let state = self.state.clone();
-        let previous = tokio::task::spawn_blocking(move || {
+        let (previous, active_strategies) = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
             let store = state.blocking_lock();
-            store.get_active_policy()
+            let prev = store.get_active_policy()?;
+            let strategies = store.list_strategies(false)?;
+            Ok((prev, strategies))
         })
         .await
         .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
@@ -864,20 +900,66 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         let new_capabilities =
             crate::policy_diff::new_capabilities_granted(&old_body_value, &new_body_value, &ops);
 
-        // 6. Compose response. v1.5 Track 1A: the impact fields
-        //    `newly_satisfied_strategies` and `newly_unsatisfied_strategies`
-        //    are computed by Track 1C (alignment) — return empty arrays here
-        //    with a TODO marker so the surface shape stays stable. The
-        //    `new_capabilities_granted` field IS computed in 1A.
+        // 6. v1.5 Track 1C: compute alignment-diff impact across all active
+        //    strategies. For each strategy with a cached contracts_touched_json,
+        //    compute the verdict under (old_policy, new_policy). Surface
+        //    transitions:
+        //      - was Satisfied → now Partial/Missing → newly_unsatisfied
+        //      - was Partial/Missing/Incomplete → now Satisfied → newly_satisfied
+        //    Strategies without cached extraction (pre-v1.5 rows) are silently
+        //    skipped — their verdict would be `Incomplete` under both policies
+        //    so there's no real transition to report.
+        let mut newly_satisfied: Vec<serde_json::Value> = Vec::new();
+        let mut newly_unsatisfied: Vec<serde_json::Value> = Vec::new();
+        for s in &active_strategies {
+            let ct_value: Option<serde_json::Value> = s
+                .contracts_touched_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok());
+            if ct_value.is_none() {
+                continue;
+            }
+            let old_verdict = crate::alignment::compute_alignment(
+                ct_value.as_ref(),
+                Some(&old_body_value),
+            )
+            .verdict;
+            let new_verdict = crate::alignment::compute_alignment(
+                ct_value.as_ref(),
+                Some(&new_body_value),
+            )
+            .verdict;
+            use crate::alignment::AlignmentVerdict as V;
+            let became_satisfied = matches!(new_verdict, V::Satisfied)
+                && !matches!(old_verdict, V::Satisfied);
+            let lost_satisfaction = matches!(old_verdict, V::Satisfied)
+                && !matches!(new_verdict, V::Satisfied);
+            if became_satisfied {
+                newly_satisfied.push(serde_json::json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "previous_verdict": old_verdict.as_str(),
+                    "new_verdict": new_verdict.as_str(),
+                }));
+            }
+            if lost_satisfaction {
+                newly_unsatisfied.push(serde_json::json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "previous_verdict": old_verdict.as_str(),
+                    "new_verdict": new_verdict.as_str(),
+                }));
+            }
+        }
+
         let body = serde_json::json!({
             "previous_revision_id": previous.as_ref().map(|r| r.revision_id.clone()),
             "new_revision_id": new_revision.revision_id,
             "applied_at": new_revision.set_at,
             "diff": diff_json,
             "impact": {
-                // TODO(v1.5 Track 1C): populate from alignment compute.
-                "newly_satisfied_strategies": [],
-                "newly_unsatisfied_strategies": [],
+                "newly_satisfied_strategies": newly_satisfied,
+                "newly_unsatisfied_strategies": newly_unsatisfied,
                 "new_capabilities_granted": new_capabilities,
             },
         });
@@ -1080,18 +1162,8 @@ pub(crate) fn summary_to_item(s: StrategySummary) -> StrategyListItem {
     }
 }
 
-/// v1.4 Track B — exposed for `strategy://by-name/{name}` resource handler.
-pub(crate) fn strategy_to_get_response(s: Strategy) -> StrategyGetResponse {
-    StrategyGetResponse {
-        strategy_id: s.id,
-        name: s.name,
-        source: s.source,
-        description: s.description,
-        tags: s.tags,
-        created_at: s.created_at,
-        deleted_at: s.deleted_at,
-    }
-}
+// v1.4 Track B's `strategy_to_get_response` helper was inlined by Track 1C
+// into `resources::enrich_strategy_body`, which adds the alignment surface.
 
 pub(crate) async fn build_execution_report(
     state: Arc<Mutex<StateStore>>,

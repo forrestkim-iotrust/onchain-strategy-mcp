@@ -44,6 +44,9 @@
     "name": {
       "type": "string"
     },
+    "policy_alignment": {
+      "description": "v1.5: derived alignment between contracts_touched and the active policy. Verdict ∈ satisfied | partial | missing | incomplete. Always recomputed against the live policy — not cached."
+    },
     "strategy_id": {
       "type": "string"
     }

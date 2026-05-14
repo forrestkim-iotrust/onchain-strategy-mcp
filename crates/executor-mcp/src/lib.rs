@@ -13,6 +13,7 @@
 //! - `resources` hosts the resource template + read_resource helpers invoked by
 //!   the `ServerHandler` block in `server`.
 
+pub mod alignment;
 pub mod config;
 pub mod contracts_touched;
 pub mod deploy_delegate;

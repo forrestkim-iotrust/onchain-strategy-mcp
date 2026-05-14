@@ -135,6 +135,15 @@ pub struct StrategyRegisterResponse {
 \"_extraction\": \"complete\"|\"incomplete\", \"_warnings\": [...] }`.")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contracts_touched: Option<serde_json::Value>,
+    /// v1.5 Track 1C: derived alignment between `contracts_touched` and the
+    /// **currently active** policy revision. Shape:
+    /// `{ verdict: "satisfied"|"partial"|"missing"|"incomplete", missing: [...], remediation: "..." }`.
+    /// Recomputed on every register call (and every resource read) — NEVER
+    /// cached — because the policy can change without the strategy changing.
+    #[schemars(description = "v1.5: derived alignment between contracts_touched and the active policy. \
+Verdict ∈ satisfied | partial | missing | incomplete. Always recomputed against the live policy — not cached.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_alignment: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

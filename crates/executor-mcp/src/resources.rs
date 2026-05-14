@@ -37,7 +37,7 @@ use serde_json::json;
 
 use crate::{
     errors::{invalid_params, map_state_error, storage_error},
-    tools::{build_execution_report, strategy_to_get_response},
+    tools::build_execution_report,
 };
 
 // ─────────── Embedded examples + static docs (v1.3 self-documenting) ───────────
@@ -735,14 +735,19 @@ async fn read_strategy(
         ));
     }
 
+    // Pull row + active policy in one blocking pass so alignment is computed
+    // against a snapshot consistent with what the row carries (v1.5 Track 1C).
     let id_owned = id.clone();
-    let row = tokio::task::spawn_blocking(move || {
+    let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let store = state.blocking_lock();
-        store.get_strategy_by_id(&id_owned)
+        let s = store.get_strategy_by_id(&id_owned)?;
+        let pol = store.get_active_policy()?;
+        Ok((s, pol))
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
+    let (row, active_policy) = lookup;
 
     match row {
         None => Err(McpError::resource_not_found(
@@ -750,22 +755,58 @@ async fn read_strategy(
             Some(json!({ "uri": uri })),
         )),
         Some(s) => {
-            let resp = StrategyGetResponse {
-                strategy_id: s.id,
-                name: s.name,
-                source: s.source,
-                description: s.description,
-                tags: s.tags,
-                created_at: s.created_at,
-                deleted_at: s.deleted_at,
-            };
-            let body = serde_json::to_string(&resp)
+            let body = enrich_strategy_body(s, active_policy.as_ref())?;
+            let body_text = serde_json::to_string(&body)
                 .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
             Ok(ReadResourceResult::new(vec![
-                ResourceContents::text(body, uri).with_mime_type("application/json"),
+                ResourceContents::text(body_text, uri).with_mime_type("application/json"),
             ]))
         }
     }
+}
+
+/// Shared shaper for `strategy://{id}` and `strategy://by-name/{name}`.
+/// Produces a JSON object with the [`StrategyGetResponse`] fields plus
+/// `contracts_touched` (cached) and `policy_alignment` (derived from the
+/// active policy revision). Always returns alignment even when the row has
+/// no cached extraction or the DB has no active policy — the helper
+/// `compute_alignment` produces an `incomplete` verdict with remediation.
+fn enrich_strategy_body(
+    s: executor_state::Strategy,
+    active_policy: Option<&executor_state::PolicyRevision>,
+) -> Result<serde_json::Value, McpError> {
+    let contracts_touched_value: Option<serde_json::Value> = s
+        .contracts_touched_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let policy_value: Option<serde_json::Value> = active_policy
+        .and_then(|rev| serde_json::from_str(&rev.body_json).ok());
+    let alignment = crate::alignment::compute_alignment(
+        contracts_touched_value.as_ref(),
+        policy_value.as_ref(),
+    );
+
+    let resp = StrategyGetResponse {
+        strategy_id: s.id,
+        name: s.name,
+        source: s.source,
+        description: s.description,
+        tags: s.tags,
+        created_at: s.created_at,
+        deleted_at: s.deleted_at,
+    };
+    let mut body = serde_json::to_value(&resp)
+        .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
+    if let serde_json::Value::Object(ref mut m) = body {
+        if let Some(ct) = contracts_touched_value {
+            m.insert("contracts_touched".to_string(), ct);
+        }
+        m.insert(
+            "policy_alignment".to_string(),
+            crate::alignment::to_json(&alignment),
+        );
+    }
+    Ok(body)
 }
 
 async fn read_execution(
@@ -1306,14 +1347,19 @@ async fn read_strategy_list(
 ) -> Result<ReadResourceResult, McpError> {
     let parsed = parse_strategy_list_query(&query)?;
 
-    // Pull strategies first. We always pull all (active + deleted) and filter
+    // Pull strategies + a single active-policy snapshot (v1.5 Track 1C: one
+    // policy load, iterate). We always pull all (active + deleted) and filter
     // in Rust — the state layer's `list_strategies(true|false)` partitions
     // active from include-deleted; we filter further by `status` here.
-    let summaries = {
+    let (summaries, active_policy_json): (Vec<_>, Option<serde_json::Value>) = {
         let state = state.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> Result<_, StateError> {
             let store = state.blocking_lock();
-            store.list_strategies(true)
+            let strategies = store.list_strategies(true)?;
+            let policy = store.get_active_policy()?;
+            let policy_json: Option<serde_json::Value> =
+                policy.and_then(|rev| serde_json::from_str(&rev.body_json).ok());
+            Ok((strategies, policy_json))
         })
         .await
         .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
@@ -1413,6 +1459,20 @@ async fn read_strategy_list(
         if runs > 0 {
             any_runs_in_24h = true;
         }
+        // v1.5 Track 1C: per-row alignment verdict using the single
+        // policy snapshot pulled above. We surface the verdict as a string
+        // (rather than the full object with `missing`/`remediation`) to keep
+        // the list payload compact — agents can read strategy://{id} for
+        // the full alignment surface.
+        let ct_value: Option<serde_json::Value> = s
+            .contracts_touched_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok());
+        let alignment = crate::alignment::compute_alignment(
+            ct_value.as_ref(),
+            active_policy_json.as_ref(),
+        );
+        let alignment_str = alignment.verdict.as_str();
         if parsed.summary {
             strategy_jsons.push(json!({
                 "id": s.id,
@@ -1431,6 +1491,7 @@ async fn read_strategy_list(
                 },
                 "has_bundle": s.has_bundle,
                 "view_uri": format!("strategy://{id}/view", id = s.id),
+                "policy_alignment": alignment_str,
             }));
         } else {
             strategy_jsons.push(json!({
@@ -1441,6 +1502,7 @@ async fn read_strategy_list(
                 "created_at": s.created_at,
                 "deleted_at": s.deleted_at,
                 "has_bundle": s.has_bundle,
+                "policy_alignment": alignment_str,
             }));
         }
     }
@@ -1484,13 +1546,16 @@ async fn read_strategy_by_name(
         ));
     }
     let name_for_lookup = name.clone();
-    let row = tokio::task::spawn_blocking(move || {
+    let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let store = state.blocking_lock();
-        store.get_strategy_by_name(&name_for_lookup)
+        let s = store.get_strategy_by_name(&name_for_lookup)?;
+        let pol = store.get_active_policy()?;
+        Ok((s, pol))
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
+    let (row, active_policy) = lookup;
     match row {
         None => Err(McpError::resource_not_found(
             format!("strategy with name `{name}` not found"),
@@ -1501,11 +1566,11 @@ async fn read_strategy_by_name(
             })),
         )),
         Some(s) => {
-            let resp = strategy_to_get_response(s);
-            let body = serde_json::to_string(&resp)
+            let body = enrich_strategy_body(s, active_policy.as_ref())?;
+            let body_text = serde_json::to_string(&body)
                 .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
             Ok(ReadResourceResult::new(vec![
-                ResourceContents::text(body, uri).with_mime_type("application/json"),
+                ResourceContents::text(body_text, uri).with_mime_type("application/json"),
             ]))
         }
     }

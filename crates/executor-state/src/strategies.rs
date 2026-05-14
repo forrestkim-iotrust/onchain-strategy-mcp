@@ -46,6 +46,10 @@ pub struct StrategySummary {
     /// callers to know whether `strategy://{id}/view` returns bundle output
     /// vs. generic fallback.
     pub has_bundle: bool,
+    /// v1.5 Track 1C: cached static extraction so list-time policy alignment
+    /// can be batched against a single policy snapshot without N+1 row reads.
+    /// NULL on rows registered before v1.5.
+    pub contracts_touched_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,11 +213,13 @@ pub(crate) fn list(
     // source through every listing).
     let sql = if include_deleted {
         "SELECT id, name, description, tags, created_at, deleted_at, \
-                records_json IS NOT NULL OR view_source IS NOT NULL \
+                records_json IS NOT NULL OR view_source IS NOT NULL, \
+                contracts_touched_json \
          FROM strategies ORDER BY created_at DESC"
     } else {
         "SELECT id, name, description, tags, created_at, deleted_at, \
-                records_json IS NOT NULL OR view_source IS NOT NULL \
+                records_json IS NOT NULL OR view_source IS NOT NULL, \
+                contracts_touched_json \
          FROM strategies WHERE deleted_at IS NULL ORDER BY created_at DESC"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -227,6 +233,7 @@ pub(crate) fn list(
                 created_at: r.get(4)?,
                 deleted_at: r.get(5)?,
                 has_bundle: r.get::<_, i64>(6)? != 0,
+                contracts_touched_json: r.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
