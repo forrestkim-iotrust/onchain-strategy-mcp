@@ -128,15 +128,34 @@ const records = [
 // ─────────────────── 3. view ───────────────────
 // Read by `strategy://{id}/view`. Receives current ctx + the captured records.
 // MUST be pure-read (no actions). Same sandbox as evm_view.
+//
+// The top-level `$assets` array (see `docs://strategy-bundle`) declares the
+// strategy's user-held positions. The runtime aggregates `$assets` across all
+// active strategies for the portfolio total. Everything outside `$assets` is
+// per-strategy observation — rendered on the strategy card, not summed.
 const view = (ctx, records) => {
   const principal_micro = records.supply.sum("amount_micro");
   const current_micro   = BigInt(ctx.evm.erc20Balance(AUSDC, BURNER, "pending"));
   const accrued_micro   = current_micro - BigInt(principal_micro);
 
   return {
-    position: {
+    // ─── user positions (portfolio aggregate) ───
+    $assets: [
+      {
+        chain_id: 8453,
+        venue:    "aave-v3-base",
+        asset:    "USDC",
+        address:  AUSDC,                              // aToken contract, ERC20
+        amount:   (Number(current_micro) / 1e6).toFixed(6),
+        raw:      current_micro.toString(),
+        decimals: 6,
+        usd:      Number(current_micro) / 1e6        // 1:1 stable, no oracle needed
+      }
+    ],
+
+    // ─── per-strategy observation (not aggregated) ───
+    earnings: {
       principal_usdc:        Number(principal_micro) / 1e6,
-      current_value_usdc:    Number(current_micro)   / 1e6,
       accrued_interest_usdc: Number(accrued_micro)   / 1e6,
     },
     activity: {
@@ -146,10 +165,6 @@ const view = (ctx, records) => {
       total_usdc_minted: Number(records.swap.sum("usdc_out_micro")) / 1e6,
       last_supply_ts:    records.supply.latest?.ts,
       last_swap_ts:      records.swap.latest?.ts,
-    },
-    burner: {
-      eth:       Number(ctx.evm.nativeBalance(BURNER, "pending"))  / 1e18,
-      usdc_idle: Number(ctx.evm.erc20Balance(USDC, BURNER, "pending")) / 1e6,
     },
   };
 };

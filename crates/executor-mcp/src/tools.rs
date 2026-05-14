@@ -132,7 +132,9 @@ impl ExecutorServer {
         description = "Register a JavaScript strategy (content-addressed; idempotent on same bundle). \
 Supplying `records` and/or `view` opts into the v1.4 self-documenting bundle — `strategy://{id}/view` \
 then returns rich state (principal, accrued interest, cycle counts, etc.) instead of the generic \
-balance fallback. Pass `dry_run: true` to validate without persisting (returns the would-be id)."
+balance fallback. The `view` function may emit a top-level `$assets` array to surface user positions \
+into the portfolio aggregate (see `docs://strategy-bundle` for the bundle shape and `$assets` keys). \
+Pass `dry_run: true` to validate without persisting (returns the would-be id)."
     )]
     async fn strategy_register(
         &self,

@@ -208,6 +208,202 @@ strategies to be idempotent across closely-spaced fires.
 - `trigger_set_enabled({trigger_id, enabled})` — toggle without losing config.
 "#;
 
+const DOC_STRATEGY_BUNDLE: &str = r#"# Strategy bundle (v1.4)
+
+A strategy is registered as a **bundle** of up to three pieces. Only the
+first is required.
+
+| slot | required | role |
+|------|----------|------|
+| `execute` | yes | the action-producing JS function (existing v1.0+ behaviour) |
+| `records` | no  | declarative capture schema — what to remember from confirmed actions |
+| `view`    | no  | interpreter function the runtime calls when an agent reads `strategy://{id}/view` |
+
+`strategy_id` is content-addressed as `sha256(execute + records + view)`.
+A legacy single-function registration (no records/view) hashes identically
+to its v1.0..v1.3 form, so existing ids stay stable across upgrades.
+
+## execute
+
+```js
+(ctx) => Action[] | "noop"
+```
+
+Same as pre-v1.4. Returns onchain actions (`ctx.actions.contractCall`,
+`ctx.actions.erc20Approve`) or the string `"noop"` for "no action this tick".
+
+## records
+
+Declarative capture spec. The runtime watches confirmed actions and, when
+one matches a record's `on` clause, stores the evaluated `capture` map
+into `strategy_records_capture`. Capture failures NEVER break the run —
+they log a warning and skip the offending field.
+
+```js
+records: [
+  {
+    name: "supply",
+    on: {
+      kind: "contractCall",            // also: "erc20Approve", "log"
+      target: "0xa238dd80...",          // optional address filter
+      selector: "supply"                // function name OR 4-byte hex
+    },
+    capture: {
+      amount_micro:    "args[1]",       // dotted accessor over args
+      asset:           "args[0]",
+      ts:              "tx.ts",
+      tx_hash:         "tx.hash"
+      // also supported:
+      // logs.<EventName>[<self|0>].<field>
+      // tx.{hash,block,ts,gas_used}
+      // view.<helper>(args)             — runtime-provided named helpers
+    }
+  }
+]
+```
+
+The capture DSL is intentionally narrow. If it can't express what you
+need, use a tx_hash accessor and post-process in your `view` function.
+
+## view
+
+```js
+(ctx, records) => any
+```
+
+Pure-read function. Called whenever `strategy://{id}/view` is requested.
+`ctx` carries the same `evm.*` helpers as a strategy; `records` exposes
+the captured rows aggregated host-side as `{ count, latest, each, sum(field) }`
+per record name.
+
+The runtime wraps the return value with an honesty envelope:
+`{ data: <your return>, confidence: "full" | "partial" | "missing", reason?, remediation? }`.
+
+Strategies without `view` get a generic fallback (burner balances only)
+with `confidence: "missing"`.
+
+## $assets — declaring user positions for portfolio aggregation
+
+A view function MAY return a top-level `$assets` array. Each entry declares
+one position the user holds at some venue. The web UI / portfolio resource
+aggregates `$assets` across ALL active strategies to compute a unified
+portfolio total.
+
+Entries that don't appear in `$assets` are treated as **observations** and
+rendered per-strategy only — they don't contribute to portfolio sums.
+
+A strategy with no `$assets` (e.g. a pure-observer yield comparator)
+contributes nothing to the portfolio total. That's correct behaviour.
+
+### Required keys
+
+| key       | type   | meaning |
+|-----------|--------|---------|
+| `chain_id`| number | chain id (e.g. 8453 for Base). Required for cross-chain dedup. |
+| `venue`   | string | machine-identifier of the protocol/wrapper (e.g. `"aave-v3-base"`, `"curve-ve"`, `"idle"`). |
+| `asset`   | string | display name of the asset (e.g. `"USDC"`, `"CRV locked"`). |
+| `amount`  | string | human-readable balance (e.g. `"0.257164"`). |
+| `raw`     | string | base-unit balance as a uint string (e.g. `"257164"`). |
+| `decimals`| number | decimals used to convert `raw` → `amount`. |
+
+### Optional keys
+
+| key       | type   | meaning |
+|-----------|--------|---------|
+| `address` | string | the wrapper/position contract (aToken / cToken / LP token / etc). Used for explorer links. |
+| `usd`     | number | USD valuation. Computed by the strategy; omit if unknown. UI shows amount-only when missing. |
+
+### Authoring rules
+
+- The view function reads the *current* onchain state with `ctx.evm.*`
+  and writes the result into `$assets`. There is NO separate verifier —
+  the view IS the verifier by construction.
+- For ERC20-style positions: read `erc20Balance(wrapper, burner)`.
+- For non-ERC20 (locked stakes, veToken, NFT positions, …): read the
+  protocol-specific view function with `ctx.evm.readContract` and put
+  the meaningful field into `raw`.
+- If `usd` is unknowable (illiquid asset, no oracle), omit it. The UI
+  will surface a "no USD valuation" note.
+
+### Example (ERC20 — Aave aUSDC)
+
+```js
+view: (ctx, _records) => {
+  const BURNER = "0xe32f0F034C544040D147F7094F223a9C61CDf23F";
+  const AUSDC  = "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB";
+  const bal    = ctx.evm.erc20Balance(AUSDC, BURNER, "pending");
+  return {
+    $assets: [
+      {
+        chain_id: 8453,
+        venue:    "aave-v3-base",
+        asset:    "USDC",
+        address:  AUSDC,
+        amount:   (Number(bal) / 1e6).toFixed(6),
+        raw:      bal.toString(),
+        decimals: 6,
+        usd:      Number(bal) / 1e6
+      }
+    ],
+    // anything else is observation — UI renders per-strategy, no portfolio sum
+    activity: { /* ... */ }
+  };
+}
+```
+
+### Example (non-ERC20 — Curve veCRV locked amount)
+
+```js
+view: (ctx, _records) => {
+  const VECRV = "0x5f3b...";
+  const locked = ctx.evm.readContract({
+    address:  VECRV,
+    abi:      VECRV_ABI,                  // VotingEscrow.locked
+    function: "locked",
+    args:     [BURNER]
+  });
+  return {
+    $assets: [
+      {
+        chain_id: 1,
+        venue:    "curve-ve",
+        asset:    "CRV locked",
+        amount:   (Number(locked.amount) / 1e18).toFixed(4),
+        raw:      locked.amount.toString(),
+        decimals: 18,
+        usd:      Number(locked.amount) / 1e18 * CRV_PRICE_USD  // author computes
+      }
+    ]
+  };
+}
+```
+
+## Automatic rendering hints (web UI v1.6+)
+
+The web UI auto-renders view output. Following these conventions makes
+the output prettier without any extra work:
+
+| key suffix               | rendered as                              |
+|--------------------------|------------------------------------------|
+| `_usdc` / `_usd` / `_eth`/ `_wei` / `_micro` / `_pct` / `_bps` | numeric with the matching unit          |
+| `_ts` / `_at` (RFC3339)  | "11 minutes ago" with absolute tooltip   |
+| `_address` / `_tx_hash`  | shortened (...) with explorer link       |
+| array of objects (same keys) | table |
+| top-level scalar         | KPI card |
+
+None of this is enforced; it's only display polish.
+
+## Where to next
+
+- `examples://strategies/eth-funnel-bundle` — the eth-funnel pattern as a
+  full v1.4 bundle (execute + records + view + $assets).
+- `docs://policy-model`, `docs://trigger-model`, `docs://eip-7702` —
+  adjacent runtime docs.
+- `strategy://{id}/view` resource — what the runtime returns when an
+  agent reads a bundle's interpreted state.
+- `strategy://{id}/records` resource — raw capture rows.
+"#;
+
 fn make_template(
     uri_template: &str,
     name: &str,
@@ -381,6 +577,12 @@ pub(crate) async fn list_resource_templates_impl(
                 "docs://trigger-model",
                 "docs-trigger-model",
                 "Concise prose: when to use each trigger kind, with concrete examples (mirrors the `trigger_patterns` prompt for tools that prefer resources).",
+                "text/markdown",
+            ),
+            make_template(
+                "docs://strategy-bundle",
+                "docs-strategy-bundle",
+                "v1.4 strategy bundle authoring guide — the canonical reference for `execute` + `records` + `view` shape, the records capture DSL, and the `$assets` convention for portfolio-aggregatable positions. Read this BEFORE registering any non-trivial strategy.",
                 "text/markdown",
             ),
         ],
@@ -980,6 +1182,7 @@ fn static_doc_for(uri: &str) -> Option<&'static str> {
         "docs://policy-model" => Some(DOC_POLICY_MODEL),
         "docs://eip-7702" => Some(DOC_EIP_7702),
         "docs://trigger-model" => Some(DOC_TRIGGER_MODEL),
+        "docs://strategy-bundle" => Some(DOC_STRATEGY_BUNDLE),
         _ => None,
     }
 }
@@ -1423,6 +1626,7 @@ mod self_documenting_resource_tests {
         assert!(static_doc_for("docs://policy-model").is_some());
         assert!(static_doc_for("docs://eip-7702").is_some());
         assert!(static_doc_for("docs://trigger-model").is_some());
+        assert!(static_doc_for("docs://strategy-bundle").is_some());
         assert!(static_doc_for("docs://nope").is_none());
     }
 

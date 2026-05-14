@@ -53,6 +53,10 @@ Do not ask the user for code. Strategies are short, declarative, and review
 under 20 lines for most cases.
 
 If you do not know where to start, call the `getting_started` prompt.
+Before authoring a non-trivial strategy, read `docs://strategy-bundle` — it
+covers the bundle shape (execute + records + view), the records capture DSL,
+and the `$assets` convention used by `strategy://{id}/view` and the portfolio
+aggregate to surface user positions.
 
 ## Three core concepts
 
@@ -168,6 +172,8 @@ to preview the id (and surface bundle/non-bundle status) before committing.
   reference strategies (eth-funnel, yield-snapshot, erc20-approve,
   generic-counter-call)
 - `examples://contracts/{name}` — embedded reference contracts (BatchExec)
+- `docs://strategy-bundle` — bundle authoring guide (execute + records +
+  view + `$assets` convention). Read before authoring non-trivial strategies.
 - `docs://policy-model`, `docs://eip-7702`, `docs://trigger-model` — concise
   prose docs
 
