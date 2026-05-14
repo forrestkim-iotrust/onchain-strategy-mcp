@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=1100">
+  <meta name="referrer" content="no-referrer">
+  <title>osmcp</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="strip">
+    <div class="strip-left">
+      <span class="brand">osmcp</span>
+      <span class="meta">burner <span id="burner" class="addr mono">—</span></span>
+      <span class="meta">chain <span id="chain" class="mono">—</span></span>
+    </div>
+    <div class="strip-right">
+      <span id="freshness" class="freshness" title="time since last successful fetch">idle</span>
+      <span id="status-dot" class="dot dot-idle" aria-label="connection status"></span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <a href="#portfolio" class="tab" data-tab="portfolio">Portfolio</a>
+    <a href="#strategies" class="tab" data-tab="strategies">Strategies</a>
+    <a href="#policy" class="tab" data-tab="policy">Policy</a>
+    <a href="#triggers" class="tab" data-tab="triggers">Triggers</a>
+    <a href="#history" class="tab" data-tab="history">History</a>
+  </nav>
+
+  <main id="content" class="content">
+    <div class="empty">loading</div>
+  </main>
+
+  <footer class="foot">
+    <span class="mono">observation only — mutations belong to the agent (MCP)</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
