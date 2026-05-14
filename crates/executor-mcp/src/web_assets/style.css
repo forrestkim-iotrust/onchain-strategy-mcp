@@ -1,0 +1,338 @@
+/* osmcp local web ui — single light theme, density-focused.
+   No web fonts. No external assets. ASCII-first. */
+
+:root {
+  --bg:        #fafafa;
+  --surface:   #ffffff;
+  --soft:      #f3f3f2;
+  --ink:       #1a1a1a;
+  --body:      #3a3a3a;
+  --mute:      #6b6b6b;
+  --faint:     #9a9a9a;
+  --hairline:  #e3e3e1;
+  --hairline2: #d0d0ce;
+  --ok:        #2e7d4f;
+  --warn:      #b9740a;
+  --bad:       #b13a2f;
+  --partial:   #7a6b30;
+  --accent:    #1a1a1a;
+  --row-hover: #f7f7f6;
+  --code-bg:   #f3f3f2;
+
+  --ff: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+        Arial, sans-serif;
+  --ff-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+             "Liberation Mono", monospace;
+
+  --fs: 13px;
+  --lh: 1.45;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--ff);
+  font-size: var(--fs);
+  line-height: var(--lh);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ink); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.mono { font-family: var(--ff-mono); }
+.dim  { color: var(--mute); }
+
+/* ─── Header strip ──────────────────────────────────────── */
+.strip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.strip-left  { display: flex; gap: 22px; align-items: baseline; }
+.strip-right { display: flex; gap: 10px; align-items: center; }
+.brand { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+.meta  { color: var(--mute); font-size: 12px; }
+.meta .addr, .meta .mono { color: var(--ink); }
+
+.freshness {
+  font-family: var(--ff-mono);
+  font-size: 11px;
+  color: var(--mute);
+}
+.freshness.warn  { color: var(--warn); }
+.freshness.stale { color: var(--bad); }
+
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--faint);
+  display: inline-block;
+}
+.dot-idle { background: var(--faint); }
+.dot-ok   { background: var(--ok); }
+.dot-warn { background: var(--warn); }
+.dot-bad  { background: var(--bad); }
+
+/* ─── Tabs ──────────────────────────────────────────────── */
+.tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 18px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--hairline);
+  position: sticky;
+  top: 41px;
+  z-index: 9;
+}
+.tab {
+  padding: 10px 14px;
+  color: var(--mute);
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--ink); text-decoration: none; }
+.tab.active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+  font-weight: 500;
+}
+
+/* ─── Content ───────────────────────────────────────────── */
+.content {
+  padding: 18px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+.foot {
+  padding: 14px 18px 28px;
+  color: var(--faint);
+  font-size: 11px;
+  text-align: center;
+}
+
+.section {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  margin-bottom: 14px;
+}
+.section-head {
+  padding: 9px 14px;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--mute);
+  border-bottom: 1px solid var(--hairline);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.section-body { padding: 10px 14px; }
+.section-body.flush { padding: 0; }
+
+.empty {
+  color: var(--mute);
+  padding: 24px;
+  text-align: center;
+  font-size: 13px;
+}
+.empty code, .empty .mono { background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+
+/* ─── Key/value rows ────────────────────────────────────── */
+.kv {
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 0;
+}
+.kv > .k, .kv > .v {
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--hairline);
+  min-width: 0;
+  word-break: break-word;
+}
+.kv > .k {
+  color: var(--mute);
+  font-size: 12px;
+  background: var(--soft);
+}
+.kv > .v { font-family: var(--ff-mono); font-size: 12px; }
+.kv > .k:last-of-type, .kv > .v:last-of-type { border-bottom: none; }
+
+/* ─── Tables ────────────────────────────────────────────── */
+table.t {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+table.t th, table.t td {
+  text-align: left;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+table.t th {
+  color: var(--mute);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: var(--soft);
+}
+table.t tbody tr:hover { background: var(--row-hover); cursor: default; }
+table.t tbody tr.click:hover { cursor: pointer; }
+table.t td.num, table.t th.num { text-align: right; font-family: var(--ff-mono); }
+table.t td.mono { font-family: var(--ff-mono); }
+table.t tr:last-child td { border-bottom: none; }
+
+/* ─── KPI cards ─────────────────────────────────────────── */
+.kpis {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.kpi {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 10px 14px;
+  min-width: 160px;
+}
+.kpi .label {
+  color: var(--mute);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.kpi .value {
+  font-family: var(--ff-mono);
+  font-size: 18px;
+  margin-top: 3px;
+  color: var(--ink);
+}
+
+/* ─── Badges ────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--hairline2);
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: var(--ff-mono);
+  color: var(--mute);
+  background: var(--soft);
+}
+.badge.ok      { color: var(--ok);      border-color: #c4dccd; background: #effaf2; }
+.badge.warn    { color: var(--warn);    border-color: #e8d2a0; background: #faf3e3; }
+.badge.bad     { color: var(--bad);     border-color: #e3b8b3; background: #faecea; }
+.badge.partial { color: var(--partial); border-color: #d8ccac; background: #f7f1e0; }
+.badge.tag     { color: var(--body); }
+
+/* ─── Expand/collapse ───────────────────────────────────── */
+.disclose {
+  cursor: pointer;
+  user-select: none;
+  color: var(--mute);
+  font-family: var(--ff-mono);
+  font-size: 11px;
+  margin-right: 6px;
+}
+.disclose:hover { color: var(--ink); }
+.collapsed > .nested { display: none; }
+.nested {
+  margin: 4px 0 4px 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--hairline);
+}
+.nested > .section { margin-bottom: 6px; }
+
+/* ─── Copy button ───────────────────────────────────────── */
+.copy {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--faint);
+  font-family: var(--ff-mono);
+  font-size: 10px;
+  cursor: pointer;
+  margin-left: 4px;
+  padding: 0 4px;
+  border-radius: 2px;
+}
+.copy:hover { color: var(--ink); border-color: var(--hairline); }
+.copy.copied { color: var(--ok); }
+
+/* ─── Links to explorers ────────────────────────────────── */
+.tx, .addr {
+  font-family: var(--ff-mono);
+}
+
+/* ─── Filter bar ────────────────────────────────────────── */
+.filterbar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--soft);
+  flex-wrap: wrap;
+  align-items: center;
+}
+.filterbar label {
+  color: var(--mute);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.filterbar select, .filterbar input[type="text"] {
+  font-family: var(--ff-mono);
+  font-size: 12px;
+  padding: 3px 6px;
+  border: 1px solid var(--hairline2);
+  background: var(--surface);
+  border-radius: 3px;
+  color: var(--ink);
+}
+
+/* ─── Bulleted lists ────────────────────────────────────── */
+ul.bul {
+  margin: 4px 0;
+  padding-left: 18px;
+  font-family: var(--ff-mono);
+  font-size: 12px;
+}
+ul.bul li { padding: 1px 0; }
+
+/* ─── Diff (policy history) ─────────────────────────────── */
+.diff {
+  font-family: var(--ff-mono);
+  font-size: 12px;
+  background: var(--soft);
+  border: 1px solid var(--hairline);
+  border-radius: 3px;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 6px 14px;
+}
+.diff .add { color: var(--ok); }
+.diff .del { color: var(--bad); }
+
+/* ─── Code blocks (small) ───────────────────────────────── */
+code, .code {
+  font-family: var(--ff-mono);
+  background: var(--code-bg);
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 12px;
+}

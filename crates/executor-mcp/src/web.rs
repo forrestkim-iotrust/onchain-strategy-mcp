@@ -59,6 +59,16 @@ const VIEW_CACHE_TTL: Duration = Duration::from_secs(5);
 /// forbidden by the threat model.
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
 
+// ─── Embedded static assets (v1.6 Track 6B) ───
+//
+// `include_str!` bakes the frontend into the binary at compile time so the
+// runtime stays standalone — no separate asset dir to ship, no `tower-http`
+// `ServeDir`, no filesystem dependency. Mirrors the `examples://` embedded
+// pattern in `resources.rs`.
+const INDEX_HTML: &str = include_str!("web_assets/index.html");
+const STYLE_CSS: &str = include_str!("web_assets/style.css");
+const APP_JS: &str = include_str!("web_assets/app.js");
+
 /// Options that drive `spawn`. Defaults preserve "UI enabled at 8473".
 #[derive(Clone, Debug)]
 pub struct WebUiOptions {
@@ -123,7 +133,9 @@ struct AppState {
 fn build_router(app: AppState) -> Router {
     Router::new()
         .route("/", get(root_redirect))
-        .route("/index.html", get(placeholder_index))
+        .route("/index.html", get(serve_index))
+        .route("/static/style.css", get(serve_style))
+        .route("/static/app.js", get(serve_app_js))
         .route("/api/portfolio", get(api_portfolio))
         .route("/api/strategies", get(api_strategies))
         .route("/api/strategy/{id}", get(api_strategy))
@@ -225,27 +237,41 @@ async fn bind_with_fallback(
 // ─────────── route handlers ───────────
 
 async fn root_redirect() -> impl IntoResponse {
-    // Track 6B will replace this with the real index. Track 6A leaves the
-    // 307 in place so the route table is stable for the frontend.
-    Redirect::temporary("/index.html")
+    // 307 preserves the method (always GET here) and points the browser at
+    // the default tab. The frontend's fragment router takes over from there.
+    Redirect::temporary("/index.html#portfolio")
 }
 
-async fn placeholder_index() -> impl IntoResponse {
-    // Minimal placeholder so curl-ing `/` doesn't 404 before Track 6B lands.
-    let body = "<!doctype html><meta charset=\"utf-8\"><title>osmcp</title>\
-                <h1>osmcp local UI</h1>\
-                <p>Track 6A is live. The full frontend ships in Track 6B.</p>\
-                <ul>\
-                <li><a href=\"/api/portfolio\">/api/portfolio</a></li>\
-                <li><a href=\"/api/strategies\">/api/strategies</a></li>\
-                <li><a href=\"/api/policy\">/api/policy</a></li>\
-                <li><a href=\"/api/triggers\">/api/triggers</a></li>\
-                <li><a href=\"/api/runs\">/api/runs</a></li>\
-                </ul>";
+async fn serve_index() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))],
-        body,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        INDEX_HTML,
+    )
+}
+
+async fn serve_style() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/css; charset=utf-8"),
+        )],
+        STYLE_CSS,
+    )
+}
+
+async fn serve_app_js() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/javascript; charset=utf-8"),
+        )],
+        APP_JS,
     )
 }
 
