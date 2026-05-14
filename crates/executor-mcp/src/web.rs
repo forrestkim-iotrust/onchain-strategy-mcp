@@ -341,12 +341,12 @@ async fn api_strategy(
     // verbatim. View and records are best-effort: if either fails (e.g. no
     // view source registered) we still return the meta with a partial flag.
     let meta_uri = format!("strategy://{id}");
-    let meta = match resources::dispatch_uri_to_json(meta_uri, app.state.clone()).await {
+    let meta = match resources::dispatch_uri_to_json(meta_uri, app.state.clone(), view_evm_from(&app)).await {
         Ok(v) => v,
         Err(e) => return mcp_error_to_response(e),
     };
     let view_uri = format!("strategy://{id}/view");
-    let view = resources::dispatch_uri_to_json(view_uri, app.state.clone())
+    let view = resources::dispatch_uri_to_json(view_uri, app.state.clone(), view_evm_from(&app))
         .await
         .unwrap_or_else(|e| {
             json!({
@@ -356,7 +356,7 @@ async fn api_strategy(
             })
         });
     let records_uri = format!("strategy://{id}/records");
-    let records = resources::dispatch_uri_to_json(records_uri, app.state.clone())
+    let records = resources::dispatch_uri_to_json(records_uri, app.state.clone(), view_evm_from(&app))
         .await
         .unwrap_or_else(|_| json!({ "records": [], "count": 0 }));
 
@@ -371,9 +371,9 @@ async fn api_strategy(
 /// `/api/policy` — current + history (limit 10) in one envelope.
 async fn api_policy(State(app): State<AppState>) -> Response {
     let current =
-        resources::dispatch_uri_to_json("policy://current".to_string(), app.state.clone()).await;
+        resources::dispatch_uri_to_json("policy://current".to_string(), app.state.clone(), view_evm_from(&app)).await;
     let history =
-        resources::dispatch_uri_to_json("policy://history?limit=10".to_string(), app.state.clone())
+        resources::dispatch_uri_to_json("policy://history?limit=10".to_string(), app.state.clone(), view_evm_from(&app))
             .await;
     let body = json!({
         "current": current.unwrap_or_else(|e| json!({ "error": e.message.to_string() })),
@@ -401,12 +401,12 @@ async fn api_runs(State(app): State<AppState>, RawQuery(q): RawQuery) -> Respons
 /// `/api/run/{id}` — `execution://{id}` + `journal://{id}`.
 async fn api_run(State(app): State<AppState>, Path(id): Path<String>) -> Response {
     let exec_uri = format!("execution://{id}");
-    let exec = match resources::dispatch_uri_to_json(exec_uri, app.state.clone()).await {
+    let exec = match resources::dispatch_uri_to_json(exec_uri, app.state.clone(), view_evm_from(&app)).await {
         Ok(v) => v,
         Err(e) => return mcp_error_to_response(e),
     };
     let journal_uri = format!("journal://{id}");
-    let journal = resources::dispatch_uri_to_json(journal_uri, app.state.clone())
+    let journal = resources::dispatch_uri_to_json(journal_uri, app.state.clone(), view_evm_from(&app))
         .await
         .unwrap_or_else(|_| json!({}));
     let body = json!({
@@ -425,6 +425,7 @@ async fn api_portfolio(State(app): State<AppState>) -> Response {
     let listing = match resources::dispatch_uri_to_json(
         "strategy://list?status=active&summary=true".to_string(),
         app.state.clone(),
+        view_evm_from(&app),
     )
     .await
     {
@@ -459,6 +460,7 @@ async fn api_portfolio(State(app): State<AppState>) -> Response {
         let strategy_meta = resources::dispatch_uri_to_json(
             format!("strategy://{id}"),
             app.state.clone(),
+            view_evm_from(&app),
         )
         .await
         .ok();
@@ -552,7 +554,7 @@ async fn fetch_view_cached(app: &AppState, id: &str) -> Value {
         }
     }
     let view_uri = format!("strategy://{id}/view");
-    let body = resources::dispatch_uri_to_json(view_uri, app.state.clone())
+    let body = resources::dispatch_uri_to_json(view_uri, app.state.clone(), view_evm_from(&app))
         .await
         .unwrap_or_else(|e| {
             json!({
@@ -583,7 +585,7 @@ async fn compute_records_fingerprint(
     id: &str,
 ) -> (Option<String>, usize) {
     let uri = format!("strategy://{id}/records?limit=1");
-    match resources::dispatch_uri_to_json(uri, app.state.clone()).await {
+    match resources::dispatch_uri_to_json(uri, app.state.clone(), view_evm_from(&app)).await {
         Ok(v) => {
             let latest = v
                 .get("records")
@@ -607,7 +609,18 @@ async fn dispatch_or_error(
     app: &AppState,
     uri: String,
 ) -> Result<Value, McpError> {
-    resources::dispatch_uri_to_json(uri, app.state.clone()).await
+    resources::dispatch_uri_to_json(uri, app.state.clone(), view_evm_from(app)).await
+}
+
+/// Build the EVM context the resource layer threads into the JS view
+/// sandbox. Only `strategy://{id}/view` actually reads from it; other
+/// resources ignore the field. The HTTP layer always has the provider on
+/// hand (web.rs owns it), so this is a clone, not an init.
+fn view_evm_from(app: &AppState) -> resources::ViewEvm {
+    resources::ViewEvm {
+        provider: app.provider.clone(),
+        evm_config: app.evm_config.clone(),
+    }
 }
 
 fn json_response(body: Result<Value, McpError>) -> Response {

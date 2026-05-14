@@ -40,6 +40,18 @@ use crate::{
     tools::build_execution_report,
 };
 
+/// EVM execution context optionally threaded into `dispatch_uri`.
+///
+/// Only `strategy://{id}/view` needs this — the strategy's `view` function
+/// can call `ctx.evm.*` to read current onchain state. Other resource
+/// handlers ignore it. Default value (no provider, default `EvmConfig`) is
+/// fine for read-only resource handlers that don't need RPC.
+#[derive(Clone, Default)]
+pub(crate) struct ViewEvm {
+    pub provider: Option<Arc<executor_evm::DynProvider>>,
+    pub evm_config: executor_evm::EvmConfig,
+}
+
 // ─────────── Embedded examples + static docs (v1.3 self-documenting) ───────────
 //
 // `include_str!` bakes the example sources into the binary so the
@@ -606,8 +618,9 @@ pub(crate) async fn read_resource_impl(
     request: ReadResourceRequestParams,
     _ctx: RequestContext<RoleServer>,
     state: Arc<tokio::sync::Mutex<StateStore>>,
+    evm: ViewEvm,
 ) -> Result<ReadResourceResult, McpError> {
-    dispatch_uri(request.uri, state).await
+    dispatch_uri(request.uri, state, evm).await
 }
 
 /// v1.6 Track 6A: extract the text body of a `ReadResourceResult`. The
@@ -627,8 +640,9 @@ pub(crate) fn extract_resource_text(r: &ReadResourceResult) -> Option<&str> {
 pub(crate) async fn dispatch_uri_to_json(
     uri: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
+    evm: ViewEvm,
 ) -> Result<serde_json::Value, McpError> {
-    let result = dispatch_uri(uri, state).await?;
+    let result = dispatch_uri(uri, state, evm).await?;
     let text = extract_resource_text(&result).ok_or_else(|| {
         storage_error("resource handler returned non-text content".to_string())
     })?;
@@ -642,6 +656,7 @@ pub(crate) async fn dispatch_uri_to_json(
 pub(crate) async fn dispatch_uri(
     uri: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
+    evm: ViewEvm,
 ) -> Result<ReadResourceResult, McpError> {
     // v1.4 Track B / A4 collision plan: `strategy://list` MUST match BEFORE
     // the generic `strategy://{id}` branch. Also keep space for A4's
@@ -664,7 +679,7 @@ pub(crate) async fn dispatch_uri(
     if let Some(rest) = uri.strip_prefix("strategy://") {
         if let Some((id, tail)) = rest.split_once('/') {
             if tail == "view" {
-                return read_strategy_view(uri.clone(), id.to_string(), state).await;
+                return read_strategy_view(uri.clone(), id.to_string(), state, evm).await;
             }
             if let Some(query) = tail.strip_prefix("records?") {
                 return read_strategy_records(uri.clone(), id.to_string(), query.to_string(), state).await;
@@ -1836,6 +1851,7 @@ async fn read_strategy_view(
     uri: String,
     id: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
+    evm: ViewEvm,
 ) -> Result<ReadResourceResult, McpError> {
     if id.len() != 64 || !id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
         return Err(McpError::resource_not_found(
@@ -1935,16 +1951,20 @@ async fn read_strategy_view(
     );
 
     // 5. Run inside the same JS sandbox the existing `evm_view` tool uses.
-    //    No provider here = the view function can still inspect args but RPC
-    //    helpers will surface a typed JS error; that's fine — the v1.4
-    //    contract for view is "ctx.evm.* mostly works" and the agent can
-    //    diagnose via the wrapping `data` field.
+    //    v1.6 fixup: the host NOW carries the EVM provider + config so the
+    //    view function's `ctx.evm.erc20Balance` / `nativeBalance` /
+    //    `readContract` helpers actually work. Without this, a v1.4 bundle
+    //    that reads onchain state surfaces a partial-confidence envelope
+    //    with "no provider configured" and the agent can't see the strategy's
+    //    portfolio entry — exactly the bug this fixup addresses.
     use strategy_js::{CtxHost, Sandbox};
 
     struct ViewHostInner {
         sid: String,
         name: String,
         logs: Vec<String>,
+        provider: Option<Arc<executor_evm::DynProvider>>,
+        evm_config: executor_evm::EvmConfig,
     }
     impl CtxHost for ViewHostInner {
         fn strategy_id(&self) -> &str { &self.sid }
@@ -1952,16 +1972,26 @@ async fn read_strategy_view(
         fn run_id(&self) -> &str { "view" }
         fn now_millis(&self) -> i64 { 0 }
         fn append_log(&mut self, m: String) { self.logs.push(m); }
+        fn provider(&self) -> Option<&Arc<executor_evm::DynProvider>> {
+            self.provider.as_ref()
+        }
+        fn evm_config(&self) -> &executor_evm::EvmConfig {
+            &self.evm_config
+        }
     }
 
     let sid_owned = strategy.id.clone();
     let name_owned = strategy.name.clone();
+    let provider_owned = evm.provider.clone();
+    let evm_config_owned = evm.evm_config.clone();
     let exec_result: Result<(serde_json::Value, Vec<String>), strategy_js::RuntimeError> =
         tokio::task::spawn_blocking(move || {
             let mut host = ViewHostInner {
                 sid: sid_owned,
                 name: name_owned,
                 logs: Vec::new(),
+                provider: provider_owned,
+                evm_config: evm_config_owned,
             };
             let v = Sandbox::execute(&wrapped_source, &mut host)?;
             Ok((v, host.logs))

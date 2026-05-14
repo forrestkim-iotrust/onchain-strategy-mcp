@@ -542,8 +542,17 @@ impl ServerHandler for ExecutorServer {
     ) -> Result<ReadResourceResult, McpError> {
         // Phase 2: pass the Arc<Mutex<StateStore>> so `strategy://{id}` reads
         // the real row. v1.4 Track B: also pass the policy snapshot for
-        // `policy://current`.
-        resources::read_resource_impl(request, ctx, self.state.clone()).await
+        // `policy://current`. v1.6 fixup: thread the EVM provider so
+        // `strategy://{id}/view` can run a view function that reads onchain
+        // state (`ctx.evm.*`). Provider acquisition is fallible (RPC); we
+        // degrade to `None` so non-view resources never fail over an
+        // unreachable RPC.
+        let provider = self.evm_provider().await.ok();
+        let evm = resources::ViewEvm {
+            provider,
+            evm_config: self.evm_config.clone(),
+        };
+        resources::read_resource_impl(request, ctx, self.state.clone(), evm).await
     }
 }
 

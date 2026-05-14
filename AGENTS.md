@@ -41,10 +41,3 @@ This project is indexed by GitNexus as **onchain-strategy-mcp** (2957 symbols, 7
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
-
-## Design System
-
-Always read `DESIGN.md` before making any visual, UI, product intro, landing page, or design-copy decision.
-All font choices, colors, spacing, layout, motion, tone, and anti-slop rules are defined there.
-Do not deviate from `DESIGN.md` without explicit user approval.
-In QA or design review mode, flag any code, copy, or visual output that does not match `DESIGN.md`.
