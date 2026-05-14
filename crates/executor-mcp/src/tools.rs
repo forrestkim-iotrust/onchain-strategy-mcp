@@ -1264,7 +1264,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
     }
 
     // v1.4 Track B: `trigger_events` moved to the
-    // `trigger-events://{trigger_id}` resource.
+    // `trigger://{trigger_id}/events` resource (v1.11 Track G rename).
 
     // ─────────── EVM READ TOOLS (no policy, no journal) ───────────
 

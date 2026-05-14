@@ -197,7 +197,7 @@ Reserved (wired in upcoming versions): `block`, `webhook`.
 
 A trigger that fires while a previous run of the same strategy is still in
 flight is rejected, not queued. The skip is journaled as a
-`dedup_rejected` event readable via `trigger-events://{trigger_id}`. Build
+`dedup_rejected` event readable via `trigger://{trigger_id}/events`. Build
 strategies to be idempotent across closely-spaced fires.
 
 ## Examples
@@ -221,7 +221,7 @@ strategies to be idempotent across closely-spaced fires.
 
 - `trigger_list` — all registered triggers, filterable by kind / enabled.
 - `trigger_get` / `trigger://{id}` — full row including config + predicate.
-- `trigger_events` / `trigger-events://{id}` — last 100 events with outcome.
+- `trigger://{id}/events` — last 100 events with outcome.
 - `trigger_set_enabled({trigger_id, enabled})` — toggle without losing config.
 "#;
 
@@ -682,9 +682,9 @@ pub(crate) async fn list_resource_templates_impl(
                 "application/json",
             ),
             make_template(
-                "trigger-events://{trigger_id}",
+                "trigger://{trigger_id}/events",
                 "trigger-events",
-                "v1.2 Trigger Core: most recent 100 trigger events (fired, skipped, dedup-rejected) for the trigger.",
+                "v1.11: most recent 100 trigger events (fired, skipped, dedup-rejected). Nested under trigger (DESIGN §1.1 ownership rule).",
                 "application/json",
             ),
             make_template(
@@ -866,6 +866,20 @@ pub(crate) async fn dispatch_uri(
         let run_id = run_id.to_string();
         return read_execution(uri, run_id, state).await;
     }
+    // v1.11 Track G: nested form `trigger://{id}/events` is the canonical
+    // surface (matches DESIGN §1.1 R2 ownership rule — events belong to a
+    // trigger, so they nest under it). MUST match BEFORE the generic
+    // `trigger://{id}` branch so the `/events` suffix isn't swallowed.
+    if let Some(rest) = uri.strip_prefix("trigger://") {
+        if let Some((tid, tail)) = rest.split_once('/') {
+            if tail == "events" {
+                return read_trigger_events(uri.clone(), tid.to_string(), state).await;
+            }
+        }
+    }
+    // v1.11 Track G: deprecated flat form. The handler detects the scheme
+    // from `uri` and wraps the body with `confidence: partial` + remediation.
+    // Scheduled for removal in v1.12.
     if let Some(tid) = uri.strip_prefix("trigger-events://") {
         let tid = tid.to_string();
         return read_trigger_events(uri, tid, state).await;
@@ -1411,7 +1425,24 @@ async fn read_trigger_events(
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
 
-    let body = serde_json::to_string(&json!({ "events": events }))
+    // v1.11 Track G: branch on the original URI scheme. Nested
+    // `trigger://{id}/events` returns the body with `confidence: full`; the
+    // deprecated flat `trigger-events://{id}` wraps it with `confidence:
+    // partial` + remediation pointing at the new form (removed in v1.12).
+    let envelope = if uri.starts_with("trigger-events://") {
+        json!({
+            "data": { "events": events },
+            "confidence": "partial",
+            "reason": "deprecated URI scheme",
+            "remediation": "use trigger://{trigger_id}/events; trigger-events:// is removed in v1.12",
+        })
+    } else {
+        json!({
+            "data": { "events": events },
+            "confidence": "full",
+        })
+    };
+    let body = serde_json::to_string(&envelope)
         .map_err(|e| storage_error(format!("serialize trigger events: {e}")))?;
     Ok(ReadResourceResult::new(vec![
         ResourceContents::text(body, uri).with_mime_type("application/json"),
