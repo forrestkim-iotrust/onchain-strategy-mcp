@@ -1520,7 +1520,14 @@ async fn read_strategy_list(
     // table per strategy — for v1 we just call `list_runs` with a 24h since
     // bound + that strategy_id. We hold the StateStore mutex once for the
     // whole pass so there's no lock thrash.
-    let ids: Vec<String> = filtered.iter().map(|s| s.id.clone()).collect();
+    // v1.8 lineage: a trigger may have been registered against a prior
+    // version (different strategy_id, same lineage_id). Carry both ids
+    // through so the trigger filter can match by lineage and so the
+    // aggregation key stays the per-version strategy id.
+    let id_lineage: Vec<(String, String)> = filtered
+        .iter()
+        .map(|s| (s.id.clone(), s.lineage_id.clone()))
+        .collect();
     let state_for_lookup = state.clone();
     type StrategyAux = (
         // trigger_kinds
@@ -1538,9 +1545,9 @@ async fn read_strategy_list(
                 since_24h.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
             let mut out: std::collections::HashMap<String, StrategyAux> =
                 std::collections::HashMap::new();
-            for sid in &ids {
+            for (sid, lid) in &id_lineage {
                 let triggers = store.list_triggers(Some(&TriggerListFilter {
-                    strategy_id: Some(sid.clone()),
+                    strategy_lineage_id: Some(lid.clone()),
                     ..Default::default()
                 }))?;
                 let kinds: Vec<String> = triggers
