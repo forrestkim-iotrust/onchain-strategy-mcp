@@ -273,6 +273,10 @@ table.t tr:last-child td { border-bottom: none; }
 .copy:hover { color: var(--ink); border-color: var(--hairline); }
 .copy.copied { color: var(--ok); }
 
+/* Row container used by report-button cells where badge + button sit
+   side-by-side on the same baseline. */
+.row.gap { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+
 /* ─── Links to explorers ────────────────────────────────── */
 .tx, .addr {
   font-family: var(--ff-mono);

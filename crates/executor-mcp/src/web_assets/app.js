@@ -395,13 +395,65 @@
   function verdictBadge(v) {
     if (!v) return el("span", { class: "badge", text: "—" });
     const cls = (
-      v === "aligned"          ? "ok" :
+      v === "satisfied"         ? "ok" :
+      v === "aligned"           ? "ok" :
+      v === "partial"           ? "warn" :
       v === "partially_aligned" ? "warn" :
-      v === "misaligned"       ? "bad" :
-      v === "no_policy"        ? "partial" :
+      v === "missing"           ? "bad" :
+      v === "misaligned"        ? "bad" :
       "partial"
     );
     return el("span", { class: "badge " + cls, text: v });
+  }
+
+  // ─── Copy-report helpers ──────────────────────────────────
+  // Compose a plain-text report block for an error/anomaly. The user
+  // copies it from the UI and pastes it back to the agent (Claude) so
+  // diagnosis doesn't require manual screenshotting or hex-id retyping.
+  //
+  // `kind` is the report family ("policy_alignment", "view_failure", ...).
+  // `ctx` is a {label: value} map; values are stringified line-by-line in
+  // declaration order. Sub-arrays render as "  - " bullet lists.
+  function composeReport(kind, ctx) {
+    const at = new Date().toISOString();
+    const lines = ["osmcp " + kind + " report (" + at + ")"];
+    for (const k of Object.keys(ctx)) {
+      const v = ctx[k];
+      if (v == null) continue;
+      if (Array.isArray(v)) {
+        lines.push(k + ":");
+        v.forEach((entry) => {
+          if (entry == null) return;
+          if (typeof entry === "string") {
+            lines.push("  - " + entry);
+          } else {
+            lines.push("  - " + JSON.stringify(entry));
+          }
+        });
+      } else if (typeof v === "object") {
+        lines.push(k + ": " + JSON.stringify(v));
+      } else {
+        lines.push(k + ": " + String(v));
+      }
+    }
+    return lines.join("\n");
+  }
+
+  // Compact button — copies the composed report block to the clipboard
+  // and flashes "copied" briefly. `stopPropagation` so the button can
+  // sit inside a clickable row without triggering navigation.
+  function reportBtn(kind, ctx, label) {
+    const btn = el("button", {
+      class: "copy",
+      title: "copy " + kind + " report",
+      onclick: (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        copyToClipboard(composeReport(kind, ctx), btn);
+      },
+      text: label || "copy report",
+    });
+    return btn;
   }
 
   // ─── Tab: Portfolio ────────────────────────────────────────
@@ -610,6 +662,20 @@
       tr.appendChild(el("td", { class: "num mono", text: String(last24.failed || 0) }));
       const polTd = el("td");
       polTd.appendChild(verdictBadge(s.policy_alignment));
+      // Non-satisfied verdicts get a "copy report" button so the user can
+      // paste the diagnosis context to the agent in one shot. The list
+      // row only carries the verdict string; full alignment lives on
+      // strategy://{id} (referenced in the report).
+      if (s.policy_alignment && s.policy_alignment !== "satisfied") {
+        polTd.appendChild(document.createTextNode(" "));
+        polTd.appendChild(reportBtn("policy_alignment", {
+          strategy_id:        s.id,
+          name:               s.name,
+          verdict:            s.policy_alignment,
+          detail_uri:         "strategy://" + s.id,
+          contracts_touched:  "see strategy://" + s.id + " for contracts_touched + missing entries",
+        }));
+      }
       tr.appendChild(polTd);
       tr.appendChild(el("td", { class: "mono", title: s.last_fire_at || "",
         text: s.last_fire_at ? fmt.rel(s.last_fire_at) : "—" }));
@@ -656,6 +722,30 @@
         .forEach((k) => { if (d[k] != null) meta[k] = d[k]; });
       detailBody.appendChild(renderObjectAsKV(meta, chain));
 
+      // Full policy_alignment report — copied to clipboard for paste-back.
+      // The detail endpoint carries the structured alignment object
+      // (verdict + missing[] + remediation), so this report is richer than
+      // the list-row version.
+      const pa = d.policy_alignment;
+      if (pa && typeof pa === "object" && pa.verdict && pa.verdict !== "satisfied") {
+        const row = el("div", { class: "row gap" });
+        row.appendChild(el("span", { class: "dim", text: "alignment report:" }));
+        const missingDesc = (pa.missing || []).map((m) => {
+          const sels = (m.selectors || []).join(", ");
+          return (m.contract || "?") + (sels ? " [" + sels + "]" : "") +
+                 (m.reason ? " — " + m.reason : "");
+        });
+        row.appendChild(reportBtn("policy_alignment", {
+          strategy_id:  d.strategy_id || id,
+          name:         d.name,
+          verdict:      pa.verdict,
+          missing:      missingDesc,
+          remediation:  pa.remediation,
+          detail_uri:   "strategy://" + (d.strategy_id || id),
+        }));
+        detailBody.appendChild(row);
+      }
+
       // view auto-render
       const view = d.view_output || {};
       const data = view.data || view;
@@ -663,14 +753,29 @@
       if (data && typeof data === "object" && !Array.isArray(data)) {
         Object.keys(data).forEach((k) => { if (k !== "$assets") obs[k] = data[k]; });
       }
-      if (Object.keys(obs).length > 0) {
+      // Render the View-output section when either there's data to show OR
+      // the view failed (so the copy-report button is reachable even on a
+      // bare confidence:"partial"/"missing" envelope with null data).
+      const viewFailed = view.confidence && view.confidence !== "full";
+      if (Object.keys(obs).length > 0 || viewFailed) {
         root.appendChild(section("View output", (function () {
           const b = el("div", { class: "section-body" });
-          if (view.confidence && view.confidence !== "full") {
-            b.appendChild(el("div", null, [el("span", { class: "badge partial", text: view.confidence })]));
+          if (viewFailed) {
+            const headRow = el("div", { class: "row gap" }, [
+              el("span", { class: "badge partial", text: view.confidence }),
+              reportBtn("view_failure", {
+                strategy_id:  d.strategy_id || id,
+                name:         d.name,
+                confidence:   view.confidence,
+                reason:       view.reason,
+                remediation:  view.remediation,
+                view_uri:     "strategy://" + (d.strategy_id || id) + "/view",
+              }),
+            ]);
+            b.appendChild(headRow);
           }
           if (view.reason) b.appendChild(el("div", { class: "dim", text: view.reason }));
-          b.appendChild(renderObjectAsKV(obs, chain));
+          if (Object.keys(obs).length > 0) b.appendChild(renderObjectAsKV(obs, chain));
           return b;
         })()));
       }
