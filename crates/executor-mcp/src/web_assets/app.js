@@ -21,7 +21,18 @@
     historyFilters: { strategy_id: "", status: "", since: "" },
     // cache of last data so partial-failure re-renders don't blank tabs
     cache: { portfolio: null, strategies: null, policy: null, triggers: null, runs: null },
+    // Anti-flicker: per-target stable JSON hashes of the last RENDERED payload.
+    // Tab renderers (and the detail-page async populator) skip the DOM rebuild
+    // when the incoming payload's hash matches the last one painted.
+    lastHash: { detail: null },
   };
+
+  /// Cheap stable hash of an arbitrary JSON value — used to skip no-op
+  /// re-renders. NOT cryptographic; collisions are fine, the cost of a false
+  /// skip is one missed render-tick (next poll catches up).
+  function jsonHash(v) {
+    return JSON.stringify(v);
+  }
 
   // ─── Element shortcuts ─────────────────────────────────────
   const $  = (s, r) => (r || document).querySelector(s);
@@ -712,7 +723,63 @@
     detailSec.appendChild(detailBody);
     root.appendChild(detailSec);
 
+    // Per-strategy triggers section — populated below after /api/triggers
+    // is pulled. Kept outside the async callback so the section header
+    // appears immediately and the poll can append rows incrementally.
+    const triggersSec = el("div", { class: "section" });
+    triggersSec.appendChild(el("div", { class: "section-head", text: "triggers" }));
+    const triggersBody = el("div", { class: "section-body" });
+    triggersBody.appendChild(el("div", { class: "dim", text: "loading…" }));
+    triggersSec.appendChild(triggersBody);
+    root.appendChild(triggersSec);
+
+    // Cached triggers list ships in S.cache.triggers when the user has
+    // visited the Triggers tab once; otherwise we fetch on demand.
+    const fillTriggers = (triggersData) => {
+      const all = (triggersData && triggersData.triggers) || [];
+      const mine = all.filter((t) => t.strategy_id === id);
+      triggersBody.innerHTML = "";
+      if (mine.length === 0) {
+        triggersBody.appendChild(el("div", { class: "dim", text: "no triggers attached" }));
+        return;
+      }
+      const tbl = el("table", { class: "compact" });
+      tbl.appendChild(el("thead", null, [el("tr", null, [
+        el("th", { text: "kind" }),
+        el("th", { text: "enabled" }),
+        el("th", { text: "last fired" }),
+        el("th", { text: "id" }),
+      ])]));
+      const tb = el("tbody");
+      mine.forEach((t) => {
+        const tr = el("tr");
+        tr.appendChild(el("td", { class: "mono", text: t.kind || "" }));
+        tr.appendChild(el("td", { class: "mono",
+          text: t.enabled === false ? "no" : "yes" }));
+        tr.appendChild(el("td", { class: "mono",
+          text: t.last_fired_at ? fmt.rel(t.last_fired_at) : "—",
+          title: t.last_fired_at || "" }));
+        tr.appendChild(el("td", { class: "mono",
+          text: fmt.shortHex(t.id || "", 6, 4), title: t.id || "" }));
+        tb.appendChild(tr);
+      });
+      tbl.appendChild(tb);
+      triggersBody.appendChild(tbl);
+    };
+    if (S.cache.triggers) fillTriggers(S.cache.triggers);
+    else getJson("/api/triggers").then(fillTriggers, () => {
+      triggersBody.innerHTML = "";
+      triggersBody.appendChild(el("div", { class: "dim", text: "trigger fetch failed" }));
+    });
+
     getJson("/api/strategy/" + encodeURIComponent(id)).then((d) => {
+      // Anti-flicker: skip the rebuild when the payload hash matches the
+      // last successful render. The 5s poll mostly produces identical
+      // bodies; rebuilding the DOM every tick is what made the page
+      // blink visibly. Identical hash ⇒ DOM already correct ⇒ no-op.
+      const h = jsonHash(d);
+      if (h === S.lastHash.detail) return;
+      S.lastHash.detail = h;
       detailBody.innerHTML = "";
       const chain = portfolio && portfolio.chain_id;
       // meta block — `policy_alignment` is lifted out and rendered as a
@@ -1169,10 +1236,15 @@
         getJson("/api/portfolio").catch((e) => ({ _err: e })),
         getJson("/api/strategies").catch((e) => ({ _err: e })),
       ];
-      // Tab-specific extras
+      // Tab-specific extras. The strategy DETAIL view (strategies tab with
+      // a sub.strategy) also wants live triggers so the per-strategy
+      // trigger table refreshes alongside the meta block.
       if (S.tab === "policy")   tasks.push(getJson("/api/policy").catch((e) => ({ _err: e })));
       if (S.tab === "triggers") tasks.push(getJson("/api/triggers").catch((e) => ({ _err: e })));
       if (S.tab === "history")  tasks.push(getJson(buildRunsPath()).catch((e) => ({ _err: e })));
+      if (S.tab === "strategies" && S.sub && S.sub.strategy) {
+        tasks.push(getJson("/api/triggers").catch((e) => ({ _err: e })));
+      }
 
       const results = await Promise.all(tasks);
       if (!results[0]._err) S.cache.portfolio  = results[0];
@@ -1181,6 +1253,8 @@
       if (S.tab === "policy"   && tail[0] && !tail[0]._err) S.cache.policy   = tail[0];
       if (S.tab === "triggers" && tail[0] && !tail[0]._err) S.cache.triggers = tail[0];
       if (S.tab === "history"  && tail[0] && !tail[0]._err) S.cache.runs     = tail[0];
+      if (S.tab === "strategies" && S.sub && S.sub.strategy
+          && tail[0] && !tail[0]._err) S.cache.triggers = tail[0];
 
       // Consider the cycle successful if at least portfolio came through;
       // others are best-effort and the previous cache stays valid.
@@ -1216,6 +1290,10 @@
     const { tab, sub } = parseHash();
     S.tab = tab;
     S.sub = sub && Object.keys(sub).length ? sub : null;
+    // Reset the detail-page anti-flicker hash so navigation between
+    // strategies (or leaving the detail page) forces a fresh paint
+    // instead of being silently skipped against the previous payload.
+    S.lastHash.detail = null;
     setActiveTab();
     renderTab();
     pollNow();
