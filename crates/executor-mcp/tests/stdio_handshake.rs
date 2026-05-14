@@ -362,9 +362,9 @@ async fn resources_surface_matches_contract() -> Result<()> {
     }
 
     // resources/read → resource_not_found (-32002) with data.uri echoed.
-    // Plan 02-02 narrows the assertion: a non-hex id surfaces as
-    // `data.code == "malformed_id"`; the legacy `data.phase == 1` envelope
-    // belongs to Phase 1 and no longer applies now that `strategy://` is wired.
+    // v1.11 Track A: typed-only error construction surfaces the discriminator
+    // on `data.kind` ("malformed_strategy_id" for a non-hex id); `data.code`
+    // mirrors the JSON-RPC error class ("resource_not_found").
     send(
         &mut proc,
         json!({
@@ -376,7 +376,15 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let r = recv(&mut proc).await?;
     assert_eq!(r["error"]["code"], -32002, "expected resource_not_found");
     assert_eq!(r["error"]["data"]["uri"], "strategy://nonexistent");
-    assert_eq!(r["error"]["data"]["code"], "malformed_id");
+    assert_eq!(r["error"]["data"]["code"], "resource_not_found");
+    assert_eq!(r["error"]["data"]["kind"], "malformed_strategy_id");
+    assert!(
+        r["error"]["data"]["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("strategy://list")),
+        "malformed_strategy_id hint should point at strategy://list: {}",
+        r["error"]["data"]
+    );
 
     proc.child.kill().await?;
     Ok(())
@@ -1086,7 +1094,10 @@ async fn strategy_by_name_resource_only_returns_active() -> Result<()> {
     let g = recv(&mut proc).await?;
     let err = &g["error"];
     assert_eq!(err["code"], -32002);
-    assert_eq!(err["data"]["code"], "not_found");
+    // v1.11 Track A: typed-only error construction puts the JSON-RPC error
+    // class on `data.code` and the typed discriminator on `data.kind`.
+    assert_eq!(err["data"]["code"], "resource_not_found");
+    assert_eq!(err["data"]["kind"], "strategy_by_name_not_found");
 
     proc.child.kill().await?;
     Ok(())

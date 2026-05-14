@@ -36,7 +36,12 @@ use rmcp::{
 use serde_json::json;
 
 use crate::{
-    errors::{invalid_params, map_state_error, storage_error},
+    errors::{
+        invalid_params, lineage_no_active_version, lineage_not_found, malformed_lineage_id,
+        malformed_run_id, malformed_strategy_id, malformed_strategy_name, map_state_error,
+        run_not_found, storage_error, strategy_by_name_not_found, strategy_not_found,
+        trigger_not_found, unknown_embedded_resource, unsupported_resource_uri,
+    },
     tools::build_execution_report,
 };
 
@@ -1000,10 +1005,7 @@ pub(crate) async fn dispatch_uri(
             ResourceContents::text(doc.to_string(), uri).with_mime_type("text/markdown"),
         ]));
     }
-    Err(McpError::resource_not_found(
-        format!("unsupported resource URI: {uri}"),
-        Some(json!({ "uri": uri, "phase": 3 })),
-    ))
+    Err(unsupported_resource_uri(&uri))
 }
 
 async fn read_strategy(
@@ -1015,10 +1017,7 @@ async fn read_strategy(
     // the DB. Mirrors `validation::validate_strategy_id_format` but surfaces
     // as resource_not_found (-32002) per the resources/read contract.
     if id.len() != 64 || !id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
-        return Err(McpError::resource_not_found(
-            format!("malformed strategy id in uri: {uri}"),
-            Some(json!({ "uri": uri, "code": "malformed_id" })),
-        ));
+        return Err(malformed_strategy_id(&uri));
     }
 
     // Pull row + active policy + version in one blocking pass so alignment
@@ -1039,10 +1038,7 @@ async fn read_strategy(
     let (row, active_policy, version) = lookup;
 
     match row {
-        None => Err(McpError::resource_not_found(
-            format!("strategy {uri} not found"),
-            Some(json!({ "uri": uri })),
-        )),
+        None => Err(strategy_not_found(&uri)),
         Some(s) => {
             let body = enrich_strategy_body(s, active_policy.as_ref(), version)?;
             let body_text = serde_json::to_string(&body)
@@ -1129,7 +1125,7 @@ async fn read_execution(
     validate_run_resource_id(&uri, &run_id)?;
     let report = build_execution_report(state, run_id).await.map_err(|err| {
         if err.code.0 == -32014 {
-            McpError::resource_not_found(format!("run {uri} not found"), Some(json!({ "uri": uri })))
+            run_not_found(&uri)
         } else {
             err
         }
@@ -1382,10 +1378,7 @@ fn validate_run_resource_id(uri: &str, run_id: &str) -> Result<(), McpError> {
     // Boundary check: ULID is 26 chars, alphanumeric (Crockford). Permissive
     // shape check matches the Phase-2 strategy:// posture.
     if run_id.len() != 26 || !run_id.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(McpError::resource_not_found(
-            format!("malformed run id in uri: {uri}"),
-            Some(json!({ "uri": uri, "code": "malformed_id" })),
-        ));
+        return Err(malformed_run_id(uri));
     }
     Ok(())
 }
@@ -1417,10 +1410,7 @@ async fn read_journal(
     let (sources, actions, logs, decisions) = match result {
         Some(t) => t,
         None => {
-            return Err(McpError::resource_not_found(
-                format!("run {uri} not found"),
-                Some(json!({ "uri": uri })),
-            ));
+            return Err(run_not_found(&uri));
         }
     };
 
@@ -1489,10 +1479,7 @@ async fn read_trigger(
     .map_err(map_state_error)?;
 
     match row {
-        None => Err(McpError::resource_not_found(
-            format!("trigger {uri} not found"),
-            Some(json!({ "uri": uri })),
-        )),
+        None => Err(trigger_not_found(&uri)),
         Some(t) => {
             let body = serde_json::to_string(&t)
                 .map_err(|e| storage_error(format!("serialize trigger: {e}")))?;
@@ -1563,10 +1550,7 @@ fn read_embedded(
         ])),
         None => {
             let known: Vec<&str> = table.iter().map(|(n, _)| *n).collect();
-            Err(McpError::resource_not_found(
-                format!("unknown embedded resource: {uri}"),
-                Some(json!({ "uri": uri, "known": known })),
-            ))
+            Err(unknown_embedded_resource(&uri, &known))
         }
     }
 }
@@ -1883,10 +1867,7 @@ async fn read_strategy_lineage_active(
     _evm: ViewEvm,
 ) -> Result<ReadResourceResult, McpError> {
     if lineage_id.is_empty() {
-        return Err(McpError::resource_not_found(
-            format!("malformed lineage_id in uri: {uri}"),
-            Some(json!({ "uri": uri, "code": "malformed_lineage_id" })),
-        ));
+        return Err(malformed_lineage_id(&uri));
     }
     let lin_owned = lineage_id.clone();
     let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
@@ -1904,16 +1885,7 @@ async fn read_strategy_lineage_active(
     .map_err(map_state_error)?;
     let (row, active_policy, version) = lookup;
     match row {
-        None => Err(McpError::resource_not_found(
-            format!("no active version for lineage `{lineage_id}`"),
-            Some(json!({
-                "uri": uri,
-                "code": "not_found",
-                "hint": "the lineage's most recent version was soft-deleted; \
-                         re-register the strategy name to mint a new lineage \
-                         OR read strategy://lineage/{id}/history for archived versions",
-            })),
-        )),
+        None => Err(lineage_no_active_version(&uri, &lineage_id)),
         Some(s) => {
             let body = enrich_strategy_body(s, active_policy.as_ref(), version)?;
             let body_text = serde_json::to_string(&body)
@@ -1935,10 +1907,7 @@ async fn read_strategy_lineage_history(
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
     if lineage_id.is_empty() {
-        return Err(McpError::resource_not_found(
-            format!("malformed lineage_id in uri: {uri}"),
-            Some(json!({ "uri": uri, "code": "malformed_lineage_id" })),
-        ));
+        return Err(malformed_lineage_id(&uri));
     }
     let lin_owned = lineage_id.clone();
     let rows = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
@@ -1949,10 +1918,7 @@ async fn read_strategy_lineage_history(
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
     if rows.is_empty() {
-        return Err(McpError::resource_not_found(
-            format!("no rows for lineage `{lineage_id}`"),
-            Some(json!({ "uri": uri, "code": "not_found" })),
-        ));
+        return Err(lineage_not_found(&uri, &lineage_id));
     }
     let versions_json: Vec<serde_json::Value> = rows
         .iter()
@@ -1989,14 +1955,7 @@ async fn read_strategy_by_name(
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
     if name.is_empty() {
-        return Err(McpError::resource_not_found(
-            format!("malformed name in uri: {uri}"),
-            Some(json!({
-                "uri": uri,
-                "code": "malformed_name",
-                "hint": "name must be a non-empty URI segment",
-            })),
-        ));
+        return Err(malformed_strategy_name(&uri));
     }
     let name_for_lookup = name.clone();
     let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
@@ -2015,14 +1974,7 @@ async fn read_strategy_by_name(
     .map_err(map_state_error)?;
     let (row, active_policy, version) = lookup;
     match row {
-        None => Err(McpError::resource_not_found(
-            format!("strategy with name `{name}` not found"),
-            Some(json!({
-                "uri": uri,
-                "code": "not_found",
-                "hint": "list active strategies via strategy://list?status=active",
-            })),
-        )),
+        None => Err(strategy_by_name_not_found(&uri, &name)),
         Some(s) => {
             let body = enrich_strategy_body(s, active_policy.as_ref(), version)?;
             let body_text = serde_json::to_string(&body)
@@ -2263,10 +2215,7 @@ async fn read_strategy_view(
     evm: ViewEvm,
 ) -> Result<ReadResourceResult, McpError> {
     if id.len() != 64 || !id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
-        return Err(McpError::resource_not_found(
-            format!("malformed strategy id in uri: {uri}"),
-            Some(json!({ "uri": uri, "code": "malformed_id" })),
-        ));
+        return Err(malformed_strategy_id(&uri));
     }
 
     // 1. Load strategy + lineage-wide records snapshot in one blocking pass.
@@ -2287,10 +2236,7 @@ async fn read_strategy_view(
     .map_err(map_state_error)?;
     let (strategy, records_rows) = lookup;
     let Some(strategy) = strategy else {
-        return Err(McpError::resource_not_found(
-            format!("strategy {uri} not found"),
-            Some(json!({ "uri": uri, "code": "not_found" })),
-        ));
+        return Err(strategy_not_found(&uri));
     };
 
     // 2. Fallback when no view source is registered.
@@ -2573,10 +2519,7 @@ async fn read_strategy_records(
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
     if id.len() != 64 || !id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
-        return Err(McpError::resource_not_found(
-            format!("malformed strategy id in uri: {uri}"),
-            Some(json!({ "uri": uri, "code": "malformed_id" })),
-        ));
+        return Err(malformed_strategy_id(&uri));
     }
 
     // Parse `since` filter.
