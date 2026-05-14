@@ -102,11 +102,30 @@ fn run_serve(no_ui: bool, ui_port: Option<u16>) -> Result<()> {
         // v1.6 Track 6A: spawn the local web UI in a sibling tokio task.
         // The MCP stdio server keeps running regardless of UI bind result —
         // a port collision logs a warn but is non-fatal.
+        //
+        // v1.6 Track 6C: also wire a provider + EVM config into the UI so
+        // `/api/portfolio` can run the idle balance walk. `build_provider`
+        // does no network IO, so this is safe to call eagerly at boot.
+        let evm_config = cfg.evm_config().map_err(|e| {
+            anyhow::anyhow!("parsing [evm] config for UI: {}", e.detail_for_log())
+        })?;
+        let provider = match executor_evm::build_provider(&evm_config) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e.detail_for_log(),
+                    "ui: provider construction failed — portfolio balance walk disabled"
+                );
+                None
+            }
+        };
         let ui_opts = web::WebUiOptions::from_env_and_config(
             cfg.evm.simulation_from.clone(),
             None,
             no_ui,
             ui_port,
+            provider,
+            evm_config,
         );
         match web::spawn(server.state_handle(), ui_opts).await {
             Ok(Some((addr, _handle))) => {

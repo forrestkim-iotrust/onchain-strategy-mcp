@@ -24,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy::providers::DynProvider;
 use axum::{
     Json, Router,
     extract::{Path, RawQuery, State},
@@ -31,16 +32,17 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::{any, get},
 };
+use executor_evm::EvmConfig;
 use executor_state::StateStore;
 use rmcp::ErrorData as McpError;
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
-    sync::Mutex,
+    sync::{Mutex, OnceCell},
     task::JoinHandle,
 };
 
-use crate::resources;
+use crate::{resources, web_portfolio};
 
 /// v1.6 Track 6A: default port, picked from the plan's "Fixed decisions"
 /// (`Port | Fixed 8473`). Falls back to next free port on conflict.
@@ -81,8 +83,19 @@ pub struct WebUiOptions {
     /// `[evm].simulation_from` at boot.
     pub burner: String,
     /// Chain id surfaced in `/api/portfolio`. The web UI is single-chain;
-    /// future multi-chain runs will need a different shape.
+    /// future multi-chain runs will need a different shape. When `None` the
+    /// portfolio handler attempts to resolve it via `eth_chainId` on first
+    /// request and caches the result for the server's lifetime.
     pub chain_id: Option<u64>,
+    /// v1.6 Track 6C: provider used by the idle balance walk. `None` ⇒ the
+    /// walk short-circuits with `_balance_walk_status: "no_provider"`. The
+    /// provider is built lazily by `executor_evm::build_provider` which
+    /// does no network IO, so this is cheap to pass.
+    pub provider: Option<Arc<DynProvider>>,
+    /// v1.6 Track 6C: EVM config (notably `call_timeout`) used by the
+    /// balance walk. Default is fine when no provider is supplied — the
+    /// fields are only read when `provider.is_some()`.
+    pub evm_config: EvmConfig,
 }
 
 /// Pull `WebUiOptions` out of env vars and a parsed `[evm]`-style config.
@@ -93,6 +106,8 @@ impl WebUiOptions {
         chain_id: Option<u64>,
         cli_no_ui: bool,
         cli_ui_port: Option<u16>,
+        provider: Option<Arc<DynProvider>>,
+        evm_config: EvmConfig,
     ) -> Self {
         let env_no_ui = std::env::var("OSMCP_NO_UI")
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
@@ -102,6 +117,8 @@ impl WebUiOptions {
             port_override: cli_ui_port,
             burner,
             chain_id,
+            provider,
+            evm_config,
         }
     }
 }
@@ -125,8 +142,20 @@ struct ViewCacheEntry {
 struct AppState {
     state: Arc<Mutex<StateStore>>,
     burner: String,
-    chain_id: Option<u64>,
+    /// v1.6 Track 6C: chain id is now lazy-resolved. The cell starts seeded
+    /// with `WebUiOptions::chain_id` when the operator pinned it explicitly;
+    /// otherwise the first `/api/portfolio` request resolves it through the
+    /// provider (and the result sticks for the server lifetime).
+    chain_id_cell: Arc<OnceCell<u64>>,
     view_cache: Arc<Mutex<HashMap<String, ViewCacheEntry>>>,
+    /// v1.6 Track 6C: provider for the idle balance walk. `None` ⇒ walk
+    /// short-circuits.
+    provider: Option<Arc<DynProvider>>,
+    evm_config: EvmConfig,
+    /// v1.6 Track 6C: forever-cache of token `(symbol, decimals)` keyed by
+    /// lowercase token address. Avoids re-fetching ABI metadata on every
+    /// portfolio poll.
+    token_meta_cache: web_portfolio::TokenMetaCache,
 }
 
 /// Build the axum router. Pulled out so tests can spawn it directly.
@@ -170,11 +199,21 @@ pub async fn spawn(
         "🌐 UI: http://{}", addr
     );
 
+    let chain_id_cell = Arc::new(OnceCell::new());
+    if let Some(cid) = opts.chain_id {
+        // Seed eagerly when the operator pinned `chain_id` at boot. Ignore
+        // the result — set() only fails if already initialised, which can't
+        // happen on a fresh cell.
+        let _ = chain_id_cell.set(cid);
+    }
     let app_state = AppState {
         state,
         burner: opts.burner,
-        chain_id: opts.chain_id,
+        chain_id_cell,
         view_cache: Arc::new(Mutex::new(HashMap::new())),
+        provider: opts.provider,
+        evm_config: opts.evm_config,
+        token_meta_cache: web_portfolio::new_token_meta_cache(),
     };
     let app = build_router(app_state);
 
@@ -378,8 +417,9 @@ async fn api_run(State(app): State<AppState>, Path(id): Path<String>) -> Respons
 }
 
 /// `/api/portfolio` — composite endpoint. Burner address + chain + the
-/// merged view output of every active strategy. Cached per-strategy with a
-/// 5s TTL keyed on the latest captured record timestamp.
+/// merged view output of every active strategy + idle wallet balances +
+/// aggregated `$assets` declarations. Cached per-strategy with a 5s TTL
+/// keyed on the latest captured record timestamp.
 async fn api_portfolio(State(app): State<AppState>) -> Response {
     // 1. Pull strategy summaries (we want only the active rows).
     let listing = match resources::dispatch_uri_to_json(
@@ -397,8 +437,12 @@ async fn api_portfolio(State(app): State<AppState>) -> Response {
         .cloned()
         .unwrap_or_default();
 
-    // 2. For each strategy, fetch (or read from cache) its view output.
+    // 2. For each strategy, fetch (or read from cache) its view output, and
+    //    pull the strategy row so we can grab `contracts_touched_json` for the
+    //    balance-walk token candidates without a second round-trip.
     let mut strategy_payloads = Vec::with_capacity(summaries.len());
+    let mut sid_view_pairs: Vec<(String, Value)> = Vec::with_capacity(summaries.len());
+    let mut contracts_blobs: Vec<Value> = Vec::with_capacity(summaries.len());
     for s in &summaries {
         let id = match s.get("id").and_then(Value::as_str) {
             Some(i) => i.to_string(),
@@ -410,24 +454,84 @@ async fn api_portfolio(State(app): State<AppState>) -> Response {
             .unwrap_or("")
             .to_string();
         let view = fetch_view_cached(&app, &id).await;
+        // Pull the strategy row to access contracts_touched_json. The strategy
+        // resource is dispatched through the same single-source-of-truth path.
+        let strategy_meta = resources::dispatch_uri_to_json(
+            format!("strategy://{id}"),
+            app.state.clone(),
+        )
+        .await
+        .ok();
+        if let Some(meta) = &strategy_meta
+            && let Some(ct) = meta.get("contracts_touched")
+        {
+            contracts_blobs.push(ct.clone());
+        }
+        sid_view_pairs.push((id.clone(), view.clone()));
         strategy_payloads.push(json!({
             "id": id,
             "name": name,
-            "view": view,
+            "view_output": view,
         }));
     }
 
-    // 3. Runtime burner idle balances. v1.6 Track 6A ships the burner +
-    // chain envelope; the actual balance walk against the RPC is deferred
-    // to Track 6C. Returning an empty array here is honest — the frontend
-    // can render "—" until the aggregator lands.
+    // 3. Idle balance walk (Track 6C). Resolves chain_id lazily on first
+    //    call; subsequent polls hit the cached value via OnceCell.
+    let token_candidates = web_portfolio::collect_token_candidates(&contracts_blobs);
+    let seeded_chain = app.chain_id_cell.get().copied();
+    let (idle_balances, walk_status, resolved_chain) = web_portfolio::run_balance_walk(
+        app.provider.clone(),
+        &app.evm_config,
+        &app.token_meta_cache,
+        &app.burner,
+        seeded_chain,
+        &token_candidates,
+    )
+    .await;
+    // Memoise the resolved chain id for next time. `set()` is a no-op when
+    // the cell is already initialised (or was seeded at boot).
+    if let Some(cid) = resolved_chain {
+        let _ = app.chain_id_cell.set(cid);
+    }
+
+    // 4. `$assets` aggregation across strategies + per-strategy truncation
+    //    flags. The total cap counts idle balances toward MAX_TOTAL_ASSETS
+    //    so the frontend never has to hand-merge two capped lists.
+    let (assets, truncated_map, total_capped) =
+        web_portfolio::aggregate_strategy_assets(&sid_view_pairs, idle_balances.len());
+
+    // 5. Annotate each strategy payload with `_truncated` when its
+    //    `$assets` contribution hit the per-strategy cap.
+    for payload in strategy_payloads.iter_mut() {
+        if let Some(obj) = payload.as_object_mut() {
+            let sid = obj
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if truncated_map.get(&sid).copied().unwrap_or(false) {
+                obj.insert("_truncated".to_string(), Value::Bool(true));
+            }
+        }
+    }
+
+    // 6. Final status: a per-strategy total-cap trip wins over a per-token
+    //    rpc_error so the frontend knows the response is incomplete.
+    let final_status = if total_capped {
+        web_portfolio::BalanceWalkStatus::Truncated
+    } else {
+        walk_status
+    };
+
     let body = json!({
         "burner": app.burner,
-        "chain": app.chain_id,
+        "chain_id": app.chain_id_cell.get().copied(),
         "refreshed_at": chrono::Utc::now()
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "idle_balances": [],
+        "idle_balances": idle_balances,
+        "assets": assets,
         "strategies": strategy_payloads,
+        "_balance_walk_status": final_status.as_str(),
     });
     json_response(Ok(body))
 }
@@ -577,7 +681,14 @@ mod tests {
 
     #[tokio::test]
     async fn options_disabled_when_cli_flag_set() {
-        let opts = WebUiOptions::from_env_and_config("0x".into(), Some(8453), true, None);
+        let opts = WebUiOptions::from_env_and_config(
+            "0x".into(),
+            Some(8453),
+            true,
+            None,
+            None,
+            EvmConfig::default(),
+        );
         assert!(opts.disabled, "--no-ui CLI must disable the UI");
     }
 
@@ -589,7 +700,14 @@ mod tests {
         // covers the negative branch via the cli-flag input. The env-var
         // branch is exercised by the binary integration test
         // `disabled_via_env_var_does_not_bind` in `tests/web_api.rs`.
-        let opts = WebUiOptions::from_env_and_config("0x".into(), Some(8453), false, None);
+        let opts = WebUiOptions::from_env_and_config(
+            "0x".into(),
+            Some(8453),
+            false,
+            None,
+            None,
+            EvmConfig::default(),
+        );
         // We can only assert this when OSMCP_NO_UI is not set in the test
         // environment. CI sets RUST_LOG=error and nothing else; this is safe.
         if std::env::var("OSMCP_NO_UI").is_err() {
