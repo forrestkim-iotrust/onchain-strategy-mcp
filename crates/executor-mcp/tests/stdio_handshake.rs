@@ -220,7 +220,10 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let mut proc = spawn_server().await?;
     let _ = initialize(&mut proc).await?;
 
-    // resources/list → empty array
+    // v1.11 Track I — resources/list now publishes the 12 stable static
+    // entrypoints (the "30-second rule" agent-discovery surface). Dynamic
+    // per-instance URIs (strategy://{id}, journal://{id}, etc.) remain in
+    // `resources/templates/list`.
     send(
         &mut proc,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
@@ -230,10 +233,59 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let list = r["result"]["resources"]
         .as_array()
         .expect("resources array");
-    assert!(
-        list.is_empty(),
-        "resources/list must be empty in Phase 1, got {list:?}"
+    assert_eq!(
+        list.len(),
+        12,
+        "resources/list must publish exactly 12 static entrypoints, got {}: {list:?}",
+        list.len()
     );
+    let expected_static_uris: &[&str] = &[
+        "strategy://list",
+        "trigger://list",
+        "execution://list",
+        "policy://current",
+        "policy://history",
+        "runtime://status",
+        "runtime://signals",
+        "runtime://recent",
+        "portfolio://",
+        "examples://strategies",
+        "docs://strategy-bundle",
+        "docs://policy-model",
+    ];
+    let listed_uris: Vec<&str> = list
+        .iter()
+        .map(|r| r["uri"].as_str().unwrap_or_default())
+        .collect();
+    for required in expected_static_uris {
+        assert!(
+            listed_uris.contains(required),
+            "v1.11 Track I catalog missing {required}; got {listed_uris:?}"
+        );
+    }
+    // Shape assertion: every entry must have non-empty uri/name/description/mimeType.
+    for entry in list {
+        let uri = entry["uri"].as_str().unwrap_or_default();
+        assert!(!uri.is_empty(), "resource entry missing uri: {entry:?}");
+        assert!(
+            entry["name"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "resource {uri} missing non-empty name: {entry:?}"
+        );
+        assert!(
+            entry["description"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "resource {uri} missing non-empty description: {entry:?}"
+        );
+        assert!(
+            entry["mimeType"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "resource {uri} missing non-empty mimeType: {entry:?}"
+        );
+    }
 
     // resources/templates/list → 3 URI templates
     send(
@@ -325,6 +377,59 @@ async fn resources_surface_matches_contract() -> Result<()> {
     assert_eq!(r["error"]["code"], -32002, "expected resource_not_found");
     assert_eq!(r["error"]["data"]["uri"], "strategy://nonexistent");
     assert_eq!(r["error"]["data"]["code"], "malformed_id");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+/// v1.11 Track I — deferred callability assertion for every URI published
+/// by `resources/list`. Tracks B (`runtime://*`) and C (`portfolio://`)
+/// add the missing handlers in Wave 1; until then this test is
+/// `#[ignore]`d so the catalog-shape assertion above can land
+/// independently. Re-run with `--ignored` after Wave 1 merges.
+#[tokio::test]
+#[ignore = "v1.11 Wave 1: runtime://* and portfolio:// handlers land in Tracks B and C"]
+async fn resources_list_entries_are_callable() -> Result<()> {
+    let mut proc = spawn_server().await?;
+    let _ = initialize(&mut proc).await?;
+
+    send(
+        &mut proc,
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let list = r["result"]["resources"]
+        .as_array()
+        .expect("resources array")
+        .clone();
+    assert_eq!(list.len(), 12, "expected 12 static entrypoints");
+
+    let mut next_id: i64 = 3;
+    for entry in &list {
+        let uri = entry["uri"]
+            .as_str()
+            .expect("resource entry must carry a uri")
+            .to_string();
+        send(
+            &mut proc,
+            json!({
+                "jsonrpc": "2.0", "id": next_id, "method": "resources/read",
+                "params": { "uri": uri }
+            }),
+        )
+        .await?;
+        let resp = recv(&mut proc).await?;
+        // The honesty contract allows handlers to return
+        // `confidence: "missing"` for unconfigured runtime — that is a
+        // *success* response, not a JSON-RPC error. The only thing this
+        // test forbids is the handler erroring out (no envelope at all).
+        assert!(
+            resp.get("result").is_some(),
+            "resources/read({uri}) returned no result envelope: {resp:?}"
+        );
+        next_id += 1;
+    }
 
     proc.child.kill().await?;
     Ok(())

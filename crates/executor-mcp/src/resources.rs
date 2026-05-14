@@ -28,8 +28,8 @@ use rmcp::{
     ErrorData as McpError, RoleServer,
     model::{
         Annotated, ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
-        RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-        ResourceTemplate,
+        RawResource, RawResourceTemplate, ReadResourceRequestParams, ReadResourceResult, Resource,
+        ResourceContents, ResourceTemplate,
     },
     service::RequestContext,
 };
@@ -548,16 +548,108 @@ fn make_template(
     Annotated::new(raw, None)
 }
 
+fn make_resource(uri: &str, name: &str, description: &str, mime_type: &str) -> Resource {
+    let raw = RawResource::new(uri, name)
+        .with_description(description)
+        .with_mime_type(mime_type);
+    Annotated::new(raw, None)
+}
+
 pub(crate) async fn list_resources_impl(
     _req: Option<PaginatedRequestParams>,
     _ctx: RequestContext<RoleServer>,
 ) -> Result<ListResourcesResult, McpError> {
-    // Phase 2: stay empty. Enumerating all strategies here would duplicate
-    // `strategy_list`; agents who want the catalogue should use the tool.
+    // v1.11 Track I — populate `resources/list` with the stable static
+    // entrypoints so a fresh agent learns the surface in one read (the
+    // v1.4 DESIGN P1 "30-second rule"). Dynamic, per-instance URIs stay
+    // in `list_resource_templates_impl` (strategy://{id}, journal://{id},
+    // execution://{id}, etc.).
+    //
+    // KEEP IN SYNC with list_resource_templates_impl descriptions.
     Ok(ListResourcesResult {
         meta: None,
         next_cursor: None,
-        resources: Vec::new(),
+        resources: vec![
+            make_resource(
+                "strategy://list",
+                "strategy-list",
+                "Active strategy summaries with trigger_kinds, last_fire_at, last_24h rollup, \
+                 has_bundle, view_uri. Query params: status, tag, summary.",
+                "application/json",
+            ),
+            make_resource(
+                "trigger://list",
+                "trigger-list",
+                "Trigger summaries (kind, enabled, last_fired_at). Query params: strategy_id, \
+                 kind, enabled.",
+                "application/json",
+            ),
+            make_resource(
+                "execution://list",
+                "execution-list",
+                "Run summaries newest-first. Query params: strategy_id, since, status, limit. \
+                 The canonical entry to the journal plane — pair with journal://{run_id}.",
+                "application/json",
+            ),
+            make_resource(
+                "policy://current",
+                "policy-current",
+                "Current active policy revision. Use the `policy_set` tool to modify.",
+                "application/json",
+            ),
+            make_resource(
+                "policy://history",
+                "policy-history",
+                "Policy revision history, newest-first. Query: limit.",
+                "application/json",
+            ),
+            make_resource(
+                "runtime://status",
+                "runtime-status",
+                "Operational state of the machine: chain_id, burner, RPC health, signer, \
+                 watchers, schema_version, last_24h rollup. Honesty-contract wrapped.",
+                "application/json",
+            ),
+            make_resource(
+                "runtime://signals",
+                "runtime-signals",
+                "Per-trigger queue depth and last-fire timestamps.",
+                "application/json",
+            ),
+            make_resource(
+                "runtime://recent",
+                "runtime-recent",
+                "Newest 50 runs across all strategies (un-filtered).",
+                "application/json",
+            ),
+            make_resource(
+                "portfolio://",
+                "portfolio",
+                "Burner-keyed asset aggregate: idle balances + strategy $assets + USD totals. \
+                 Honesty-contract wrapped.",
+                "application/json",
+            ),
+            make_resource(
+                "examples://strategies",
+                "example-strategies-index",
+                "List of bundled reference strategies. Read each via examples://strategies/{name}.",
+                "application/json",
+            ),
+            make_resource(
+                "docs://strategy-bundle",
+                "docs-strategy-bundle",
+                "Strategy bundle authoring guide: execute + records + view shape, the records \
+                 DSL, the $assets convention. Read BEFORE registering any non-trivial strategy.",
+                "text/markdown",
+            ),
+            make_resource(
+                "docs://policy-model",
+                "docs-policy-model",
+                "Policy DSL reference: allowed chains, contracts, selectors, value caps, \
+                 ERC20 spend caps.",
+                "text/markdown",
+            ),
+        ],
     })
 }
 
