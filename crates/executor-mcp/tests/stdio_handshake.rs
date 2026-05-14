@@ -73,8 +73,7 @@ async fn tools_list_emits_full_surface() -> Result<()> {
         "trigger_list",
         "trigger_get",
         "trigger_delete",
-        "trigger_enable",
-        "trigger_disable",
+        "trigger_set_enabled",
         "trigger_events",
     ] {
         assert!(
@@ -84,8 +83,8 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     }
     assert_eq!(
         tools.len(),
-        20,
-        "expected exactly 20 tools (8 base + 5 evm read/view + 7 trigger), got {}",
+        16,
+        "expected exactly 16 tools (8 base + 2 evm read/view + 6 trigger), got {}",
         tools.len()
     );
     for t in tools {

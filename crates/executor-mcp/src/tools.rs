@@ -105,40 +105,18 @@ pub struct TriggerEventsInput {
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EvmBalanceInput {
-    /// EOA or contract address to inspect.
-    pub address: String,
-    /// Block tag — "latest" (default), "pending", or decimal block number.
-    #[serde(default)]
-    pub block: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct EvmCodeInput {
-    pub address: String,
-    #[serde(default)]
-    pub block: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct EvmReceiptInput {
     /// Transaction hash (0x-prefixed 32-byte hex).
     pub tx_hash: String,
 }
 
+/// Toggle a trigger's enabled state. Replaces the prior pair
+/// `trigger_enable` / `trigger_disable` to keep the MCP surface small.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct EvmReadInput {
-    pub address: String,
-    /// ABI JSON array — must contain the function fragment.
-    pub abi: serde_json::Value,
-    pub function: String,
-    #[serde(default)]
-    pub args: Vec<serde_json::Value>,
-    #[serde(default)]
-    pub block: Option<String>,
+pub struct TriggerSetEnabledInput {
+    pub trigger_id: String,
+    pub enabled: bool,
 }
 
 /// `evm_view` input — ad-hoc JS function evaluated in a read-only sandbox.
@@ -173,19 +151,6 @@ impl strategy_js::CtxHost for ViewHost {
     }
     fn evm_config(&self) -> &executor_evm::EvmConfig {
         &self.evm_config
-    }
-}
-
-fn parse_block_tag(s: Option<&str>) -> Result<executor_evm::BlockTag, McpError> {
-    use executor_evm::BlockTag;
-    match s {
-        None => Ok(BlockTag::Latest),
-        Some("latest") | Some("") => Ok(BlockTag::Latest),
-        Some("pending") => Ok(BlockTag::Pending),
-        Some(other) => other
-            .parse::<u64>()
-            .map(BlockTag::Number)
-            .map_err(|_| invalid_params(format!("invalid block tag: {other}"))),
     }
 }
 
@@ -992,43 +957,24 @@ impl ExecutorServer {
     }
 
     #[tool(
-        name = "trigger_enable",
-        description = "Enable a trigger. Daemon (Stream D) will resume the worker on the next pool sync."
+        name = "trigger_set_enabled",
+        description = "Enable or disable a trigger. Daemon (Stream D) resumes/aborts the worker on next pool sync; CRUD state persists either way."
     )]
-    async fn trigger_enable(
+    async fn trigger_set_enabled(
         &self,
-        Parameters(input): Parameters<TriggerIdInput>,
+        Parameters(input): Parameters<TriggerSetEnabledInput>,
     ) -> Result<CallToolResult, McpError> {
         let id = input.trigger_id.clone();
+        let enabled = input.enabled;
         let state = self.state.clone();
         tokio::task::spawn_blocking(move || {
             let mut store = state.blocking_lock();
-            store.set_trigger_enabled(&id, true)
+            store.set_trigger_enabled(&id, enabled)
         })
         .await
         .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
         .map_err(map_state_error)?;
-        json_result(&serde_json::json!({ "enabled": true }))
-    }
-
-    #[tool(
-        name = "trigger_disable",
-        description = "Disable a trigger. Worker is aborted by the daemon (Stream D); CRUD state persists."
-    )]
-    async fn trigger_disable(
-        &self,
-        Parameters(input): Parameters<TriggerIdInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let id = input.trigger_id.clone();
-        let state = self.state.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut store = state.blocking_lock();
-            store.set_trigger_enabled(&id, false)
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-        json_result(&serde_json::json!({ "enabled": false }))
+        json_result(&serde_json::json!({ "enabled": enabled }))
     }
 
     #[tool(
@@ -1056,63 +1002,6 @@ impl ExecutorServer {
     }
 
     // ─────────── EVM READ TOOLS (no policy, no journal) ───────────
-
-    #[tool(
-        name = "evm_balance",
-        description = "Read the native-coin balance of an address. Returns a decimal string (wei)."
-    )]
-    async fn evm_balance(
-        &self,
-        Parameters(input): Parameters<EvmBalanceInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let addr = input
-            .address
-            .parse::<Address>()
-            .map_err(|e| invalid_params(format!("address parse: {e}")))?;
-        let provider = self
-            .evm_provider()
-            .await
-            .map_err(|e| storage_error(format!("provider: {e}")))?;
-        let tag = parse_block_tag(input.block.as_deref())?;
-        let bal = executor_evm::get_native_balance(provider, addr, tag)
-            .await
-            .map_err(|e| map_evm_error(e, "evm_balance"))?;
-        let body = serde_json::json!({
-            "address": format!("{:?}", addr),
-            "balance": bal.to_string(),
-            "block": input.block.unwrap_or_else(|| "latest".into()),
-        });
-        json_result(&body)
-    }
-
-    #[tool(
-        name = "evm_code",
-        description = "Read contract bytecode at an address. Returns `\"0x\"` for EOAs without 7702 delegation, or `0xef0100<delegate>` for EIP-7702 EOAs."
-    )]
-    async fn evm_code(
-        &self,
-        Parameters(input): Parameters<EvmCodeInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let addr = input
-            .address
-            .parse::<Address>()
-            .map_err(|e| invalid_params(format!("address parse: {e}")))?;
-        let provider = self
-            .evm_provider()
-            .await
-            .map_err(|e| storage_error(format!("provider: {e}")))?;
-        let tag = parse_block_tag(input.block.as_deref())?;
-        let code = executor_evm::get_code(provider, addr, tag)
-            .await
-            .map_err(|e| map_evm_error(e, "evm_code"))?;
-        let hex = format!("0x{}", alloy_primitives::hex::encode(code));
-        let body = serde_json::json!({
-            "address": format!("{:?}", addr),
-            "code": hex,
-            "block": input.block.unwrap_or_else(|| "latest".into()),
-        });
-        json_result(&body)
-    }
 
     #[tool(
         name = "evm_receipt",
@@ -1174,34 +1063,6 @@ impl ExecutorServer {
         json_result(&body)
     }
 
-    #[tool(
-        name = "evm_read",
-        description = "Read a contract function via eth_call. Accepts the same ABI shape as `ctx.evm.readContract` inside strategies. Returns the decoded output as JSON."
-    )]
-    async fn evm_read(
-        &self,
-        Parameters(input): Parameters<EvmReadInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let provider = self
-            .evm_provider()
-            .await
-            .map_err(|e| storage_error(format!("provider: {e}")))?;
-        let tag = parse_block_tag(input.block.as_deref())?;
-        let abi_json = serde_json::to_string(&input.abi)
-            .map_err(|e| invalid_params(format!("abi serialize: {e}")))?;
-        let req = executor_evm::ReadContractInput {
-            address: input.address,
-            abi_json,
-            function: input.function,
-            args: input.args,
-            block_tag: tag,
-        };
-        let decoded = executor_evm::read_contract(provider, &self.evm_config, req)
-            .await
-            .map_err(|e| map_evm_error(e, "evm_read"))?;
-        let body = serde_json::json!({ "result": decoded });
-        json_result(&body)
-    }
 }
 
 // ─────────── helpers ───────────

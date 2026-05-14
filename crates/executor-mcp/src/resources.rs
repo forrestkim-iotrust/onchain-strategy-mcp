@@ -142,7 +142,7 @@ address above.
 ## When batching does NOT engage
 
 - Single-action runs sign directly from the burner (no delegate involved).
-- If `[aa].delegate` resolves but `evm_code` at it is empty, batching fails
+- If `[aa].delegate` resolves but `ctx.evm.code` (via `evm_view`) at it is empty, batching fails
   fast (does NOT silently downgrade to sequential).
 
 ## When you need a custom delegate
@@ -200,7 +200,7 @@ strategies to be idempotent across closely-spaced fires.
 - `trigger_list` — all registered triggers, filterable by kind / enabled.
 - `trigger_get` / `trigger://{id}` — full row including config + predicate.
 - `trigger_events` / `trigger-events://{id}` — last 100 events with outcome.
-- `trigger_enable` / `trigger_disable` — toggle without losing config.
+- `trigger_set_enabled({trigger_id, enabled})` — toggle without losing config.
 "#;
 
 fn make_template(

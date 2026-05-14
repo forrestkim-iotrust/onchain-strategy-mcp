@@ -128,13 +128,14 @@ use `await` inside a strategy.
 - **Strategies:** `strategy_register`, `strategy_run`, `strategy_list`,
   `strategy_get`, `strategy_delete`
 - **Triggers:** `trigger_register`, `trigger_list`, `trigger_get`,
-  `trigger_enable`, `trigger_disable`, `trigger_delete`, `trigger_events`
+  `trigger_set_enabled`, `trigger_delete`, `trigger_events`
 - **Execution:** `execution_get` (receipt-backed report keyed by run id)
 - **Policy:** `policy_get` (read-only; `policy_update` returns -32010
   unimplemented — edit `.local/policy.toml` by hand)
-- **EVM reads:** `evm_balance`, `evm_code`, `evm_read`, `evm_receipt`,
-  `evm_view` — same surface `ctx.evm.*` exposes, callable directly when you
-  want a one-shot lookup without authoring a strategy
+- **EVM reads:** `evm_receipt`, `evm_view` — `evm_view` runs ad-hoc JS in
+  the same sandbox strategies use (`ctx.evm.nativeBalance` /
+  `ctx.evm.erc20Balance` / `ctx.evm.readContract` / `ctx.evm.code`), so
+  one-shot balance / code / contract-read lookups go through it
 
 ## Resources
 
@@ -172,8 +173,8 @@ use `await` inside a strategy.
   `selfdestruct`/native send to the burner reverts, that's why.
 - The 7702 delegate ships at deterministic CREATE2 address
   `0x821fd81668823A3c5a65E95CeD5F050Ee54a4f53`. Run
-  `npx onchain-strategy-mcp deploy-delegate` once per chain if `evm_code`
-  there is empty.
+  `npx onchain-strategy-mcp deploy-delegate` once per chain if
+  `ctx.evm.code` (via `evm_view`) there is empty.
 "#;
 
 #[derive(Clone)]

@@ -95,11 +95,11 @@ const COMMON_PITFALLS_BODY: &str = r#"Mistakes the runtime forgives poorly:
 
 1. **Trailing semicolon at EOF in strategy source.** The JS host evaluates the source as a single expression. A trailing `;` after the last expression flips the program value to `undefined` and surfaces as `-32018 strategy_invalid_output`. Drop the trailing semicolon.
 
-2. **ETH sent TO a 7702-delegated burner reverts** when the delegate has no `receive()`. The bundled `BatchExec` ships with `receive()` — but if you point `[aa].delegate` at a custom contract without one, every native transfer to the EOA reverts. Verify with `evm_code` on the burner.
+2. **ETH sent TO a 7702-delegated burner reverts** when the delegate has no `receive()`. The bundled `BatchExec` ships with `receive()` — but if you point `[aa].delegate` at a custom contract without one, every native transfer to the EOA reverts. Verify with `ctx.evm.code(burner)` inside `evm_view`.
 
 3. **`ctx.evm.readContract` requires the full ABI fragment**, not a name. Include the matching function entry (with inputs + outputs) in the `abi` array. The runtime selects by `function` name.
 
-4. **`simulation_from` defaults to zero address.** State-dependent calls (price reads on certain oracles, balance-gated views) may revert from `0x0`. Pass `simulation_from: <burner>` explicitly in `evm_view` / `evm_read` when simulating state the burner would see.
+4. **`simulation_from` defaults to zero address.** State-dependent calls (price reads on certain oracles, balance-gated views) may revert from `0x0`. Pass `simulation_from: <burner>` explicitly in `evm_view` when simulating state the burner would see.
 
 5. **Don't manually call a batch tool — there isn't one.** Returning `[a, b, c]` from a strategy auto-bundles via EIP-7702 when `[aa].delegate` resolves and code exists at it. If batching silently downgrades to sequential, run `executor-mcp deploy-delegate`.
 
