@@ -607,8 +607,42 @@ pub(crate) async fn read_resource_impl(
     _ctx: RequestContext<RoleServer>,
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
-    let uri = request.uri.clone();
+    dispatch_uri(request.uri, state).await
+}
 
+/// v1.6 Track 6A: extract the text body of a `ReadResourceResult`. The
+/// MCP resource handlers all wrap a single `ResourceContents::text(...)`
+/// — this peels that envelope off so HTTP routes can pass through the
+/// inner JSON to clients without re-encoding.
+pub(crate) fn extract_resource_text(r: &ReadResourceResult) -> Option<&str> {
+    match r.contents.first() {
+        Some(ResourceContents::TextResourceContents { text, .. }) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// v1.6 Track 6A: dispatch a resource URI and return the parsed JSON body.
+/// Convenience used by `/api/*` handlers — collapses the
+/// `ReadResourceResult` → text → `serde_json::Value` round-trip.
+pub(crate) async fn dispatch_uri_to_json(
+    uri: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<serde_json::Value, McpError> {
+    let result = dispatch_uri(uri, state).await?;
+    let text = extract_resource_text(&result).ok_or_else(|| {
+        storage_error("resource handler returned non-text content".to_string())
+    })?;
+    serde_json::from_str(text)
+        .map_err(|e| storage_error(format!("resource handler emitted invalid JSON: {e}")))
+}
+
+/// v1.6 Track 6A: dispatcher invoked by both the MCP `resources/read`
+/// handler and the local HTTP server's `/api/*` routes. Mirrors the URI
+/// router exactly; the only difference is the absence of `RequestContext`.
+pub(crate) async fn dispatch_uri(
+    uri: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
     // v1.4 Track B / A4 collision plan: `strategy://list` MUST match BEFORE
     // the generic `strategy://{id}` branch. Also keep space for A4's
     // `strategy://{id}/view` and `strategy://{id}/records` — those land in

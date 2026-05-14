@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use executor_mcp::{ExecutorServer, config, deploy_delegate, init, logging};
+use executor_mcp::{ExecutorServer, config, deploy_delegate, init, logging, web};
 use rmcp::{ServiceExt, transport::stdio};
 
 /// v1.3: clap-based CLI. Default with no subcommand keeps Phase 1's
@@ -14,6 +14,17 @@ struct Cli {
     /// flow when no subcommand (or `serve`) is invoked.
     #[arg(long, global = true)]
     config: Option<String>,
+
+    /// v1.6 Track 6A: disable the local web UI. Equivalent to
+    /// `OSMCP_NO_UI=1`. When set the MCP stdio server still boots normally.
+    #[arg(long, global = true)]
+    no_ui: bool,
+
+    /// v1.6 Track 6A: override the UI bind port. Default is 8473 with
+    /// fallback to the next free port; an explicit value here is a hard
+    /// bind (no fallback) — fail loudly if it's already taken.
+    #[arg(long, global = true)]
+    ui_port: Option<u16>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -69,11 +80,11 @@ fn main() -> Result<()> {
             chain_id,
             dry_run,
         }),
-        Some(Command::Serve) | None => run_serve(),
+        Some(Command::Serve) | None => run_serve(cli.no_ui, cli.ui_port),
     }
 }
 
-fn run_serve() -> Result<()> {
+fn run_serve(no_ui: bool, ui_port: Option<u16>) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -88,6 +99,29 @@ fn run_serve() -> Result<()> {
             "executor-mcp starting"
         );
         let server = ExecutorServer::from_config(&cfg)?;
+        // v1.6 Track 6A: spawn the local web UI in a sibling tokio task.
+        // The MCP stdio server keeps running regardless of UI bind result —
+        // a port collision logs a warn but is non-fatal.
+        let ui_opts = web::WebUiOptions::from_env_and_config(
+            cfg.evm.simulation_from.clone(),
+            None,
+            no_ui,
+            ui_port,
+        );
+        match web::spawn(server.state_handle(), ui_opts).await {
+            Ok(Some((addr, _handle))) => {
+                tracing::info!(
+                    bound = %addr,
+                    "ui http server spawned",
+                );
+            }
+            Ok(None) => {
+                // disabled — no-op
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "ui http server failed to bind — continuing without UI");
+            }
+        }
         let service = (*server).clone().serve(stdio()).await?;
         service.waiting().await?;
         Ok::<(), anyhow::Error>(())
