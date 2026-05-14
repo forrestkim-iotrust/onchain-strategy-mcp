@@ -715,34 +715,42 @@
     getJson("/api/strategy/" + encodeURIComponent(id)).then((d) => {
       detailBody.innerHTML = "";
       const chain = portfolio && portfolio.chain_id;
-      // meta block
+      // meta block — `policy_alignment` is lifted out and rendered as a
+      // dedicated row below so the verdict + copy-report button are the
+      // primary affordance (instead of buried in an auto-rendered nested
+      // object that duplicates the same fields three times).
       const meta = {};
       ["name", "description", "tags", "created_at", "deleted_at",
-       "policy_alignment", "trigger_kinds", "last_fire_at", "has_bundle", "view_uri"]
+       "trigger_kinds", "last_fire_at", "has_bundle", "view_uri"]
         .forEach((k) => { if (d[k] != null) meta[k] = d[k]; });
       detailBody.appendChild(renderObjectAsKV(meta, chain));
 
-      // Full policy_alignment report — copied to clipboard for paste-back.
-      // The detail endpoint carries the structured alignment object
-      // (verdict + missing[] + remediation), so this report is richer than
-      // the list-row version.
+      // Dedicated alignment row: badge + (when non-satisfied) inline
+      // copy-report button. The full structured detail is what the report
+      // carries — the UI itself stays compact.
       const pa = d.policy_alignment;
-      if (pa && typeof pa === "object" && pa.verdict && pa.verdict !== "satisfied") {
+      if (pa && typeof pa === "object" && pa.verdict) {
         const row = el("div", { class: "row gap" });
-        row.appendChild(el("span", { class: "dim", text: "alignment report:" }));
-        const missingDesc = (pa.missing || []).map((m) => {
-          const sels = (m.selectors || []).join(", ");
-          return (m.contract || "?") + (sels ? " [" + sels + "]" : "") +
-                 (m.reason ? " — " + m.reason : "");
-        });
-        row.appendChild(reportBtn("policy_alignment", {
-          strategy_id:  d.strategy_id || id,
-          name:         d.name,
-          verdict:      pa.verdict,
-          missing:      missingDesc,
-          remediation:  pa.remediation,
-          detail_uri:   "strategy://" + (d.strategy_id || id),
-        }));
+        row.appendChild(el("span", { class: "dim", text: "policy_alignment" }));
+        row.appendChild(verdictBadge(pa.verdict));
+        if (pa.verdict !== "satisfied") {
+          const missingDesc = (pa.missing || []).map((m) => {
+            const sels = (m.selectors || []).join(", ");
+            return (m.contract || "?") + (sels ? " [" + sels + "]" : "") +
+                   (m.reason ? " — " + m.reason : "");
+          });
+          row.appendChild(reportBtn("policy_alignment", {
+            strategy_id:  d.strategy_id || id,
+            name:         d.name,
+            verdict:      pa.verdict,
+            missing:      missingDesc,
+            remediation:  pa.remediation,
+            detail_uri:   "strategy://" + (d.strategy_id || id),
+          }));
+          if (pa.remediation) {
+            row.appendChild(el("span", { class: "dim small", text: pa.remediation }));
+          }
+        }
         detailBody.appendChild(row);
       }
 

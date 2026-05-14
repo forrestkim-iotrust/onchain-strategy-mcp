@@ -275,7 +275,8 @@ table.t tr:last-child td { border-bottom: none; }
 
 /* Row container used by report-button cells where badge + button sit
    side-by-side on the same baseline. */
-.row.gap { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.row.gap { display: flex; align-items: center; gap: 8px; margin: 4px 0; flex-wrap: wrap; }
+.small { font-size: 11px; }
 
 /* ─── Links to explorers ────────────────────────────────── */
 .tx, .addr {
