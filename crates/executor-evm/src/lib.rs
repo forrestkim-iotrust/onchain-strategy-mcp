@@ -21,7 +21,6 @@ pub mod erc20;
 pub mod error;
 pub mod native;
 pub mod normalize;
-pub mod prices;
 pub mod provider;
 pub mod read;
 pub mod simulate;
@@ -41,7 +40,6 @@ pub use erc20::{
 pub use error::EvmError;
 pub use native::{fetch_chain_id, native_balance, native_block_number};
 pub use normalize::{NormalizedAction, NormalizedActionKind, normalize_action};
-pub use prices::{NATIVE_SENTINEL, PriceCache, resolve_usd_micros};
 pub use provider::build_provider;
 pub use read::{
     BlockTag, ReadContractInput, get_code, get_native_balance, get_tx_receipt, read_contract,
