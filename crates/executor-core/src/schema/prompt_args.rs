@@ -42,3 +42,18 @@ pub struct AuthorStrategyArgs {
     #[schemars(description = "Free-text user intent (e.g. \"ETH→USDC→Aave funnel\").")]
     pub intent: String,
 }
+
+/// v1.11 Track E3: `tune_thresholds` correlates a strategy's numeric threshold
+/// candidates (static-parsed from source) with recent run history to propose
+/// raise/lower/keep adjustments.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(
+    description = "Arguments for the `tune_thresholds` prompt — proposes threshold adjustments from run history."
+)]
+pub struct TuneThresholdsArgs {
+    #[schemars(description = "Strategy id (64-char lowercase hex) whose thresholds to analyse.")]
+    pub strategy_id: String,
+    #[schemars(description = "How many recent runs to correlate against (default 20, max 200).")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookback_runs: Option<u32>,
+}
