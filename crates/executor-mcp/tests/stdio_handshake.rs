@@ -223,7 +223,7 @@ async fn resources_surface_matches_contract() -> Result<()> {
     // v1.11 Track I — resources/list now publishes the 12 stable static
     // entrypoints (the "30-second rule" agent-discovery surface). Dynamic
     // per-instance URIs (strategy://{id}, journal://{id}, etc.) remain in
-    // `resources/templates/list`. Track C's `portfolio://` is one of the 12.
+    // `resources/templates/list`. Includes Track B's runtime://* and Track C's portfolio://.
     send(
         &mut proc,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),

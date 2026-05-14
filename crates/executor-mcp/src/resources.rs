@@ -785,6 +785,39 @@ pub(crate) async fn list_resource_templates_impl(
                 "v1.11: most recent 100 trigger events (fired, skipped, dedup-rejected). Nested under trigger (DESIGN §1.1 ownership rule).",
                 "application/json",
             ),
+            // v1.11 Track B: runtime plane — operational state of the
+            // machine. Three singleton URIs (no path parameters); declared
+            // as templates so `resources/templates/list` surfaces them
+            // alongside the rest of the catalogue.
+            make_template(
+                "runtime://status",
+                "runtime-status",
+                "Operational state snapshot: chain_id, burner, RPC reachability, watcher \
+                 health (mempool / log), active trigger count, and the last-24h run rollup \
+                 ({runs, succeeded, failed, noop}). All probes wrapped in 500ms timeouts; \
+                 degraded paths downgrade `confidence` to `partial` or `missing` with a \
+                 non-empty `reason` and a `remediation` hint when applicable.",
+                "application/json",
+            ),
+            make_template(
+                "runtime://signals",
+                "runtime-signals",
+                "Per-watcher signal surface: for `mempool` and `log`, exposes \
+                 `queue_depth` (when observable), `watched_addresses`, and \
+                 `last_fire_ts` derived from `triggers.last_fired_at`. v1.11 returns \
+                 `queue_depth: null` since worker MPSC pressure is not yet plumbed; \
+                 use this resource for liveness, not back-pressure.",
+                "application/json",
+            ),
+            make_template(
+                "runtime://recent",
+                "runtime-recent",
+                "Newest 50 runs across all strategies (no filters). Row shape matches \
+                 `execution://list` summary rows: `{run_id, strategy_id, status, \
+                 started_at, finished_at, action_count, action}`. The follow-up hop \
+                 for any returned summary is `execution://{run_id}`.",
+                "application/json",
+            ),
             make_template(
                 "examples://strategies",
                 "example-strategies-index",
@@ -961,6 +994,20 @@ pub(crate) async fn dispatch_uri(
     // → `dispatch_uri`.
     if uri == "portfolio://" {
         return Box::pin(read_portfolio(uri, state, evm)).await;
+    }
+
+    // v1.11 Track B: runtime plane. All three URIs are singletons with no
+    // path parameters, so exact-match dispatch is sufficient. Placed BEFORE
+    // the generic `strategy://` catch-all (and any future generic
+    // namespaces) so prefix collisions can never shadow them.
+    if uri == "runtime://status" {
+        return read_runtime_status(uri, state, evm).await;
+    }
+    if uri == "runtime://signals" {
+        return read_runtime_signals(uri, state).await;
+    }
+    if uri == "runtime://recent" {
+        return read_runtime_recent(uri, state).await;
     }
 
     // Generic strategy://{id} (after the above v1.4 specializations).
@@ -2821,3 +2868,443 @@ async fn read_strategy_records(
     ]))
 }
 
+// ─────────── v1.11 Track B — runtime:// plane ───────────
+//
+// Three singleton URIs that answer "is the system healthy?" without forcing
+// the agent to stitch state from five other resources. All probes are
+// wrapped in a 500ms timeout; on failure the response downgrades
+// `confidence` (full → partial → missing) and surfaces a non-empty
+// `reason` (and a `remediation` hint when the operator can do something
+// about it). NEVER guess a value — null is the honest answer when a probe
+// times out or no provider is configured.
+
+const RUNTIME_STATUS_SCHEMA_VERSION: &str = "1.11";
+const RUNTIME_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Strip path / query / userinfo off the configured RPC URL so the surface
+/// doesn't leak embedded auth tokens (Alchemy / Infura keys are common in
+/// `[evm].rpc_url`). Returns `"<host>"` (with `:port` when non-default) or
+/// `"<unconfigured>"` for the rare URL we cannot decompose.
+///
+/// The `EvmConfig::rpc_url` field is a `url::Url`; we accept anything that
+/// exposes `host_str()` / `port()` so this helper stays nominally generic
+/// (and avoids dragging the `url` crate name into our function signatures).
+fn mask_rpc_url(cfg: &executor_evm::EvmConfig) -> String {
+    let url = &cfg.rpc_url;
+    let host = match url.host_str() {
+        Some(h) => h,
+        None => return "<unconfigured>".to_string(),
+    };
+    match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_string(),
+    }
+}
+
+async fn read_runtime_status(
+    uri: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+    evm: ViewEvm,
+) -> Result<ReadResourceResult, McpError> {
+    let now = chrono::Utc::now();
+    let now_rfc = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let since_24h_rfc = (now - chrono::Duration::hours(24))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // v1.11: burner address comes from `[evm].simulation_from`. This is the
+    // address `executor_evm::simulate` impersonates and that the signer/keystore
+    // is expected to back. Emit the EIP-55 form for parity with the rest of
+    // the UI.
+    let burner = format!("{:?}", evm.evm_config.simulation_from);
+    let rpc_url_masked = mask_rpc_url(&evm.evm_config);
+
+    // Confidence accounting. Each degraded probe pushes a `reason` line into
+    // the buffer; the final `confidence` is the worst across all probes.
+    let mut reasons: Vec<String> = Vec::new();
+    let mut remediation: Option<String> = None;
+    let mut partial = false;
+    let mut missing = false;
+
+    // --- RPC probe (eth_chainId with 500ms timeout) ---
+    let (rpc_ok, rpc_last_ok_ts, burner_balance_wei): (bool, Option<String>, Option<String>) =
+        match evm.provider.as_ref() {
+            None => {
+                missing = true;
+                reasons.push("no EVM provider configured".to_string());
+                remediation =
+                    Some("set `[evm].rpc_url` in your executor config".to_string());
+                (false, None, None)
+            }
+            Some(provider) => {
+                let probe = tokio::time::timeout(
+                    RUNTIME_PROBE_TIMEOUT,
+                    executor_evm::fetch_chain_id(provider),
+                )
+                .await;
+                let rpc_ok = matches!(&probe, Ok(Ok(_)));
+                if !rpc_ok {
+                    partial = true;
+                    match &probe {
+                        Err(_) => {
+                            reasons.push(format!(
+                                "eth_chainId probe timed out after {}ms",
+                                RUNTIME_PROBE_TIMEOUT.as_millis()
+                            ))
+                        }
+                        Ok(Err(e)) => reasons.push(format!("eth_chainId failed: {e}")),
+                        Ok(Ok(_)) => {}
+                    }
+                }
+                let last_ok = if rpc_ok { Some(now_rfc.clone()) } else { None };
+
+                // Balance probe — only attempted when the chain probe says
+                // the RPC is alive (saves a hung roundtrip). Honest null when
+                // the address parse fails or the balance call times out.
+                let balance = if rpc_ok {
+                    let provider_clone = provider.clone();
+                    let acct = burner.clone();
+                    let cfg = evm.evm_config.clone();
+                    let call = async move {
+                        executor_evm::native_balance(
+                            provider_clone,
+                            &cfg,
+                            &acct,
+                            executor_evm::BlockTag::Latest,
+                        )
+                        .await
+                    };
+                    match tokio::time::timeout(RUNTIME_PROBE_TIMEOUT, call).await {
+                        Ok(Ok(serde_json::Value::String(s))) => Some(s),
+                        Ok(Ok(_)) => {
+                            partial = true;
+                            reasons.push(
+                                "native_balance returned non-string wei".to_string(),
+                            );
+                            None
+                        }
+                        Ok(Err(e)) => {
+                            partial = true;
+                            reasons.push(format!("eth_getBalance failed: {e}"));
+                            None
+                        }
+                        Err(_) => {
+                            partial = true;
+                            reasons.push(format!(
+                                "eth_getBalance probe timed out after {}ms",
+                                RUNTIME_PROBE_TIMEOUT.as_millis()
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                (rpc_ok, last_ok, balance)
+            }
+        };
+
+    // --- chain_id (cached on ViewEvm) ---
+    let chain_id_value = match evm.chain_id {
+        Some(cid) => serde_json::Value::Number(cid.into()),
+        None => {
+            // chain_id is only None when the provider has not yet resolved
+            // it. If the RPC probe just succeeded we can populate it from
+            // future calls; for v1.11 we report null with a partial reason
+            // so the agent does not silently treat 0 as a chain.
+            if !missing {
+                partial = true;
+                reasons.push("chain_id not yet resolved by the runtime".to_string());
+            }
+            serde_json::Value::Null
+        }
+    };
+
+    // --- Signer probe ---
+    //
+    // v1.11: the resource layer does NOT have access to the live keystore,
+    // so the strongest claim we can honestly make is "burner is a parseable
+    // 20-byte address". Any deeper "key-on-disk matches burner" check
+    // belongs to the orchestrator and lands on `signer.warning` when wired
+    // through a future shared accessor.
+    let signer_ok = !burner.is_empty();
+    let signer_warning: Option<&str> = if signer_ok {
+        None
+    } else {
+        Some("burner address is empty — check `[evm].simulation_from`")
+    };
+
+    // --- Trigger / watcher state (DB-sourced) ---
+    let state_for_blocking = state.clone();
+    let trigger_aggregates = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state_for_blocking.blocking_lock();
+        let enabled_filter = TriggerListFilter {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let enabled = store.list_triggers(Some(&enabled_filter))?;
+        let active_triggers = enabled.len() as u64;
+
+        // Per-kind aggregates: is at least one enabled trigger of this kind
+        // present (running), and what is the freshest `last_fired_at` across
+        // them (last_signal_ts).
+        let mempool_iter = enabled
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Mempool));
+        let log_iter = enabled
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Log));
+        let mempool_running = mempool_iter.clone().next().is_some();
+        let mempool_last = mempool_iter
+            .filter_map(|t| t.last_fired_at.clone())
+            .max();
+        let log_running = log_iter.clone().next().is_some();
+        let log_last = log_iter.filter_map(|t| t.last_fired_at.clone()).max();
+
+        // last_24h rollup across all strategies. Cap matches the wider
+        // `list_runs` envelope; v1.11 status is a snapshot, not a feed.
+        let recent = store.list_runs(&RunListFilter {
+            strategy_id: None,
+            since: Some(since_24h_rfc.clone()),
+            status: None,
+            journal_outcome: None,
+            limit: Some(LIST_RUNS_LIMIT_CAP),
+        })?;
+        let mut last_runs: u64 = 0;
+        let mut last_succeeded: u64 = 0;
+        let mut last_failed: u64 = 0;
+        for r in &recent {
+            last_runs += 1;
+            match r.status {
+                RunStatus::Succeeded => last_succeeded += 1,
+                RunStatus::Failed
+                | RunStatus::SimulationDenied
+                | RunStatus::PolicyDenied
+                | RunStatus::Canceled => last_failed += 1,
+                _ => {}
+            }
+        }
+        // `noop` is a journal-outcome filter, not a RunStatus — re-query the
+        // 24h window with the same `since` lower bound to get an honest
+        // count rather than inferring from the bulk pass above.
+        let noop_runs = store.list_runs(&RunListFilter {
+            strategy_id: None,
+            since: Some(since_24h_rfc.clone()),
+            status: None,
+            journal_outcome: Some("noop".to_string()),
+            limit: Some(LIST_RUNS_LIMIT_CAP),
+        })?;
+        let last_noop: u64 = noop_runs.len() as u64;
+
+        Ok((
+            active_triggers,
+            mempool_running,
+            mempool_last,
+            log_running,
+            log_last,
+            (last_runs, last_succeeded, last_failed, last_noop),
+        ))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    let (
+        active_triggers,
+        mempool_running,
+        mempool_last_signal_ts,
+        log_running,
+        log_last_signal_ts,
+        (last_runs, last_succeeded, last_failed, last_noop),
+    ) = trigger_aggregates;
+
+    let confidence = if missing {
+        "missing"
+    } else if partial {
+        "partial"
+    } else {
+        "full"
+    };
+    let reason: serde_json::Value = if reasons.is_empty() {
+        serde_json::Value::Null
+    } else {
+        json!(reasons.join("; "))
+    };
+
+    let body = json!({
+        "data": {
+            "chain_id": chain_id_value,
+            "burner": burner,
+            "burner_balance_wei": burner_balance_wei,
+            "rpc": {
+                "url_masked": rpc_url_masked,
+                "last_ok_ts": rpc_last_ok_ts,
+                "ok": rpc_ok,
+            },
+            "signer": {
+                "ok": signer_ok,
+                "warning": signer_warning,
+            },
+            "watchers": {
+                "mempool": {
+                    "running": mempool_running,
+                    "last_signal_ts": mempool_last_signal_ts,
+                },
+                "log": {
+                    "running": log_running,
+                    "last_signal_ts": log_last_signal_ts,
+                },
+            },
+            "schema_version": RUNTIME_STATUS_SCHEMA_VERSION,
+            "active_triggers": active_triggers,
+            "last_24h": {
+                "runs": last_runs,
+                "succeeded": last_succeeded,
+                "failed": last_failed,
+                "noop": last_noop,
+            },
+        },
+        "confidence": confidence,
+        "reason": reason,
+        "remediation": remediation,
+    });
+    let txt = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize runtime status: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(txt, uri).with_mime_type("application/json"),
+    ]))
+}
+
+async fn read_runtime_signals(
+    uri: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    // v1.11: `queue_depth` reflects per-worker MPSC pressure which is not
+    // observable from the resource boundary in this build (the worker pool
+    // is not threaded through `dispatch_uri`). We report `null` and a
+    // partial-confidence reason rather than fabricating zeros.
+    //
+    // `watched_addresses` is reconstructable from enabled mempool trigger
+    // configs (`config_json.to_address` / `from_address`). We surface the
+    // union across all enabled mempool triggers so an agent can answer
+    // "what are we watching?" in one read.
+
+    let state_for_blocking = state.clone();
+    let aggregates = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state_for_blocking.blocking_lock();
+        let enabled = store.list_triggers(Some(&TriggerListFilter {
+            enabled: Some(true),
+            ..Default::default()
+        }))?;
+        let mempool_last = enabled
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Mempool))
+            .filter_map(|t| t.last_fired_at.clone())
+            .max();
+        let log_last = enabled
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Log))
+            .filter_map(|t| t.last_fired_at.clone())
+            .max();
+
+        // Resolve full Trigger rows for the mempool kind so we can read
+        // `config_json` and extract the watched address set. The aggregate
+        // list returns `TriggerSummary` which does not carry config — one
+        // `get_trigger` per mempool row is fine (mempool triggers are rare).
+        let mut watched: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for t in enabled
+            .iter()
+            .filter(|t| matches!(t.kind, TriggerKind::Mempool))
+        {
+            if let Some(row) = store.get_trigger(&t.id)? {
+                if let Ok(cfg) =
+                    serde_json::from_str::<serde_json::Value>(&row.config_json)
+                {
+                    for field in ["to_address", "from_address"] {
+                        if let Some(arr) = cfg.get(field).and_then(|v| v.as_array()) {
+                            for entry in arr {
+                                if let Some(addr) = entry.as_str() {
+                                    watched.insert(addr.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok((mempool_last, log_last, watched))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    let (mempool_last, log_last, watched) = aggregates;
+
+    let watched_addresses: Vec<String> = watched.into_iter().collect();
+    let body = json!({
+        "data": {
+            "mempool": {
+                "queue_depth": serde_json::Value::Null,
+                "watched_addresses": watched_addresses,
+                "last_fire_ts": mempool_last,
+            },
+            "log": {
+                "queue_depth": serde_json::Value::Null,
+                "last_fire_ts": log_last,
+            },
+        },
+        "confidence": "partial",
+        "reason": "queue_depth not observable from resource layer in this build",
+    });
+    let txt = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize runtime signals: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(txt, uri).with_mime_type("application/json"),
+    ]))
+}
+
+async fn read_runtime_recent(
+    uri: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    // Newest 50 runs across all strategies. Row shape is intentionally
+    // identical to `execution://list` summaries so agents can pivot via
+    // `execution://{run_id}` without remapping fields.
+    let summaries = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.list_runs(&RunListFilter {
+            strategy_id: None,
+            since: None,
+            status: None,
+            journal_outcome: None,
+            limit: Some(50),
+        })
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let runs_json: Vec<serde_json::Value> = summaries
+        .iter()
+        .map(|s| {
+            let status_wire = serde_json::to_value(s.status).unwrap_or(json!("unknown"));
+            json!({
+                "run_id": s.run_id,
+                "strategy_id": s.strategy_id,
+                "status": status_wire,
+                "started_at": s.started_at,
+                "finished_at": s.finished_at,
+                "action_count": s.action_count,
+                "action": s.action,
+            })
+        })
+        .collect();
+    let count = runs_json.len();
+    let body = json!({
+        "runs": runs_json,
+        "count": count,
+    });
+    let txt = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize runtime recent: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(txt, uri).with_mime_type("application/json"),
+    ]))
+}
