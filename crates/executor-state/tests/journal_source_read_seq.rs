@@ -14,6 +14,7 @@ fn fresh_run(store: &mut executor_state::StateStore, name: &str) -> (String, Str
         .unwrap();
     let sid = match outcome {
         RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     };
     let rid = store.insert_run(&sid, RunStatus::Queued).unwrap();
     (sid, rid)

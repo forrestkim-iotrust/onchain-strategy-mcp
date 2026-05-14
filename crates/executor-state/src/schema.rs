@@ -30,21 +30,39 @@ CREATE TABLE IF NOT EXISTS strategies (
     --     "_warnings": ["..."] }
     -- NULL on rows registered before v1.5; alignment treats those as
     -- `_extraction: incomplete`.
-    contracts_touched_json TEXT
+    contracts_touched_json TEXT,
+    -- v1.8 name-anchored lineage: stable identifier preserved across
+    -- re-registrations of the SAME name even when content changes. Minted at
+    -- first register, copied forward on every version bump within a lineage.
+    -- See `strategies.rs` for the register-flow case matrix and how lineage_id
+    -- folds into the id hash for fresh lineages (legacy rows are backfilled
+    -- with `lineage_id = id` so their pre-v1.8 ids stay byte-identical).
+    lineage_id   TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_name_active
     ON strategies(name) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_strategies_deleted_at
     ON strategies(deleted_at);
+-- NOTE: v1.8 lineage_id indexes live in `migrate()` (NOT here) so the
+-- SCHEMA_SQL pass succeeds against a pre-v1.8 strategies table that lacks
+-- the `lineage_id` column. migrate() ADDs the column then creates the
+-- indexes once the column exists.
 CREATE TABLE IF NOT EXISTS runs (
     id           TEXT PRIMARY KEY,
     strategy_id  TEXT NOT NULL REFERENCES strategies(id),
     status       TEXT NOT NULL,
     started_at   TEXT NOT NULL,
     finished_at  TEXT,
-    error        TEXT
+    error        TEXT,
+    -- v1.8 name-anchored lineage: lineage attached to this run. Survives
+    -- view/records re-registrations of the same strategy name so historical
+    -- runs aggregate into the lineage's portfolio view. `strategy_id` is
+    -- still the EXACT version that executed for forensics.
+    strategy_lineage_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_strategy_id ON runs(strategy_id);
+-- v1.8 strategy_lineage_id index is created in `migrate()` so pre-v1.8
+-- runs tables (without the column) survive the SCHEMA_SQL pass.
 
 -- Phase 3 (D-06): three append-only journal tables.
 -- Phase 4 (D-15d / MR-04 carry-forward): `seq` is a per-run monotonic
@@ -141,9 +159,15 @@ CREATE TABLE IF NOT EXISTS triggers (
     enabled         INTEGER NOT NULL DEFAULT 1,
     last_fired_at   TEXT,
     created_at      TEXT NOT NULL,
-    dedup_window_ms INTEGER
+    dedup_window_ms INTEGER,
+    -- v1.8 name-anchored lineage: triggers attach to a LINEAGE rather than
+    -- a specific strategy version. Dispatcher resolves lineage_id → latest
+    -- active version at fire time so view/records re-registrations don't
+    -- orphan the trigger.
+    strategy_lineage_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_triggers_strategy_id ON triggers(strategy_id);
+-- v1.8 strategy_lineage_id index → `migrate()`.
 CREATE INDEX IF NOT EXISTS idx_triggers_enabled_kind ON triggers(enabled, kind);
 
 CREATE TABLE IF NOT EXISTS trigger_events (
@@ -168,12 +192,17 @@ CREATE TABLE IF NOT EXISTS strategy_records_capture (
     strategy_id   TEXT NOT NULL REFERENCES strategies(id),
     record_name   TEXT NOT NULL,
     captured_at   TEXT NOT NULL,
-    payload_json  TEXT NOT NULL
+    payload_json  TEXT NOT NULL,
+    -- v1.8 name-anchored lineage: captured records attach to a LINEAGE so
+    -- view/records-spec tweaks of the same strategy name preserve history.
+    -- `strategy_id` is still the version that produced the capture.
+    strategy_lineage_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_records_capture_strategy
     ON strategy_records_capture(strategy_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_records_capture_run
     ON strategy_records_capture(run_id);
+-- v1.8 strategy_lineage_id index → `migrate()`.
 
 -- v1.5 Track 1A: policy revisions table. Policy migrates from
 -- `.local/policy.toml` to DB; `policy_set` is the only edit path. One row
@@ -225,6 +254,86 @@ fn migrate(conn: &Connection) -> Result<(), StateError> {
     if !has_column(conn, "triggers", "note")? {
         conn.execute_batch("ALTER TABLE triggers ADD COLUMN note TEXT;")?;
     }
+
+    // v1.8 name-anchored lineage: add lineage_id columns + backfill.
+    // Idempotent: each column add is gated on `has_column`, and the
+    // backfill updates only rows where lineage_id IS NULL.
+    if !has_column(conn, "strategies", "lineage_id")? {
+        conn.execute_batch("ALTER TABLE strategies ADD COLUMN lineage_id TEXT;")?;
+    }
+    // Backfill: legacy rows get lineage_id = id so their pre-v1.8 hash
+    // semantics stay byte-stable (`hash_bundle_with_lineage(id, ...)` is
+    // never invoked for these — the existing `id = hash(execute|records|view)`
+    // is preserved as both the row's id AND lineage anchor).
+    conn.execute_batch(
+        "UPDATE strategies SET lineage_id = id WHERE lineage_id IS NULL;",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_strategies_lineage_id \
+              ON strategies(lineage_id);",
+    )?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_strategies_lineage_active \
+              ON strategies(lineage_id) WHERE deleted_at IS NULL;",
+    )?;
+
+    if !has_column(conn, "triggers", "strategy_lineage_id")? {
+        conn.execute_batch(
+            "ALTER TABLE triggers ADD COLUMN strategy_lineage_id TEXT;",
+        )?;
+    }
+    conn.execute_batch(
+        "UPDATE triggers \
+         SET strategy_lineage_id = ( \
+           SELECT lineage_id FROM strategies WHERE strategies.id = triggers.strategy_id \
+         ) \
+         WHERE strategy_lineage_id IS NULL;",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_triggers_strategy_lineage_id \
+              ON triggers(strategy_lineage_id);",
+    )?;
+
+    if !has_column(conn, "runs", "strategy_lineage_id")? {
+        conn.execute_batch(
+            "ALTER TABLE runs ADD COLUMN strategy_lineage_id TEXT;",
+        )?;
+    }
+    conn.execute_batch(
+        "UPDATE runs \
+         SET strategy_lineage_id = ( \
+           SELECT lineage_id FROM strategies WHERE strategies.id = runs.strategy_id \
+         ) \
+         WHERE strategy_lineage_id IS NULL;",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_runs_strategy_lineage_id \
+              ON runs(strategy_lineage_id);",
+    )?;
+
+    if !has_column(
+        conn,
+        "strategy_records_capture",
+        "strategy_lineage_id",
+    )? {
+        conn.execute_batch(
+            "ALTER TABLE strategy_records_capture \
+                ADD COLUMN strategy_lineage_id TEXT;",
+        )?;
+    }
+    conn.execute_batch(
+        "UPDATE strategy_records_capture \
+         SET strategy_lineage_id = ( \
+           SELECT lineage_id FROM strategies \
+            WHERE strategies.id = strategy_records_capture.strategy_id \
+         ) \
+         WHERE strategy_lineage_id IS NULL;",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_records_capture_lineage \
+              ON strategy_records_capture(strategy_lineage_id, captured_at);",
+    )?;
+
     Ok(())
 }
 

@@ -24,6 +24,7 @@ use executor_state::{LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, RegisterOutco
 fn seed_strategy(store: &mut executor_state::StateStore, name: &str, source: &str) -> String {
     match store.register_strategy(name, source, None, None).unwrap() {
         RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     }
 }
 

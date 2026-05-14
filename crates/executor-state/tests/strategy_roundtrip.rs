@@ -29,7 +29,11 @@ fn register_then_get_by_id_roundtrip() {
         RegisterOutcome::Created(s) => s,
         _ => panic!("first register must be Created"),
     };
-    assert_eq!(created.id, hash_source("// code"));
+    // v1.8: fresh-lineage ids fold the minted ULID into the hash, so they
+    // are not bit-identical to `hash_source(source)`. They are still
+    // 64-char hex (sha256), and `lineage_id` is the per-name anchor.
+    assert_eq!(created.id.len(), 64);
+    assert!(!created.lineage_id.is_empty(), "fresh register mints a lineage_id");
     assert_eq!(created.name, "arb");
     assert_eq!(created.description.as_deref(), Some("desc"));
     assert_eq!(created.tags.as_deref(), Some(&tags[..]));
@@ -40,6 +44,7 @@ fn register_then_get_by_id_roundtrip() {
         .expect("present");
     assert_eq!(by_id.source, "// code");
     assert_eq!(by_id.tags.as_deref(), Some(&tags[..]));
+    assert_eq!(by_id.lineage_id, created.lineage_id);
 
     let by_name = store
         .get_strategy_by_name("arb")
@@ -48,52 +53,103 @@ fn register_then_get_by_id_roundtrip() {
     assert_eq!(by_name.id, created.id);
 }
 
+/// v1.8: same-name same-content idempotency. The second register MUST
+/// return AlreadyExists with the same id + lineage_id.
 #[test]
-fn register_idempotent_same_source() {
+fn register_idempotent_same_name_same_content() {
     let mut store = fresh_memory_store();
-    let first = store
+    let first_id = match store
         .register_strategy("arb", "src-A", Some("first-desc"), None)
-        .expect("register first");
-    let first_id = match &first {
-        RegisterOutcome::Created(s) => s.id.clone(),
-        _ => panic!(),
+        .expect("register first")
+    {
+        RegisterOutcome::Created(s) => s.id,
+        other => panic!("first register must be Created, got {other:?}"),
     };
 
-    // Re-register same source with a DIFFERENT name + description.
-    // Must return AlreadyExists carrying the ORIGINAL row.
     let second = store
-        .register_strategy("renamed", "src-A", Some("ignored"), None)
-        .expect("register same source");
+        .register_strategy("arb", "src-A", Some("ignored"), None)
+        .expect("register same name same content");
     let existing = match second {
         RegisterOutcome::AlreadyExists(s) => s,
-        _ => panic!("second register must be AlreadyExists"),
+        other => panic!("second register must be AlreadyExists, got {other:?}"),
     };
     assert_eq!(existing.id, first_id);
-    assert_eq!(existing.name, "arb"); // immutability — original name preserved
     assert_eq!(existing.description.as_deref(), Some("first-desc"));
 }
 
+/// v1.8: different-name same-content registers a NEW lineage with a new id
+/// (the lineage_id folds into the hash so byte-identical content under a
+/// different name gets a distinct row).
 #[test]
-fn register_conflict_same_name_different_source() {
+fn register_different_name_same_content_makes_new_lineage() {
     let mut store = fresh_memory_store();
-    store
+    let first = match store
         .register_strategy("arb", "src-A", None, None)
-        .expect("first register");
+        .expect("register first")
+    {
+        RegisterOutcome::Created(s) => s,
+        other => panic!("expected Created, got {other:?}"),
+    };
 
-    let err = store
+    let second = match store
+        .register_strategy("arb-copy", "src-A", None, None)
+        .expect("register second")
+    {
+        RegisterOutcome::Created(s) => s,
+        other => panic!("expected Created (new lineage), got {other:?}"),
+    };
+    assert_ne!(first.id, second.id, "distinct lineages must yield distinct ids");
+    assert_ne!(
+        first.lineage_id, second.lineage_id,
+        "different names mint different lineage_ids"
+    );
+}
+
+/// v1.8: same-name different-content soft-deletes the old row and inserts
+/// a new version under the SAME lineage_id (ReplacedVersion outcome).
+#[test]
+fn register_same_name_different_content_replaces_version() {
+    let mut store = fresh_memory_store();
+    let v1 = match store
+        .register_strategy("arb", "src-A", None, None)
+        .expect("register v1")
+    {
+        RegisterOutcome::Created(s) => s,
+        other => panic!("v1 must be Created, got {other:?}"),
+    };
+
+    let outcome = store
         .register_strategy("arb", "src-B", None, None)
-        .expect_err("conflict expected");
-    match err {
-        StateError::NameConflict {
-            attempted_name,
-            existing_strategy_id,
-            ..
+        .expect("register v2");
+    match outcome {
+        RegisterOutcome::ReplacedVersion {
+            created,
+            previous,
+            new_version,
+            previous_version,
+            execute_changed,
+            records_changed,
+            view_changed,
         } => {
-            assert_eq!(attempted_name, "arb");
-            assert_eq!(existing_strategy_id, hash_source("src-A"));
+            assert_eq!(created.lineage_id, v1.lineage_id);
+            assert_eq!(previous.id, v1.id);
+            assert!(previous.deleted_at.is_some(), "old version must be soft-deleted");
+            assert_eq!(new_version, 2);
+            assert_eq!(previous_version, 1);
+            assert!(execute_changed);
+            assert!(!records_changed);
+            assert!(!view_changed);
         }
-        other => panic!("expected NameConflict, got {other:?}"),
+        other => panic!("expected ReplacedVersion, got {other:?}"),
     }
+}
+
+// Quieten the unused-import warning for hash_source / StateError now that
+// the old NameConflict assertion is gone.
+#[allow(dead_code)]
+fn _refs() {
+    let _ = hash_source;
+    let _: Option<StateError> = None;
 }
 
 #[test]
