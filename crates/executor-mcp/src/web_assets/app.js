@@ -63,8 +63,17 @@
       if (v === null || v === undefined || v === "") return "—";
       const num = typeof v === "number" ? v : Number(v);
       if (!isFinite(num)) return String(v);
+      // Precision-by-magnitude: small balances need decimals; large totals
+      // become unreadable past two. Bands chosen so a $0.25 entry shows
+      // full $0.250000, a $12,345 entry shows $12,345.67, and a $250,000
+      // entry shows $250,000.7. Adjust here if the bands feel off.
+      const abs = Math.abs(num);
+      let max;
+      if (abs >= 100000)     max = 1;
+      else if (abs >= 10000) max = 2;
+      else                   max = 6;
       return "$" + num.toLocaleString(undefined, {
-        minimumFractionDigits: 2, maximumFractionDigits: 2,
+        minimumFractionDigits: 0, maximumFractionDigits: max,
       });
     },
     eth(v) {
