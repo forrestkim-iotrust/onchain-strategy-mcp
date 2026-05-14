@@ -532,12 +532,12 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         "review body did not reference id + policy://current: {text}"
     );
 
-    // prompts/get getting_started → v1.4 Track E1 prefetched orientation:
-    // inlines the live strategy_list (empty-state placeholder here, since the
-    // server boots with an in-memory store and no registered strategies) +
-    // the loaded policy summary (also empty here — no [policy].path) + the
-    // 5-step playbook. Markers: the prefetched "Registered strategies"
-    // header, the empty-state placeholder, the playbook H2.
+    // prompts/get getting_started → v1.11 Track H canonical first-screen
+    // briefing. Composes runtime + strategy + policy into a single body.
+    // Section headers are the stable contract: `## Current state`,
+    // `## First-action playbook`, `## Namespace map`. On an empty in-memory
+    // server (no strategies registered), the body must select the empty-state
+    // playbook ("Empty state (0 strategies)") — not partial or active.
     send(
         &mut proc,
         json!({
@@ -557,16 +557,26 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         text.len()
     );
     assert!(
-        text.contains("Registered strategies") && text.contains("strategy://list"),
-        "getting_started missing prefetched strategy://list header: {text}"
+        text.contains("## Current state"),
+        "getting_started missing `## Current state` section: {text}"
     );
     assert!(
-        text.contains("First-action playbook"),
-        "getting_started missing playbook H2: {text}"
+        text.contains("## First-action playbook"),
+        "getting_started missing `## First-action playbook` section: {text}"
     );
     assert!(
-        text.contains("Active policy"),
-        "getting_started missing policy block: {text}"
+        text.contains("## Namespace map"),
+        "getting_started missing `## Namespace map` section: {text}"
+    );
+    assert!(
+        text.contains("Empty state (0 strategies)"),
+        "fresh server should land on empty-state playbook: {text}"
+    );
+    // The namespace map MUST list `runtime://*` — single source of truth, the
+    // shrunken server.get_info() instructions delegate here.
+    assert!(
+        text.contains("`runtime://*`"),
+        "getting_started namespace map missing runtime://* entry: {text}"
     );
 
     // v1.4 Track E1: prompts/get safety_review with a proposed source that
@@ -3842,6 +3852,72 @@ async fn trigger_events_nested_uri_with_deprecation_envelope() -> Result<()> {
         events_new, events_old,
         "nested and flat forms must yield identical events arrays"
     );
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+/// v1.11 Track H: `server.get_info().instructions` contract.
+///
+/// The instructions payload returned in `initialize` is the ≤1KB tagline +
+/// namespace map. The detail (current state, first-action playbook, namespace
+/// map) lives ONLY in the `getting_started` prompt body — single source of
+/// truth. This test pins three properties:
+///
+/// 1. `instructions` ≤ 1024 bytes (the hard cap).
+/// 2. `instructions` mentions `getting_started` so the agent knows where to go.
+/// 3. `instructions` does NOT enumerate individual URIs (no `strategy://list`
+///    or `policy://current` literals — those moved to `resources/list` and the
+///    `getting_started` prompt).
+#[tokio::test]
+async fn initialize_instructions_obey_v1_11_track_h_contract() -> Result<()> {
+    let mut proc = spawn_server().await?;
+    let init_resp = initialize(&mut proc).await?;
+
+    let instructions = init_resp["result"]["instructions"]
+        .as_str()
+        .expect("initialize result must carry an `instructions` string");
+
+    // 1. Hard cap.
+    let len = instructions.len();
+    assert!(
+        len <= 1024,
+        "instructions must be ≤ 1024 bytes; got {len} bytes: {instructions}"
+    );
+
+    // 2. Points at the `getting_started` prompt — the canonical entry point.
+    assert!(
+        instructions.contains("getting_started"),
+        "instructions must reference the `getting_started` prompt: {instructions}"
+    );
+
+    // 3. Does NOT enumerate concrete URIs. The namespace map is allowed to
+    //    list bare prefixes (`strategy://`, `policy://`, …) so an agent knows
+    //    which schemes exist, but the parameterized / per-action entrypoints
+    //    must live in `resources/list` and the `getting_started` prompt body
+    //    — not duplicated here. These literals are the canaries that the
+    //    previous long-form instructions enumerated and that the v1.11 Track
+    //    H shrink retired.
+    for forbidden in [
+        "strategy://list",
+        "strategy://by-name",
+        "trigger://list",
+        "execution://list",
+        "policy://current",
+        "policy://history",
+        "trigger-events://",
+        "examples://strategies/",
+        "examples://contracts/",
+        "docs://strategy-bundle",
+        "docs://policy-model",
+        "docs://eip-7702",
+        "docs://trigger-model",
+    ] {
+        assert!(
+            !instructions.contains(forbidden),
+            "instructions must not enumerate URI {forbidden}: {instructions}"
+        );
+    }
 
     proc.child.kill().await?;
     Ok(())
