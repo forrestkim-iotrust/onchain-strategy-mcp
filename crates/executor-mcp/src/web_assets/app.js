@@ -359,6 +359,108 @@
     return kv;
   }
 
+  // ─── Strategy-records table (v1.10) ────────────────────────
+  // The generic renderArray would dump every key into its own column
+  // (captured_at | id | payload | record_name | run_id | strategy_id),
+  // and the long hex strategy_id alone would break the layout. On a
+  // strategy-detail page we already know the strategy and the row id is
+  // uninteresting — so collapse the row into:
+  //   when | record | summary | run | tx
+  // with an expandable detail row carrying the full payload as KV.
+  const TOKEN_NAMES_8453 = {
+    "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": "USDC",
+    "0x4200000000000000000000000000000000000006": "WETH",
+    "0xa238dd80c259a72e81d7e4664a9801593f98d1c5": "Aave V3 Pool",
+    "0x2626664c2603336e57b271c5c0b26f421741e481": "Uniswap V3 Router",
+    "0x4e65fe4dba92790696d040ac24aa414708f5c0ab": "aUSDC",
+  };
+  function tokenLabel(addr) {
+    if (!addr || typeof addr !== "string") return "";
+    const k = addr.toLowerCase();
+    return TOKEN_NAMES_8453[k] || (addr.slice(0, 6) + "…" + addr.slice(-4));
+  }
+  function recordSummary(name, p) {
+    if (!p || typeof p !== "object") return "—";
+    const asset = tokenLabel(p.asset);
+    if (name === "supply" && p.amount_micro != null) {
+      return fmt.micro(p.amount_micro) + " " + (asset || "USDC") + " → Aave";
+    }
+    if (name === "withdraw" && p.amount_micro != null) {
+      // amount_micro now comes from logs.Transfer[self].value — real out.
+      return fmt.micro(p.amount_micro) + " " + (asset || "USDC") + " ← Aave";
+    }
+    if (name === "swap") {
+      const eth = p.eth_in_wei != null ? fmt.eth(p.eth_in_wei) : "?";
+      const usdc = p.usdc_out_micro != null ? fmt.micro(p.usdc_out_micro) : "?";
+      return eth + " ETH → " + usdc + " USDC";
+    }
+    // Fallback: first 2 scalar fields, key=value.
+    const out = [];
+    for (const k of Object.keys(p)) {
+      if (out.length >= 2) break;
+      const v = p[k];
+      if (v == null || typeof v === "object") continue;
+      if (k === "tx_hash" || k === "block" || k === "ts") continue;
+      out.push(k + "=" + String(v));
+    }
+    return out.length ? out.join(" · ") : "—";
+  }
+  function renderRecordsTable(records, chain) {
+    if (!records || records.length === 0) {
+      return el("div", { class: "empty", text: "no records yet" });
+    }
+    const tbl = el("table", { class: "t" });
+    tbl.appendChild(el("thead", null, [el("tr", null, [
+      el("th"),
+      el("th", { text: "when" }),
+      el("th", { text: "record" }),
+      el("th", { text: "summary" }),
+      el("th", { text: "run" }),
+      el("th", { text: "tx" }),
+    ])]));
+    const tbody = el("tbody");
+    records.forEach((r, i) => {
+      const sk = "rec:" + (r.id != null ? r.id : i);
+      const open = S.expanded.has(sk);
+      const tr = el("tr", { class: "click" });
+      tr.appendChild(el("td", { class: "mono dim", text: open ? "▾" : "▸" }));
+      tr.appendChild(el("td", { class: "mono", title: r.captured_at || "",
+        text: r.captured_at ? fmt.rel(r.captured_at) : "—" }));
+      tr.appendChild(el("td", null,
+        [el("span", { class: "chip mono", text: r.record_name || "—" })]));
+      tr.appendChild(el("td", { text: recordSummary(r.record_name, r.payload) }));
+      tr.appendChild(el("td", { class: "mono",
+        text: r.run_id ? fmt.shortHex(r.run_id, 6, 4) : "—",
+        title: r.run_id || "" }));
+      const tx = r.payload && r.payload.tx_hash;
+      const txTd = el("td");
+      if (tx) txTd.appendChild(txCell(tx, chain));
+      else txTd.appendChild(el("span", { class: "dim", text: "—" }));
+      tr.appendChild(txTd);
+      tr.addEventListener("click", (ev) => {
+        if (ev.target && ev.target.tagName === "A") return;
+        if (S.expanded.has(sk)) S.expanded.delete(sk); else S.expanded.add(sk);
+        renderTab();
+      });
+      tbody.appendChild(tr);
+      if (open) {
+        const detail = el("tr");
+        const td = el("td", { colspan: 6 });
+        const wrap = el("div", { class: "nested" });
+        if (r.payload && typeof r.payload === "object") {
+          wrap.appendChild(renderObjectAsKV(r.payload, chain));
+        } else {
+          wrap.appendChild(el("div", { class: "dim", text: "(empty payload)" }));
+        }
+        td.appendChild(wrap);
+        detail.appendChild(td);
+        tbody.appendChild(detail);
+      }
+    });
+    tbl.appendChild(tbody);
+    return tbl;
+  }
+
   // ─── Fetch helper ──────────────────────────────────────────
   async function getJson(path) {
     const res = await fetch(path, { headers: { "Accept": "application/json" } });
@@ -897,23 +999,37 @@
           return b;
         })()));
       }
-      // records (collapsed by default)
+      // records — open by default now that we have a focused table view.
+      // The generic renderValue spilled every column (including the
+      // 64-char strategy_id), making each payload field stack vertically
+      // one character at a time. The custom renderRecordsTable collapses
+      // the row to when / record / summary / run / tx with an expandable
+      // payload detail row.
       const records = (d.records && d.records.records) || [];
       if (records.length > 0) {
         const sk = "records:" + id;
-        const open = S.expanded.has(sk);
+        const open = S.expanded.has(sk) || !S.expanded.has(sk + ":closed");
         const head = el("div", { class: "section-head" }, [
           el("span", { class: "disclose",
             onclick: (ev) => {
               ev.preventDefault();
-              if (S.expanded.has(sk)) S.expanded.delete(sk); else S.expanded.add(sk);
+              // We invert the semantics so the default is OPEN (presence
+              // of `${sk}:closed` means user explicitly collapsed it).
+              if (open) {
+                S.expanded.add(sk + ":closed");
+                S.expanded.delete(sk);
+              } else {
+                S.expanded.delete(sk + ":closed");
+                S.expanded.add(sk);
+              }
               renderTab();
             },
             text: (open ? "▾" : "▸") + " records (" + records.length + ")" }),
-          el("span", null, ""),
+          el("span", { class: "mono dim",
+            text: "click a row to expand its full payload" }),
         ]);
         const body2 = el("div", { class: "section-body flush" });
-        if (open) body2.appendChild(renderValue(records, "records", chain));
+        if (open) body2.appendChild(renderRecordsTable(records, chain));
         const sec = el("div", { class: "section" });
         sec.appendChild(head); sec.appendChild(body2);
         root.appendChild(sec);
