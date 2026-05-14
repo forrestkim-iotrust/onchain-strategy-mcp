@@ -19,6 +19,7 @@ pub mod errors;
 pub mod init;
 pub mod logging;
 pub mod prompts;
+pub mod records;
 pub mod resources;
 pub mod server;
 pub mod tools;

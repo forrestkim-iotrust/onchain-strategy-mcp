@@ -10,7 +10,7 @@
 //! (`partial_index_behaviour.rs`, `foreign_keys_enforced`). Production code
 //! must go through the typed façade methods.
 
-use crate::{error::StateError, executions, runs, schema, strategies, triggers};
+use crate::{error::StateError, executions, records_capture, runs, schema, strategies, triggers};
 use executor_core::schema::trigger::{
     RegisterTriggerInput, Trigger, TriggerEvent, TriggerListFilter, TriggerSummary,
 };
@@ -102,6 +102,34 @@ impl StateStore {
 
     pub fn is_strategy_deleted(&self, id: &str) -> Result<Option<bool>, StateError> {
         strategies::is_deleted(&self.conn, id)
+    }
+
+    // ---- Records capture façade (v1.4 strategy bundle) ----
+
+    /// Insert one row into `strategy_records_capture`. Callers (the
+    /// capture-hook in `executor-mcp::tools`) are expected to wrap this in a
+    /// swallow-error guard — capture failure must NEVER propagate back into
+    /// the action-confirm path.
+    pub fn record_strategy_capture(
+        &mut self,
+        run_id: &str,
+        strategy_id: &str,
+        record_name: &str,
+        payload_json: &str,
+    ) -> Result<(), StateError> {
+        records_capture::insert(&self.conn, run_id, strategy_id, record_name, payload_json)
+    }
+
+    /// List capture rows for a strategy, newest-first. `since` is an
+    /// exclusive lower bound on `captured_at` (RFC3339 string compare);
+    /// `limit` is hard-capped at 500.
+    pub fn list_strategy_records(
+        &self,
+        strategy_id: &str,
+        since: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<records_capture::RecordCaptureEntry>, StateError> {
+        records_capture::list_for_strategy(&self.conn, strategy_id, since, limit)
     }
 
     // ---- Run façade ----

@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use executor_core::schema::execution::RunStatus;
 use executor_core::schema::strategy::StrategyGetResponse;
+use executor_core::schema::trigger::{TriggerKind, TriggerListFilter};
+use executor_policy::LoadedPolicy;
 use executor_state::{
     LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, RunListFilter, StateError, StateStore,
 };
@@ -33,10 +35,11 @@ use rmcp::{
     service::RequestContext,
 };
 use serde_json::json;
+use tokio::sync::RwLock;
 
 use crate::{
     errors::{invalid_params, map_state_error, storage_error},
-    tools::build_execution_report,
+    tools::{build_execution_report, strategy_to_get_response},
 };
 
 // ─────────── Embedded examples + static docs (v1.3 self-documenting) ───────────
@@ -238,10 +241,71 @@ pub(crate) async fn list_resource_templates_impl(
         meta: None,
         next_cursor: None,
         resource_templates: vec![
+            // v1.4 Track B: summary-with-hyperlinks listing for the
+            // 30-second-rule answer to "what is running?".
+            make_template(
+                "strategy://list",
+                "strategy-list",
+                "Active strategy summaries with inline `trigger_kinds`, `last_fire_at`, \
+                 `last_24h` run rollup, `has_bundle` flag, and a `view_uri` follow-up. \
+                 Query params: `status=active|deleted|all` (default `active`), `tag=<name>` \
+                 (exact-match), `summary=true|false` (default `true`, embeds the rich rollup; \
+                 `false` returns the bare summary fields only).",
+                "application/json",
+            ),
             make_template(
                 "strategy://{strategy_id}",
                 "strategy",
                 "Registered strategy (source + metadata). Live in Phase 2.",
+                "application/json",
+            ),
+            // v1.4 Track B: name-aliased lookup so human-friendly references work.
+            make_template(
+                "strategy://by-name/{name}",
+                "strategy-by-name",
+                "Resolve a strategy by its human-friendly active name. Returns the same \
+                 shape as `strategy://{strategy_id}` for the active row. 404 when no \
+                 active strategy carries that name.",
+                "application/json",
+            ),
+            // v1.4 Track A4: bundle view + raw records browse.
+            make_template(
+                "strategy://{strategy_id}/view",
+                "strategy-view",
+                "v1.4 strategy bundle: returns the output of the strategy's `view(ctx, records)` \
+                 function. Bundled strategies receive their captured records aggregated host-side \
+                 (sum/count/latest/since/each on each record name) and run the view inside the same \
+                 JS sandbox as `evm_view`. Strategies registered without a `view` source fall back to \
+                 a generic balance snapshot wrapped with `confidence: \"missing\"` + remediation hint. \
+                 Wrapped with the v1.4 honesty contract: `{ data, confidence, reason?, remediation? }`.",
+                "application/json",
+            ),
+            make_template(
+                "strategy://{strategy_id}/records",
+                "strategy-records",
+                "v1.4 strategy bundle: raw capture rows from `strategy_records_capture`. \
+                 Newest-first, hard-capped at 500. Supports `since` (RFC3339 exclusive lower bound \
+                 on captured_at). Example: `strategy://abc.../records?since=2026-05-14T00:00:00Z`. \
+                 Use this for forensics / aggregate prototyping; for the strategy-defined \
+                 interpretation, prefer `strategy://{strategy_id}/view`.",
+                "application/json",
+            ),
+            // v1.4 Track B: filtered trigger listing.
+            make_template(
+                "trigger://list",
+                "trigger-list",
+                "Trigger summaries (id, strategy_id, kind, enabled, last_fired_at, created_at). \
+                 Query params: `strategy_id=<id>` (exact match), `kind=manual|interval|log|mempool`, \
+                 `enabled=true|false`. All filters AND together.",
+                "application/json",
+            ),
+            // v1.4 Track B: policy snapshot resource.
+            make_template(
+                "policy://current",
+                "policy-current",
+                "Current loaded policy. Shape: `{ loaded: bool, policy?: <toml-projected JSON>, \
+                 confidence?, reason?, remediation? }`. When `loaded` is false, the response \
+                 carries `confidence: \"missing\"` + a `remediation` pointing at `.local/policy.toml`.",
                 "application/json",
             ),
             make_template(
@@ -327,10 +391,56 @@ pub(crate) async fn read_resource_impl(
     request: ReadResourceRequestParams,
     _ctx: RequestContext<RoleServer>,
     state: Arc<tokio::sync::Mutex<StateStore>>,
+    policy: Arc<RwLock<Option<LoadedPolicy>>>,
 ) -> Result<ReadResourceResult, McpError> {
     let uri = request.uri.clone();
 
-    // Branch on URI scheme. Only `strategy://{id}` is wired in Phase 2.
+    // v1.4 Track B / A4 collision plan: `strategy://list` MUST match BEFORE
+    // the generic `strategy://{id}` branch. Also keep space for A4's
+    // `strategy://{id}/view` and `strategy://{id}/records` — those land in
+    // `read_strategy_subresource` after the prefix-stripped id is parsed.
+    if uri == "strategy://list" {
+        return read_strategy_list(uri, String::new(), state).await;
+    }
+    if let Some(query) = uri.strip_prefix("strategy://list?") {
+        let q = query.to_string();
+        return read_strategy_list(uri, q, state).await;
+    }
+    if let Some(name) = uri.strip_prefix("strategy://by-name/") {
+        let name = name.to_string();
+        return read_strategy_by_name(uri, name, state).await;
+    }
+    // v1.4 Track A4: bundle view + raw records browse.
+    // Match `strategy://{id}/view` and `strategy://{id}/records[?...]` BEFORE
+    // the generic `strategy://{id}` branch below.
+    if let Some(rest) = uri.strip_prefix("strategy://") {
+        if let Some((id, tail)) = rest.split_once('/') {
+            if tail == "view" {
+                return read_strategy_view(uri.clone(), id.to_string(), state).await;
+            }
+            if let Some(query) = tail.strip_prefix("records?") {
+                return read_strategy_records(uri.clone(), id.to_string(), query.to_string(), state).await;
+            }
+            if tail == "records" {
+                return read_strategy_records(uri.clone(), id.to_string(), String::new(), state).await;
+            }
+        }
+    }
+    // policy://current — v1.4 Track B. Match exactly to avoid shadowing.
+    if uri == "policy://current" {
+        return read_policy_current(uri, policy).await;
+    }
+    // trigger://list[?...] — v1.4 Track B. Must match before generic
+    // `trigger://{id}` branch.
+    if uri == "trigger://list" {
+        return read_trigger_list(uri, String::new(), state).await;
+    }
+    if let Some(query) = uri.strip_prefix("trigger://list?") {
+        let q = query.to_string();
+        return read_trigger_list(uri, q, state).await;
+    }
+
+    // Generic strategy://{id} (after the above v1.4 specializations).
     if let Some(id) = uri.strip_prefix("strategy://") {
         let id_owned = id.to_string();
         return read_strategy(uri, id_owned, state).await;
@@ -340,11 +450,7 @@ pub(crate) async fn read_resource_impl(
         return read_journal(uri, rid_owned, state).await;
     }
     // v1.4 Track C: `execution://list[?...]` MUST match BEFORE the
-    // generic `execution://{run_id}` branch — `list` would otherwise pass
-    // the malformed-id check in `validate_run_resource_id` (4 chars ≠ 26).
-    // Accept `execution://list` (no query) or `execution://list?<qs>`; reject
-    // anything that continues the path/word (e.g. `execution://list/foo`,
-    // `execution://listrunner`) so this branch can't shadow future URIs.
+    // generic `execution://{run_id}` branch.
     if uri == "execution://list" {
         return read_execution_list(uri, String::new(), state).await;
     }
@@ -878,6 +984,418 @@ fn static_doc_for(uri: &str) -> Option<&'static str> {
     }
 }
 
+// ─────────── v1.4 Track B — strategy://list ───────────
+//
+// One resource read answers "what is running?" without forcing the agent to
+// fan out to per-strategy fetches. Each summary embeds:
+//   - id, name, description, tags, created_at
+//   - trigger_kinds: the kinds of triggers attached (one per trigger row)
+//   - last_fire_at: max(fired_at) across triggers (None when nothing fired)
+//   - last_24h: { runs, succeeded, failed, actions } rolled up across runs
+//   - has_bundle: True when records or view are present
+//   - view_uri: the strategy://{id}/view follow-up
+//
+// Filters: `status=active|deleted|all` (default `active`), `tag=<name>`,
+// `summary=true|false`. `summary=false` returns the bare summary fields.
+
+#[derive(Default)]
+struct ParsedStrategyListQuery {
+    status: StrategyListStatus,
+    tag: Option<String>,
+    summary: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+enum StrategyListStatus {
+    #[default]
+    Active,
+    Deleted,
+    All,
+}
+
+fn parse_strategy_list_query(qs: &str) -> Result<ParsedStrategyListQuery, McpError> {
+    let mut parsed = ParsedStrategyListQuery {
+        status: StrategyListStatus::Active,
+        tag: None,
+        summary: true,
+    };
+    if qs.is_empty() {
+        return Ok(parsed);
+    }
+    for pair in qs.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (pair, ""),
+        };
+        let v = percent_decode(v).map_err(|e| {
+            invalid_params(format!(
+                "strategy://list: malformed percent-encoding in `{k}`: {e}"
+            ))
+        })?;
+        match k {
+            "status" => match v.as_str() {
+                "active" => parsed.status = StrategyListStatus::Active,
+                "deleted" => parsed.status = StrategyListStatus::Deleted,
+                "all" => parsed.status = StrategyListStatus::All,
+                other => {
+                    return Err(invalid_params(format!(
+                        "strategy://list: `status` must be one of `active` | `deleted` | `all`, got `{other}`"
+                    )));
+                }
+            },
+            "tag" => {
+                if v.is_empty() {
+                    return Err(invalid_params(
+                        "strategy://list: `tag` value is empty",
+                    ));
+                }
+                parsed.tag = Some(v);
+            }
+            "summary" => match v.as_str() {
+                "true" | "1" | "" => parsed.summary = true,
+                "false" | "0" => parsed.summary = false,
+                other => {
+                    return Err(invalid_params(format!(
+                        "strategy://list: `summary` must be `true` | `false`, got `{other}`"
+                    )));
+                }
+            },
+            other => {
+                return Err(invalid_params(format!(
+                    "strategy://list: unknown query parameter `{other}` \
+                     (allowed: status, tag, summary)"
+                )));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+async fn read_strategy_list(
+    uri: String,
+    query: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    let parsed = parse_strategy_list_query(&query)?;
+
+    // Pull strategies first. We always pull all (active + deleted) and filter
+    // in Rust — the state layer's `list_strategies(true|false)` partitions
+    // active from include-deleted; we filter further by `status` here.
+    let summaries = {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_strategies(true)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?
+    };
+
+    // status filter
+    let filtered: Vec<_> = summaries
+        .into_iter()
+        .filter(|s| match parsed.status {
+            StrategyListStatus::Active => s.deleted_at.is_none(),
+            StrategyListStatus::Deleted => s.deleted_at.is_some(),
+            StrategyListStatus::All => true,
+        })
+        .filter(|s| match &parsed.tag {
+            None => true,
+            Some(tag) => s
+                .tags
+                .as_ref()
+                .is_some_and(|tags| tags.iter().any(|t| t == tag)),
+        })
+        .collect();
+
+    // Build per-strategy summaries. The `last_24h` rollup queries the runs
+    // table per strategy — for v1 we just call `list_runs` with a 24h since
+    // bound + that strategy_id. We hold the StateStore mutex once for the
+    // whole pass so there's no lock thrash.
+    let ids: Vec<String> = filtered.iter().map(|s| s.id.clone()).collect();
+    let state_for_lookup = state.clone();
+    type StrategyAux = (
+        // trigger_kinds
+        Vec<String>,
+        // last_fire_at
+        Option<String>,
+        // last_24h: (runs, succeeded, failed, actions)
+        (u64, u64, u64, u64),
+    );
+    let aux: std::collections::HashMap<String, StrategyAux> =
+        tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+            let store = state_for_lookup.blocking_lock();
+            let since_24h = chrono::Utc::now() - chrono::Duration::hours(24);
+            let since_24h_rfc =
+                since_24h.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let mut out: std::collections::HashMap<String, StrategyAux> =
+                std::collections::HashMap::new();
+            for sid in &ids {
+                let triggers = store.list_triggers(Some(&TriggerListFilter {
+                    strategy_id: Some(sid.clone()),
+                    ..Default::default()
+                }))?;
+                let kinds: Vec<String> = triggers
+                    .iter()
+                    .map(|t| t.kind.as_wire().to_string())
+                    .collect();
+                let last_fire_at: Option<String> = triggers
+                    .iter()
+                    .filter_map(|t| t.last_fired_at.clone())
+                    .max();
+
+                // last_24h via list_runs filter.
+                let recent = store.list_runs(&RunListFilter {
+                    strategy_id: Some(sid.clone()),
+                    since: Some(since_24h_rfc.clone()),
+                    status: None,
+                    journal_outcome: None,
+                    limit: Some(LIST_RUNS_LIMIT_CAP),
+                })?;
+                let mut runs: u64 = 0;
+                let mut succeeded: u64 = 0;
+                let mut failed: u64 = 0;
+                let mut actions: u64 = 0;
+                for r in &recent {
+                    runs += 1;
+                    match r.status {
+                        RunStatus::Succeeded => succeeded += 1,
+                        RunStatus::Failed
+                        | RunStatus::SimulationDenied
+                        | RunStatus::PolicyDenied
+                        | RunStatus::Canceled => failed += 1,
+                        _ => {}
+                    }
+                    actions += u64::try_from(r.action_count).unwrap_or(0);
+                }
+                out.insert(sid.clone(), (kinds, last_fire_at, (runs, succeeded, failed, actions)));
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+
+    let mut strategy_jsons: Vec<serde_json::Value> = Vec::with_capacity(filtered.len());
+    let mut any_runs_in_24h = false;
+    for s in &filtered {
+        let entry = aux.get(&s.id).cloned().unwrap_or_default();
+        let (kinds, last_fire_at, (runs, succeeded, failed, actions)) = entry;
+        if runs > 0 {
+            any_runs_in_24h = true;
+        }
+        if parsed.summary {
+            strategy_jsons.push(json!({
+                "id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "tags": s.tags,
+                "created_at": s.created_at,
+                "deleted_at": s.deleted_at,
+                "trigger_kinds": kinds,
+                "last_fire_at": last_fire_at,
+                "last_24h": {
+                    "runs": runs,
+                    "succeeded": succeeded,
+                    "failed": failed,
+                    "actions": actions,
+                },
+                "has_bundle": s.has_bundle,
+                "view_uri": format!("strategy://{id}/view", id = s.id),
+            }));
+        } else {
+            strategy_jsons.push(json!({
+                "id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "tags": s.tags,
+                "created_at": s.created_at,
+                "deleted_at": s.deleted_at,
+                "has_bundle": s.has_bundle,
+            }));
+        }
+    }
+
+    // Honesty contract on the rollup: when no runs landed in 24h, declare
+    // partial confidence so the agent doesn't infer "nothing is running" vs
+    // "nothing ran recently".
+    let body = if parsed.summary && !filtered.is_empty() && !any_runs_in_24h {
+        json!({
+            "strategies": strategy_jsons,
+            "count": filtered.len(),
+            "confidence": "partial",
+            "reason": "no runs in the last 24h",
+        })
+    } else {
+        json!({
+            "strategies": strategy_jsons,
+            "count": filtered.len(),
+        })
+    };
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize strategy://list: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
+async fn read_strategy_by_name(
+    uri: String,
+    name: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    if name.is_empty() {
+        return Err(McpError::resource_not_found(
+            format!("malformed name in uri: {uri}"),
+            Some(json!({
+                "uri": uri,
+                "code": "malformed_name",
+                "hint": "name must be a non-empty URI segment",
+            })),
+        ));
+    }
+    let name_for_lookup = name.clone();
+    let row = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.get_strategy_by_name(&name_for_lookup)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    match row {
+        None => Err(McpError::resource_not_found(
+            format!("strategy with name `{name}` not found"),
+            Some(json!({
+                "uri": uri,
+                "code": "not_found",
+                "hint": "list active strategies via strategy://list?status=active",
+            })),
+        )),
+        Some(s) => {
+            let resp = strategy_to_get_response(s);
+            let body = serde_json::to_string(&resp)
+                .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
+            Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(body, uri).with_mime_type("application/json"),
+            ]))
+        }
+    }
+}
+
+// ─────────── v1.4 Track B — trigger://list ───────────
+
+fn parse_trigger_list_query(
+    qs: &str,
+) -> Result<TriggerListFilter, McpError> {
+    let mut filter = TriggerListFilter::default();
+    if qs.is_empty() {
+        return Ok(filter);
+    }
+    for pair in qs.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (pair, ""),
+        };
+        let v = percent_decode(v).map_err(|e| {
+            invalid_params(format!(
+                "trigger://list: malformed percent-encoding in `{k}`: {e}"
+            ))
+        })?;
+        match k {
+            "strategy_id" => filter.strategy_id = Some(v),
+            "kind" => {
+                let parsed = TriggerKind::from_wire(&v).ok_or_else(|| {
+                    invalid_params(format!(
+                        "trigger://list: `kind` must be one of `manual|interval|log|mempool|block|webhook`, got `{v}`"
+                    ))
+                })?;
+                filter.kind = Some(parsed);
+            }
+            "enabled" => match v.as_str() {
+                "true" | "1" => filter.enabled = Some(true),
+                "false" | "0" => filter.enabled = Some(false),
+                other => {
+                    return Err(invalid_params(format!(
+                        "trigger://list: `enabled` must be `true` | `false`, got `{other}`"
+                    )));
+                }
+            },
+            other => {
+                return Err(invalid_params(format!(
+                    "trigger://list: unknown query parameter `{other}` \
+                     (allowed: strategy_id, kind, enabled)"
+                )));
+            }
+        }
+    }
+    Ok(filter)
+}
+
+async fn read_trigger_list(
+    uri: String,
+    query: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    let filter = parse_trigger_list_query(&query)?;
+    let summaries = tokio::task::spawn_blocking(move || {
+        let store = state.blocking_lock();
+        store.list_triggers(Some(&filter))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    let count = summaries.len();
+    let body = json!({
+        "triggers": summaries,
+        "count": count,
+    });
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize trigger://list: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
+// ─────────── v1.4 Track B — policy://current ───────────
+
+async fn read_policy_current(
+    uri: String,
+    policy: Arc<RwLock<Option<LoadedPolicy>>>,
+) -> Result<ReadResourceResult, McpError> {
+    let guard = policy.read().await;
+    let body = match &*guard {
+        Some(loaded) => {
+            let policy_json = serde_json::to_value(loaded).map_err(|e| {
+                tracing::warn!(detail = %e, "policy://current: failed to serialize LoadedPolicy");
+                storage_error(format!("policy://current serialize: {e}"))
+            })?;
+            json!({
+                "loaded": true,
+                "policy": policy_json,
+                "confidence": "full",
+            })
+        }
+        None => json!({
+            "loaded": false,
+            "reason": "policy not loaded (set [policy].path in config or fix policy.toml; see tracing logs)",
+            "confidence": "missing",
+            "remediation": "create .local/policy.toml — see docs://policy-model",
+        }),
+    };
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("policy://current encode: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
 #[cfg(test)]
 mod self_documenting_resource_tests {
     use super::*;
@@ -919,3 +1437,335 @@ mod self_documenting_resource_tests {
         assert!(txt.contains("eth-funnel"));
     }
 }
+async fn read_strategy_view(
+    uri: String,
+    id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    if id.len() != 64 || !id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
+        return Err(McpError::resource_not_found(
+            format!("malformed strategy id in uri: {uri}"),
+            Some(json!({ "uri": uri, "code": "malformed_id" })),
+        ));
+    }
+
+    // 1. Load strategy + records snapshot in one blocking pass.
+    let id_for_blocking = id.clone();
+    let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state.blocking_lock();
+        let s = store.get_strategy_by_id(&id_for_blocking)?;
+        let records = store.list_strategy_records(&id_for_blocking, None, 500)?;
+        Ok((s, records))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    let (strategy, records_rows) = lookup;
+    let Some(strategy) = strategy else {
+        return Err(McpError::resource_not_found(
+            format!("strategy {uri} not found"),
+            Some(json!({ "uri": uri, "code": "not_found" })),
+        ));
+    };
+
+    // 2. Fallback when no view source is registered.
+    let view_source = match strategy.view_source.as_deref() {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => {
+            let body = json!({
+                "data": serde_json::Value::Null,
+                "confidence": "missing",
+                "reason": "strategy has no `view` function — register with bundle to enable",
+                "remediation": "supply `view` (and ideally `records`) in strategy_register so this URI returns a strategy-defined snapshot",
+            });
+            let txt = serde_json::to_string(&body)
+                .map_err(|e| storage_error(format!("serialize view fallback: {e}")))?;
+            return Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(txt, uri).with_mime_type("application/json"),
+            ]));
+        }
+    };
+
+    // 3. Build the `records` argument: { recordName: { each, count, latest,
+    //    sum(field) → value, since(ts) → array } }. We pre-compute sums for
+    //    every numeric-castable field so the JS view function can call
+    //    `records.supply.sum_amount` directly (host-computed), and we ship
+    //    the raw rows under `each` for filtering / per-entry reads. Sum-on-
+    //    demand is implemented as a JS lambda that closes over the rows.
+    let records_arg = aggregate_records_for_view(&records_rows);
+
+    // 4. Wrap the user's `(ctx, records) => any` so the existing Sandbox
+    //    (which evals `(SOURCE)(__ctx)`) can call it. We inject the
+    //    aggregated records as a JSON literal — safe because the aggregates
+    //    are pure JSON values, not arbitrary JS.
+    let records_json_lit = serde_json::to_string(&records_arg)
+        .map_err(|e| storage_error(format!("serialize view records arg: {e}")))?;
+    let wrapped_source = format!(
+        "(ctx) => {{\n\
+           const __records = {records};\n\
+           const __view = ({user});\n\
+           if (typeof __view !== 'function') throw new Error('view source must evaluate to a function (ctx, records) => any');\n\
+           return __view(ctx, __records);\n\
+         }}",
+        records = records_json_lit,
+        user = view_source
+    );
+
+    // 5. Run inside the same JS sandbox the existing `evm_view` tool uses.
+    //    No provider here = the view function can still inspect args but RPC
+    //    helpers will surface a typed JS error; that's fine — the v1.4
+    //    contract for view is "ctx.evm.* mostly works" and the agent can
+    //    diagnose via the wrapping `data` field.
+    use strategy_js::{CtxHost, Sandbox};
+
+    struct ViewHostInner {
+        sid: String,
+        name: String,
+        logs: Vec<String>,
+    }
+    impl CtxHost for ViewHostInner {
+        fn strategy_id(&self) -> &str { &self.sid }
+        fn strategy_name(&self) -> &str { &self.name }
+        fn run_id(&self) -> &str { "view" }
+        fn now_millis(&self) -> i64 { 0 }
+        fn append_log(&mut self, m: String) { self.logs.push(m); }
+    }
+
+    let sid_owned = strategy.id.clone();
+    let name_owned = strategy.name.clone();
+    let exec_result: Result<(serde_json::Value, Vec<String>), strategy_js::RuntimeError> =
+        tokio::task::spawn_blocking(move || {
+            let mut host = ViewHostInner {
+                sid: sid_owned,
+                name: name_owned,
+                logs: Vec::new(),
+            };
+            let v = Sandbox::execute(&wrapped_source, &mut host)?;
+            Ok((v, host.logs))
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?;
+
+    match exec_result {
+        Ok((data, logs)) => {
+            let body = json!({
+                "data": data,
+                "confidence": "full",
+                "logs": logs,
+            });
+            let txt = serde_json::to_string(&body)
+                .map_err(|e| storage_error(format!("serialize view ok: {e}")))?;
+            Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(txt, uri).with_mime_type("application/json"),
+            ]))
+        }
+        Err(e) => {
+            // Honesty: report partial / unavailable rather than a 500. Agents
+            // can inspect `reason` and act (re-register, fix view source, etc.).
+            let body = json!({
+                "data": serde_json::Value::Null,
+                "confidence": "partial",
+                "reason": format!("view function failed: {e}"),
+                "remediation": "inspect `strategy://{id}` for the view source and try `evm_view` with a minimal repro",
+            });
+            let txt = serde_json::to_string(&body)
+                .map_err(|err| storage_error(format!("serialize view err wrap: {err}")))?;
+            Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(txt, uri).with_mime_type("application/json"),
+            ]))
+        }
+    }
+}
+
+/// Build the `records` argument the JS view function sees. The DESIGN spec
+/// asks for `{ sum(field), count, latest, since(ts), each }`. For v1 we
+/// implement these by emitting a host-computed JSON snapshot per record name:
+///
+/// ```json
+/// {
+///   "supply": {
+///     "count": 3,
+///     "latest": { ... },        // newest captured row
+///     "each":   [ ... ],        // all rows, newest-first
+///     "sums":   { "amount": "12345", ... }
+///   }
+/// }
+/// ```
+///
+/// Numeric sums are evaluated host-side over every JSON field whose values are
+/// all decimal-string or JSON-number convertible to u128. Non-numeric fields
+/// are simply omitted from `sums`. The view function reads the precomputed
+/// value with `records.supply.sums.amount` (numbers as decimal strings to
+/// preserve uint256 range).
+fn aggregate_records_for_view(
+    rows: &[executor_state::RecordCaptureEntry],
+) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    let mut by_name: BTreeMap<&str, Vec<&executor_state::RecordCaptureEntry>> = BTreeMap::new();
+    for r in rows {
+        by_name.entry(r.record_name.as_str()).or_default().push(r);
+    }
+
+    let mut out = serde_json::Map::new();
+    for (name, rows) in by_name {
+        // Rows are already newest-first from `list_strategy_records`; preserve.
+        let parsed: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::from_str(&r.payload_json).unwrap_or(serde_json::Value::Null))
+            .collect();
+        let latest = parsed.first().cloned().unwrap_or(serde_json::Value::Null);
+
+        // Compute sums: walk every field key seen across rows. A field is
+        // "summable" iff every observed value is numeric-string or JSON number.
+        let mut field_values: BTreeMap<String, Vec<&serde_json::Value>> = BTreeMap::new();
+        for p in &parsed {
+            if let Some(obj) = p.as_object() {
+                for (k, v) in obj {
+                    field_values.entry(k.clone()).or_default().push(v);
+                }
+            }
+        }
+        let mut sums = serde_json::Map::new();
+        for (k, vals) in field_values {
+            if let Some(sum) = sum_decimal_strings(&vals) {
+                sums.insert(k, serde_json::Value::String(sum));
+            }
+        }
+
+        let mut entry = serde_json::Map::new();
+        entry.insert(
+            "count".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(rows.len())),
+        );
+        entry.insert("latest".to_string(), latest);
+        entry.insert("each".to_string(), serde_json::Value::Array(parsed));
+        entry.insert("sums".to_string(), serde_json::Value::Object(sums));
+        out.insert(name.to_string(), serde_json::Value::Object(entry));
+    }
+    serde_json::Value::Object(out)
+}
+
+/// Sum a homogeneous slice of JSON values as u128 decimals. Returns `None`
+/// if any value isn't decimal-castable (so the field is skipped from
+/// `sums`). Overflow → `None` (the agent can still walk `each` manually).
+fn sum_decimal_strings(vals: &[&serde_json::Value]) -> Option<String> {
+    let mut acc: u128 = 0;
+    let mut any = false;
+    for v in vals {
+        any = true;
+        match v {
+            serde_json::Value::String(s) => {
+                let n = s.parse::<u128>().ok()?;
+                acc = acc.checked_add(n)?;
+            }
+            serde_json::Value::Number(n) => {
+                let v = n.as_u64()?;
+                acc = acc.checked_add(v as u128)?;
+            }
+            _ => return None,
+        }
+    }
+    if any { Some(acc.to_string()) } else { None }
+}
+
+// ─────────── v1.4 Track A4 — strategy://{id}/records ───────────
+
+async fn read_strategy_records(
+    uri: String,
+    id: String,
+    query: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    if id.len() != 64 || !id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
+        return Err(McpError::resource_not_found(
+            format!("malformed strategy id in uri: {uri}"),
+            Some(json!({ "uri": uri, "code": "malformed_id" })),
+        ));
+    }
+
+    // Parse `since` filter.
+    let mut since: Option<String> = None;
+    let mut limit: u64 = 500;
+    if !query.is_empty() {
+        for pair in query.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            let decoded = percent_decode(v).map_err(|e| {
+                invalid_params(format!(
+                    "strategy://{{id}}/records: malformed percent-encoding in `{k}`: {e}"
+                ))
+            })?;
+            match k {
+                "since" => since = Some(decoded),
+                "limit" => {
+                    limit = decoded.parse::<u64>().map_err(|e| {
+                        invalid_params(format!(
+                            "strategy://{{id}}/records: `limit` must be a non-negative integer: {e}"
+                        ))
+                    })?;
+                    if limit == 0 {
+                        return Err(invalid_params(
+                            "strategy://{id}/records: `limit` must be ≥ 1".to_string(),
+                        ));
+                    }
+                }
+                other => {
+                    return Err(invalid_params(format!(
+                        "strategy://{{id}}/records: unknown query parameter `{other}` (allowed: since, limit)"
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(s) = &since {
+        if chrono::DateTime::parse_from_rfc3339(s).is_err() {
+            return Err(invalid_params(format!(
+                "strategy://{{id}}/records: `since` must be RFC3339 / ISO8601, got `{s}`"
+            )));
+        }
+    }
+    let capped = limit.min(500);
+
+    let id_for_blocking = id.clone();
+    let since_for_blocking = since.clone();
+    let rows = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state.blocking_lock();
+        store.list_strategy_records(&id_for_blocking, since_for_blocking.as_deref(), capped)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+
+    let rows_json: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            let payload: serde_json::Value =
+                serde_json::from_str(&r.payload_json).unwrap_or(serde_json::Value::Null);
+            json!({
+                "id": r.id,
+                "run_id": r.run_id,
+                "strategy_id": r.strategy_id,
+                "record_name": r.record_name,
+                "captured_at": r.captured_at,
+                "payload": payload,
+            })
+        })
+        .collect();
+    let count = rows_json.len();
+    let body = json!({
+        "records": rows_json,
+        "count": count,
+        "filters_applied": {
+            "since": since,
+            "limit": capped,
+        },
+    });
+    let txt = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize records: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(txt, uri).with_mime_type("application/json"),
+    ]))
+}
+

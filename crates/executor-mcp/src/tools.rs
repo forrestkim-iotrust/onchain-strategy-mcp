@@ -1,26 +1,30 @@
-//! `#[tool_router]` impl block — 8 MCP tools.
+//! `#[tool_router]` impl block — 8 MCP tools (after v1.4 Track B).
 //!
-//! Phase transition map (Phase 2 delivers the first two groups):
-//!   - Real storage-backed: strategy_register, strategy_list, strategy_get,
-//!     strategy_delete, execution_get (returns not_found until runs are
-//!     inserted — Plan 02-03 wires `strategy_run_once` to start emitting runs).
-//!   - Still placeholders: strategy_run_once (Phase 6), policy_get (Phase 5,
-//!     returns empty shape). v1.4: `policy_update` tool removed — policy is
-//!     edited via `.local/policy.toml` only.
+//! v1.4 drops the read tools (`strategy_list`, `strategy_get`,
+//! `trigger_list`, `trigger_get`, `trigger_events`, `execution_get`,
+//! `policy_get`) — those become resources under `strategy://`,
+//! `trigger://`, `execution://`, and `policy://`. Remaining tools are
+//! mutations / executions only:
+//!   - `strategy_register`, `strategy_delete`, `strategy_run`
+//!   - `trigger_register`, `trigger_delete`, `trigger_set_enabled`
+//!   - `evm_receipt`, `evm_view`
+//!
+//! Schema definitions for the dropped tools' inputs/outputs live in
+//! `executor-core::schema::*` UNTOUCHED — resource handlers reuse them.
 
 use alloy_primitives::{Address, U256};
 use executor_core::schema::{
     action::Action,
     execution::{
-        ActionDecision, ExecutionActionReport, ExecutionGetResponse, ExecutionIdInput, GateVerdict,
+        ActionDecision, ExecutionActionReport, ExecutionGetResponse, GateVerdict,
         JournalActionOutcome, RunStatus, StrategyOutcome, StrategyRunResponse,
     },
     strategy::{
-        StrategyDeleteResponse, StrategyGetInput, StrategyGetResponse, StrategyIdInput,
-        StrategyListItem, StrategyListResponse, StrategyRegisterInput, StrategyRegisterResponse,
+        StrategyDeleteResponse, StrategyGetResponse, StrategyIdInput,
+        StrategyListItem, StrategyRegisterInput, StrategyRegisterResponse,
         StrategyRunInput,
     },
-    trigger::{RegisterTriggerInput, TriggerKind, TriggerListFilter},
+    trigger::RegisterTriggerInput,
 };
 use executor_evm::{
     NormalizedAction, NormalizedActionKind, SimulationFailReason, SimulationOutcome,
@@ -58,47 +62,12 @@ use crate::{
     },
 };
 
-/// Internal resolved form of [`StrategyGetInput`] after XOR validation.
-enum StrategyGetLookup {
-    ById(String),
-    ByName(String),
-}
-
-/// `strategy_list` input — single optional boolean. Declared inline because
-/// it is not shared with `executor-core` (no schema golden needed — the
-/// empty-args shape is invariant enough).
-#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct StrategyListInput {
-    #[serde(default)]
-    pub include_deleted: Option<bool>,
-}
-
 // ─────────── v1.2 Trigger Core inline input types ───────────
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerIdInput {
     pub trigger_id: String,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TriggerListInput {
-    #[serde(default)]
-    pub kind: Option<TriggerKind>,
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    #[serde(default)]
-    pub strategy_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct TriggerEventsInput {
-    pub trigger_id: String,
-    #[serde(default)]
-    pub limit: Option<u64>,
 }
 
 // ─────────── v1.1 read tools (no policy, no journal — pure observation) ────
@@ -254,77 +223,14 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         json_result(&resp)
     }
 
-    #[tool(
-        name = "strategy_list",
-        description = "List registered strategies. Excludes the `source` field per-item to keep responses small. Pass `include_deleted: true` to also return soft-deleted rows."
-    )]
-    async fn strategy_list(
-        &self,
-        Parameters(input): Parameters<StrategyListInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let include_deleted = input.include_deleted.unwrap_or(false);
-        let state = self.state.clone();
-        let summaries = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.list_strategies(include_deleted)
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-
-        let resp = StrategyListResponse {
-            strategies: summaries.into_iter().map(summary_to_item).collect(),
-        };
-        json_result(&resp)
-    }
-
-    #[tool(
-        name = "strategy_get",
-        description = "Get a strategy by id or by name. Pass exactly one of `strategy_id` or `name`. Id lookup includes soft-deleted rows (deleted_at populated); name lookup returns active rows only."
-    )]
-    async fn strategy_get(
-        &self,
-        Parameters(input): Parameters<StrategyGetInput>,
-    ) -> Result<CallToolResult, McpError> {
-        // XOR validation — exactly one of `strategy_id` / `name` (modeled as
-        // a flat struct because Anthropic's MCP input_schema rejects top-level
-        // `anyOf`/`oneOf`).
-        let lookup = match (input.strategy_id, input.name) {
-            (Some(_), Some(_)) => {
-                return Err(invalid_params(
-                    "pass exactly one of `strategy_id` or `name`, not both",
-                ));
-            }
-            (None, None) => {
-                return Err(invalid_params(
-                    "pass exactly one of `strategy_id` or `name`",
-                ));
-            }
-            (Some(id), None) => StrategyGetLookup::ById(id),
-            (None, Some(name)) => StrategyGetLookup::ByName(name),
-        };
-
-        let state = self.state.clone();
-        let row = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            match lookup {
-                StrategyGetLookup::ById(strategy_id) => store.get_strategy_by_id(&strategy_id),
-                StrategyGetLookup::ByName(name) => store.get_strategy_by_name(&name),
-            }
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-
-        match row {
-            None => Err(map_state_error(StateError::NotFound("strategy".into()))),
-            Some(s) => json_result(&strategy_to_get_response(s)),
-        }
-    }
+    // v1.4 Track B: `strategy_list` and `strategy_get` moved to resources.
+    //   - `strategy://list?status&tag&summary` — summary-with-hyperlinks
+    //   - `strategy://{id}` — full strategy row
+    //   - `strategy://by-name/{name}` — name-aliased lookup
 
     #[tool(
         name = "strategy_delete",
-        description = "Soft-delete a registered strategy. Idempotent: repeat calls return the same deleted_at."
+        description = "[DESTRUCTIVE] Soft-delete a registered strategy. Idempotent: repeat calls return the same deleted_at."
     )]
     async fn strategy_delete(
         &self,
@@ -349,29 +255,16 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         })
     }
 
-    // ─────────── EXECUTION TOOL (Phase 2 partial — real DB lookup, not_found until Plan 02-03 run insert) ───────────
-
-    #[tool(
-        name = "execution_get",
-        description = "Get a run by id. Returns not_found until a `strategy_run` call has inserted runs."
-    )]
-    async fn execution_get(
-        &self,
-        Parameters(input): Parameters<ExecutionIdInput>,
-    ) -> Result<CallToolResult, McpError> {
-        build_execution_report(self.state.clone(), input.run_id)
-            .await
-            .and_then(|report| json_result(&report))
-    }
+    // v1.4 Track B: `execution_get` moved to the `execution://{run_id}` resource.
 
     // ─────────── STILL-PLACEHOLDER TOOLS (Phase 5 / 6) ───────────
 
     #[tool(
         name = "strategy_run",
-        description = "Execute a registered JavaScript strategy once in a sandbox. \
+        description = "[DESTRUCTIVE] Execute a registered JavaScript strategy once in a sandbox. \
                        Returns the validated `Action[]` or `noop`. Runtime / validation \
                        errors become structured MCP errors with a `run_id` reference \
-                       for journal lookup via `execution_get` and `journal://{run_id}`."
+                       for journal lookup via `execution://{run_id}` and `journal://{run_id}`."
     )]
     async fn strategy_run(
         &self,
@@ -442,7 +335,10 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
             )))
         })?;
         if strategy.deleted_at.is_some() {
-            return Err(strategy_deleted(&strategy.id));
+            return Err(strategy_deleted(
+                &strategy.id,
+                "register a new strategy or list active ones via strategy://list?status=active",
+            ));
         }
 
         // STEP 3: insert run (Queued).
@@ -514,14 +410,22 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 Err(detail) => {
                     record_validation_error(&self.state, &run_id, &detail, &json).await?;
                     transition(&self.state, &run_id, RunStatus::Running, RunStatus::Failed).await?;
-                    return Err(strategy_invalid_output(detail, &run_id));
+                    return Err(strategy_invalid_output(
+                        detail,
+                        &run_id,
+                        "fix the action JSON shape; see docs://strategy-bundle and inspect journal://{run_id}",
+                    ));
                 }
             },
             Err(RuntimeError::InvalidOutput { detail }) => {
                 record_validation_error(&self.state, &run_id, &detail, &serde_json::Value::Null)
                     .await?;
                 transition(&self.state, &run_id, RunStatus::Running, RunStatus::Failed).await?;
-                return Err(strategy_invalid_output(detail, &run_id));
+                return Err(strategy_invalid_output(
+                    detail,
+                    &run_id,
+                    "return \"noop\" or a valid Action[]; see docs://strategy-bundle",
+                ));
             }
             Err(other) => {
                 let detail = other.to_string();
@@ -828,6 +732,12 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
 
         record_action(&self.state, &run_id, &outcome).await?;
 
+        // v1.4 Track A3: records-capture hook. Best-effort — never propagates
+        // an error back into the run pipeline. See `capture_records_for_run`.
+        if let Err(e) = capture_records_for_run(&self.state, &run_id, &outcome).await {
+            tracing::warn!(?e, run_id = %run_id, "records-capture sweep failed (non-fatal)");
+        }
+
         // STEP 8: Running → Succeeded.
         transition(
             &self.state,
@@ -840,33 +750,7 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         Ok((run_id, outcome))
     }
 
-    #[tool(
-        name = "policy_get",
-        description = "Get the current loaded policy. Returns `{loaded: false, reason: ...}` when no policy is configured (D-15 fail-closed)."
-    )]
-    async fn policy_get(&self) -> Result<CallToolResult, McpError> {
-        let guard = self.policy.read().await;
-        let body = match &*guard {
-            Some(loaded) => {
-                let policy_json = serde_json::to_value(loaded).map_err(|e| {
-                    // MR-03: never silently fall back to {} on serde failure.
-                    tracing::warn!(detail = %e, "policy_get: failed to serialize LoadedPolicy");
-                    storage_error(format!("policy_get serialize: {e}"))
-                })?;
-                serde_json::json!({
-                    "loaded": true,
-                    "policy": policy_json,
-                })
-            }
-            None => serde_json::json!({
-                "loaded": false,
-                "reason": "policy not loaded (set [policy].path in config or fix policy.toml; see tracing logs)",
-            }),
-        };
-        let body_str = serde_json::to_string(&body)
-            .map_err(|e| storage_error(format!("policy_get encode: {e}")))?;
-        Ok(CallToolResult::success(vec![Content::text(body_str)]))
-    }
+    // v1.4 Track B: `policy_get` moved to the `policy://current` resource.
 
     // ─────────── TRIGGER TOOLS (v1.2 spike) ───────────
 
@@ -916,61 +800,13 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         json_result(&body)
     }
 
-    #[tool(
-        name = "trigger_list",
-        description = "List registered triggers. Optional filters: `kind`, `enabled`, `strategy_id`."
-    )]
-    async fn trigger_list(
-        &self,
-        Parameters(input): Parameters<TriggerListInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let filter = TriggerListFilter {
-            kind: input.kind,
-            enabled: input.enabled,
-            strategy_id: input.strategy_id,
-        };
-        let state = self.state.clone();
-        let summaries = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.list_triggers(Some(&filter))
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-
-        json_result(&serde_json::json!({ "triggers": summaries }))
-    }
-
-    #[tool(
-        name = "trigger_get",
-        description = "Get a trigger by id. Returns the full Trigger row including `config_json` and `predicate`."
-    )]
-    async fn trigger_get(
-        &self,
-        Parameters(input): Parameters<TriggerIdInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let id = input.trigger_id.clone();
-        let state = self.state.clone();
-        let row = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.get_trigger(&id)
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-
-        match row {
-            None => Err(map_state_error(StateError::NotFound(format!(
-                "trigger {}",
-                input.trigger_id
-            )))),
-            Some(t) => json_result(&t),
-        }
-    }
+    // v1.4 Track B: `trigger_list` and `trigger_get` moved to resources.
+    //   - `trigger://list?strategy_id&kind&enabled` — filtered listing
+    //   - `trigger://{trigger_id}` — full trigger row
 
     #[tool(
         name = "trigger_delete",
-        description = "Hard-delete a trigger and its event history. Idempotent (returns `deleted: false` if the trigger was already absent)."
+        description = "[DESTRUCTIVE] Hard-delete a trigger and its event history. Idempotent (returns `deleted: false` if the trigger was already absent)."
     )]
     async fn trigger_delete(
         &self,
@@ -1010,29 +846,8 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         json_result(&serde_json::json!({ "enabled": enabled }))
     }
 
-    #[tool(
-        name = "trigger_events",
-        description = "List recorded events for a trigger, most recent first. `limit` defaults to 50 and is capped at 500."
-    )]
-    async fn trigger_events(
-        &self,
-        Parameters(input): Parameters<TriggerEventsInput>,
-    ) -> Result<CallToolResult, McpError> {
-        let limit = input.limit.unwrap_or(50).min(500);
-        if limit == 0 {
-            return Err(invalid_params("limit must be > 0"));
-        }
-        let id = input.trigger_id.clone();
-        let state = self.state.clone();
-        let events = tokio::task::spawn_blocking(move || {
-            let store = state.blocking_lock();
-            store.list_trigger_events(&id, limit)
-        })
-        .await
-        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-        .map_err(map_state_error)?;
-        json_result(&serde_json::json!({ "events": events }))
-    }
+    // v1.4 Track B: `trigger_events` moved to the
+    // `trigger-events://{trigger_id}` resource.
 
     // ─────────── EVM READ TOOLS (no policy, no journal) ───────────
 
@@ -1106,7 +921,9 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![Content::text(body)]))
 }
 
-fn summary_to_item(s: StrategySummary) -> StrategyListItem {
+/// v1.4 Track B — exposed for `strategy://list` resource handler.
+#[allow(dead_code)]
+pub(crate) fn summary_to_item(s: StrategySummary) -> StrategyListItem {
     StrategyListItem {
         strategy_id: s.id,
         name: s.name,
@@ -1117,7 +934,8 @@ fn summary_to_item(s: StrategySummary) -> StrategyListItem {
     }
 }
 
-fn strategy_to_get_response(s: Strategy) -> StrategyGetResponse {
+/// v1.4 Track B — exposed for `strategy://by-name/{name}` resource handler.
+pub(crate) fn strategy_to_get_response(s: Strategy) -> StrategyGetResponse {
     StrategyGetResponse {
         strategy_id: s.id,
         name: s.name,
@@ -1319,6 +1137,7 @@ pub async fn fail_signer_config_resolution(
         "signer_not_configured",
         detail,
         run_id,
+        "set [signer].private_key_env in config and restart the daemon",
     ))
 }
 
@@ -1360,6 +1179,7 @@ pub async fn execute_approved_actions(
                 "signer_not_configured",
                 "set [signer].private_key_env",
                 run_id,
+                "set [signer].private_key_env in config and restart the daemon",
             ));
         }
     };
@@ -1372,7 +1192,12 @@ pub async fn execute_approved_actions(
                 .await?;
             record_runtime_error(state, run_id, kind).await?;
             transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-            return Err(strategy_runtime_error(kind, kind, run_id));
+            return Err(strategy_runtime_error(
+                kind,
+                kind,
+                run_id,
+                "verify the signer configuration in .local/config.toml and the private key env var",
+            ));
         }
     };
     let signer_address = signer.signer_address_string();
@@ -1437,7 +1262,12 @@ pub async fn execute_approved_actions(
                         .await?;
                         record_runtime_error(state, run_id, &detail).await?;
                         transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-                        return Err(strategy_runtime_error(kind, detail, run_id));
+                        return Err(strategy_runtime_error(
+                            kind,
+                            detail,
+                            run_id,
+                            "run `executor-mcp deploy-delegate --rpc-url <url>` once to deploy BatchExec, then retry",
+                        ));
                     }
                     Err(_e) => {
                         // Transient RPC error — fall through and let the
@@ -1460,7 +1290,12 @@ pub async fn execute_approved_actions(
                     .await?;
                     record_runtime_error(state, run_id, kind).await?;
                     transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-                    return Err(strategy_runtime_error(kind, kind, run_id));
+                    return Err(strategy_runtime_error(
+                        kind,
+                        kind,
+                        run_id,
+                        "check rpc connectivity / signer funds; inspect journal://{run_id}",
+                    ));
                 }
             };
             let tx_hash = pending.tx_hash.to_string();
@@ -1486,7 +1321,12 @@ pub async fn execute_approved_actions(
                     .await?;
                     record_runtime_error(state, run_id, kind).await?;
                     transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-                    return Err(strategy_runtime_error(kind, kind, run_id));
+                    return Err(strategy_runtime_error(
+                        kind,
+                        kind,
+                        run_id,
+                        "check the broadcast tx via evm_receipt; inspect journal://{run_id}",
+                    ));
                 }
             };
             for (idx, na) in normalized.iter().enumerate() {
@@ -1514,7 +1354,12 @@ pub async fn execute_approved_actions(
                 .await?;
                 record_runtime_error(state, run_id, "receipt_failed").await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-                return Err(strategy_runtime_error("receipt_failed", "reverted", run_id));
+                return Err(strategy_runtime_error(
+                    "receipt_failed",
+                    "reverted",
+                    run_id,
+                    "the batch reverted on-chain; inspect journal://{run_id} and the tx via evm_receipt",
+                ));
             }
             return Ok(());
         }
@@ -1540,7 +1385,12 @@ pub async fn execute_approved_actions(
                 .await?;
                 record_runtime_error(state, run_id, kind).await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-                return Err(strategy_runtime_error(kind, kind, run_id));
+                return Err(strategy_runtime_error(
+                    kind,
+                    kind,
+                    run_id,
+                    "check rpc connectivity / signer funds; inspect journal://{run_id}",
+                ));
             }
         };
         record_execution_broadcast(
@@ -1566,7 +1416,12 @@ pub async fn execute_approved_actions(
                 .await?;
                 record_runtime_error(state, run_id, kind).await?;
                 transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-                return Err(strategy_runtime_error(kind, kind, run_id));
+                return Err(strategy_runtime_error(
+                    kind,
+                    kind,
+                    run_id,
+                    "check the broadcast tx via evm_receipt; inspect journal://{run_id}",
+                ));
             }
         };
         record_execution_receipt_success(
@@ -1589,7 +1444,12 @@ pub async fn execute_approved_actions(
             .await?;
             record_runtime_error(state, run_id, "receipt_failed").await?;
             transition(state, run_id, RunStatus::Running, RunStatus::Failed).await?;
-            return Err(strategy_runtime_error("receipt_failed", "reverted", run_id));
+            return Err(strategy_runtime_error(
+                "receipt_failed",
+                "reverted",
+                run_id,
+                "the tx reverted on-chain; inspect journal://{run_id} and the tx via evm_receipt",
+            ));
         }
     }
     Ok(())
@@ -1683,6 +1543,152 @@ async fn record_execution_error(
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
     Ok(())
+}
+
+/// v1.4 Track A3: records-capture sweep after action confirm.
+///
+/// Reads the strategy's `records_json`, evaluates each spec's `on` clause
+/// against every confirmed action in `outcome`, and inserts a
+/// `strategy_records_capture` row per match. Capture *must* be non-fatal —
+/// any DB / parse / eval failure is logged and swallowed so the surrounding
+/// run pipeline never breaks because observability tripped.
+async fn capture_records_for_run(
+    state: &Arc<Mutex<StateStore>>,
+    run_id: &str,
+    outcome: &StrategyOutcome,
+) -> Result<(), McpError> {
+    let actions: &[Action] = match outcome {
+        StrategyOutcome::Noop => return Ok(()),
+        StrategyOutcome::Actions { actions, .. } => actions,
+    };
+    if actions.is_empty() {
+        return Ok(());
+    }
+
+    // 1. Look up strategy_id + records_json + execution rows in one blocking
+    //    pass so we hold the state-store mutex for the minimum time.
+    let state_for_blocking = state.clone();
+    let rid_for_blocking = run_id.to_string();
+    let lookup = tokio::task::spawn_blocking(
+        move || -> Result<Option<CaptureLookup>, StateError> {
+            let store = state_for_blocking.blocking_lock();
+            let run = match store.get_run(&rid_for_blocking)? {
+                Some(r) => r,
+                None => return Ok(None),
+            };
+            let strategy = match store.get_strategy_by_id(&run.strategy_id)? {
+                Some(s) => s,
+                None => return Ok(None),
+            };
+            let execs = store.list_executions_for_run(&rid_for_blocking)?;
+            Ok(Some(CaptureLookup {
+                strategy_id: strategy.id,
+                records_json: strategy.records_json,
+                started_at: run.started_at,
+                execs,
+            }))
+        },
+    )
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?;
+    let lookup = match lookup {
+        Ok(Some(v)) => v,
+        Ok(None) => return Ok(()), // run / strategy vanished mid-flight; nothing to do.
+        Err(e) => {
+            tracing::warn!(?e, "capture: lookup failed");
+            return Ok(());
+        }
+    };
+
+    let records_json = match lookup.records_json.as_deref() {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return Ok(()), // legacy strategy, no bundle — skip cleanly.
+    };
+    let specs: Vec<executor_core::schema::strategy::RecordSpec> =
+        match serde_json::from_str(records_json) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(strategy_id = %lookup.strategy_id, ?e, "capture: records_json parse failed");
+                return Ok(());
+            }
+        };
+    if specs.is_empty() {
+        return Ok(());
+    }
+
+    // 2. Evaluate every spec against every action.
+    use crate::records::{ActionContext, evaluate_spec};
+    let mut to_insert: Vec<(String, String)> = Vec::new();
+    for (idx, action) in actions.iter().enumerate() {
+        let exec = lookup
+            .execs
+            .iter()
+            .find(|e| e.action_index as usize == idx);
+        let ctx = ActionContext {
+            action,
+            tx_hash: exec.and_then(|e| e.tx_hash.clone()),
+            block: None,
+            ts: exec
+                .map(|e| e.recorded_at.clone())
+                .or_else(|| Some(lookup.started_at.clone())),
+            gas_used: exec.and_then(|e| e.gas_used.clone()),
+            burner: exec.and_then(|e| e.signer_address.clone()),
+            logs: None,
+        };
+        for spec in &specs {
+            let Some(out) = evaluate_spec(spec, &ctx) else {
+                continue;
+            };
+            for w in &out.warnings {
+                tracing::warn!(
+                    strategy_id = %lookup.strategy_id,
+                    record = %spec.name,
+                    field = %w.field,
+                    kind = ?w.kind,
+                    detail = %w.detail,
+                    "records-capture: warning"
+                );
+            }
+            if !out.fields.is_empty() {
+                match serde_json::to_string(&serde_json::Value::Object(out.fields)) {
+                    Ok(payload) => to_insert.push((spec.name.clone(), payload)),
+                    Err(e) => {
+                        tracing::warn!(?e, record = %spec.name, "records-capture: payload serialize failed");
+                    }
+                }
+            }
+        }
+    }
+
+    if to_insert.is_empty() {
+        return Ok(());
+    }
+
+    // 3. INSERT all matched rows in one blocking pass.
+    let state_for_blocking = state.clone();
+    let rid_for_blocking = run_id.to_string();
+    let sid_for_blocking = lookup.strategy_id.clone();
+    if let Err(e) = tokio::task::spawn_blocking(move || -> Result<(), StateError> {
+        let mut store = state_for_blocking.blocking_lock();
+        for (name, payload) in &to_insert {
+            store.record_strategy_capture(&rid_for_blocking, &sid_for_blocking, name, payload)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    {
+        tracing::warn!(?e, "records-capture: INSERT failed");
+    }
+
+    Ok(())
+}
+
+struct CaptureLookup {
+    strategy_id: String,
+    records_json: Option<String>,
+    started_at: String,
+    execs: Vec<ExecutionActionEntry>,
 }
 
 async fn record_action(

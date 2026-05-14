@@ -169,19 +169,15 @@ async fn execution_list_with_runs_returns_summaries() -> Result<()> {
     let _ = initialize(&mut proc).await?;
 
     // 1. strategy_id=<alpha> + limit=2 → newest two alpha runs.
-    // First we need the alpha strategy id. Re-derive deterministically: the
-    // id is content-addressed (sha256 of source) so we can compute it the
-    // same way the registrar does. Easier path: read `strategy://list`?
-    // strategy_list tool returns the catalogue:
-    use common::call_tool;
-    let r = call_tool(&mut proc, 2, "strategy_list", json!({})).await?;
-    let text = r["result"]["content"][0]["text"].as_str().expect("text");
-    let body: Value = serde_json::from_str(text).expect("strategy_list json");
+    // First we need the alpha strategy id. v1.4 Track B: strategy_list tool
+    // dropped; resolve via the `strategy://list` resource.
+    let r = common::read_resource(&mut proc, 2, "strategy://list").await?;
+    let body = common::extract_resource_json(&r);
     let strategies = body["strategies"].as_array().expect("strategies array");
     let sid_a = strategies
         .iter()
         .find(|s| s["name"] == "alpha")
-        .expect("alpha strategy seeded")["strategy_id"]
+        .expect("alpha strategy seeded")["id"]
         .as_str()
         .expect("alpha id")
         .to_string();

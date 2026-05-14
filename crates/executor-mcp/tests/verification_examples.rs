@@ -11,7 +11,7 @@ mod anvil_examples {
     use anyhow::Result;
     use serde_json::{Value, json};
 
-    use crate::common::{call_tool, extract_json_result, initialize};
+    use crate::common::{self, call_tool, extract_json_result, initialize};
 
     const ERC20_EXAMPLE: &str = include_str!("../../../examples/strategies/erc20-approve.js");
     const COUNTER_EXAMPLE: &str = include_str!("../../../examples/strategies/generic-counter-call.js");
@@ -177,15 +177,9 @@ receipt_timeout_ms = 120000
         );
         assert_eq!(run_response["status"].as_str(), Some("succeeded"));
         let run_id = run_response["run_id"].as_str().expect("run_id");
-        let report = extract_json_result(
-            &call_tool(
-                &mut proc,
-                3,
-                "execution_get",
-                json!({ "run_id": run_id }),
-            )
-            .await?,
-        );
+        // v1.4 Track B: execution_get tool dropped; read via the resource.
+        let report_resp = common::read_resource(&mut proc, 3, &format!("execution://{run_id}")).await?;
+        let report = common::extract_resource_json(&report_resp);
         proc.child.kill().await?;
         Ok(report)
     }

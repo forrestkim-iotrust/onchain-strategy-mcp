@@ -137,6 +137,29 @@ use `await` inside a strategy.
   `ctx.evm.erc20Balance` / `ctx.evm.readContract` / `ctx.evm.code`), so
   one-shot balance / code / contract-read lookups go through it
 
+## Destructive ops (P5 — explicit consent)
+
+Three tools mutate real state and are flagged with a literal `[DESTRUCTIVE]`
+prefix at the start of their `description` field (visible via `tools/list`):
+
+- `strategy_run` — signs and broadcasts real onchain transactions
+- `strategy_delete` — soft-deletes a strategy row (recoverable but stops firing)
+- `trigger_delete` — hard-deletes a trigger and its event history
+
+Clients SHOULD parse the description and require explicit user consent before
+invoking any tool tagged this way. The marker is a stable string contract:
+match `^\[DESTRUCTIVE\]` against `tool.description`. (rmcp 1.5 does not expose
+arbitrary JSON-Schema extensions through `#[tool(...)]`, so the description
+prefix is the portable carrier — see `tools.rs` "Destructive ops" doc note.)
+
+## Safe rehearsal
+
+`strategy_register` accepts `dry_run: true` (default false). When set, the
+server validates input and computes the would-be content-addressed id
+(`sha256(source + records + view)`) WITHOUT inserting a row. The response
+shape is `{ dry_run: true, would_be_strategy_id, name, has_bundle }`. Use it
+to preview the id (and surface bundle/non-bundle status) before committing.
+
 ## Resources
 
 - `strategy://{id}`, `execution://{run_id}`, `journal://{run_id}` — real JSON
@@ -507,8 +530,9 @@ impl ServerHandler for ExecutorServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         // Phase 2: pass the Arc<Mutex<StateStore>> so `strategy://{id}` reads
-        // the real row.
-        resources::read_resource_impl(request, ctx, self.state.clone()).await
+        // the real row. v1.4 Track B: also pass the policy snapshot for
+        // `policy://current`.
+        resources::read_resource_impl(request, ctx, self.state.clone(), self.policy.clone()).await
     }
 }
 

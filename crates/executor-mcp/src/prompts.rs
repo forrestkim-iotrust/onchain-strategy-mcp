@@ -437,8 +437,8 @@ impl ExecutorServer {
         let body = format!(
             "Review strategy `{id}` registered on this runtime.\n\n\
              Steps:\n\
-             1. Read the source via `strategy_get` or `strategy://{id}`.\n\
-             2. Read the active policy via `policy_get` and confirm every contract/selector the strategy touches is allowed.\n\
+             1. Read the source via `strategy://{id}`.\n\
+             2. Read the active policy via `policy://current` and confirm every contract/selector the strategy touches is allowed.\n\
              3. Re-read each `ctx.evm.*` call: is `blockTag` correct? Is `simulation_from` set when the read is state-dependent?\n\
              4. For each returned action: check that decimals / units match the token, that `value` is in wei, that multi-step ordering is safe (approve before use).\n\
              5. Re-check error envelopes via the last few `execution://{{run_id}}` reports for any prior runs.\n\n\
@@ -487,12 +487,12 @@ impl ExecutorServer {
 2. **Attach a trigger.** Call `trigger_register({ strategy_id: <id>, kind: "interval", config: { interval_ms: 3_600_000 } })` for an hourly snapshot, OR skip and run manually.
 3. **Wait for first fire** (or call `strategy_run({ strategy_id })` to fire now).
 4. **Check the execution.** Read `execution://{run_id}` for the report and `journal://{run_id}` for the per-action decision trace.
-5. **Tune.** Inspect `strategy_list` / `trigger_list` and decide whether to add a real funnel strategy. See `examples://strategies` for source patterns."#
+5. **Tune.** Inspect `strategy://list` / `trigger://list` and decide whether to add a real funnel strategy. See `examples://strategies` for source patterns."#
         } else {
             r#"## First-action playbook (something is already registered)
 
 1. **Pick a strategy** from the table above and read its source via `strategy://{id}`.
-2. **Inspect triggers.** Call `trigger_list` and confirm the strategy fires on the cadence you expect.
+2. **Inspect triggers.** Read `trigger://list` and confirm the strategy fires on the cadence you expect.
 3. **Check recent fires.** Read the latest `execution://{run_id}` and `journal://{run_id}` to see what each fire decided.
 4. **Adjust or extend.** Either author a new strategy from the user's intent (`author_strategy` prompt) or refine an existing one (`safety_review` prompt before re-registering).
 5. **Tune thresholds** with evidence — use the records of the last N runs (Track A+E2 once shipped)."#
@@ -500,8 +500,8 @@ impl ExecutorServer {
 
         let body = format!(
             "You are connected to the Onchain Strategy MCP runtime. This is a **prefetched orientation** — the live state below is read from the server at the moment of this prompt.\n\n\
-             ## Registered strategies (`strategy_list`)\n\n{strategies}\n\n\
-             ## Active policy (`policy_get`)\n\n{policy}\n\n\
+             ## Registered strategies (`strategy://list`)\n\n{strategies}\n\n\
+             ## Active policy (`policy://current`)\n\n{policy}\n\n\
              {playbook}\n\n\
              ## Where to look next\n\n\
              - Source patterns: `examples://strategies` (list) + `examples://strategies/{{name}}` (each source).\n\

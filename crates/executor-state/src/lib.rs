@@ -12,6 +12,7 @@
 pub mod error;
 pub mod executions;
 pub mod journal;
+pub mod records_capture;
 pub mod runs;
 pub mod schema;
 pub mod store;
@@ -23,6 +24,7 @@ pub use executions::ExecutionActionEntry;
 pub use journal::{
     ActionEntry, DecisionEntry, DecisionGate, DecisionVerdict, LogEntry, SourceReadEntry,
 };
+pub use records_capture::RecordCaptureEntry;
 pub use runs::{
     LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, Run, RunListFilter, RunRepo, RunSummary,
 };

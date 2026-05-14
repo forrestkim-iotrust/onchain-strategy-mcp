@@ -146,6 +146,37 @@ pub async fn call_tool(
     recv(proc).await
 }
 
+/// v1.4 Track B helper: ergonomic resources/read round-trip. Sends the
+/// `resources/read` JSON-RPC request, recv's the response. Returns the
+/// raw response Value (caller asserts on `result.contents[0].text` or
+/// `error.*`).
+pub async fn read_resource(
+    proc: &mut ServerProc,
+    id: u64,
+    uri: &str,
+) -> Result<Value> {
+    send(
+        proc,
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "resources/read",
+            "params": { "uri": uri }
+        }),
+    )
+    .await?;
+    recv(proc).await
+}
+
+/// v1.4 Track B helper: parse the text content of a successful
+/// resources/read response as JSON. Panics with a descriptive message on
+/// shape mismatch.
+pub fn extract_resource_json(r: &Value) -> Value {
+    let text = r["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("resources/read result missing contents[0].text: {r}"));
+    serde_json::from_str(text)
+        .unwrap_or_else(|e| panic!("resource text is not JSON: {e} — text={text}"))
+}
+
 /// Parse the text content of a successful tools/call response as JSON.
 /// Panics with a descriptive message on shape mismatch so tests fail loudly.
 pub fn extract_json_result(r: &Value) -> Value {

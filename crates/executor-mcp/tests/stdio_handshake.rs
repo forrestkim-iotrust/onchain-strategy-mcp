@@ -59,25 +59,40 @@ async fn tools_list_emits_full_surface() -> Result<()> {
         .iter()
         .map(|t| t["name"].as_str().unwrap_or_default())
         .collect();
+    // v1.4 Track B: tool surface shrunk from 15 → 8. Read paths moved to
+    // resources (strategy://list, strategy://by-name/{name}, trigger://list,
+    // policy://current, plus the existing execution://list, strategy://{id},
+    // trigger://{id}, trigger-events://{id}).
     for expected in [
         "strategy_register",
-        "strategy_list",
-        "strategy_get",
         "strategy_delete",
         "strategy_run",
-        "execution_get",
-        "policy_get",
-        // v1.2 Trigger Core (Stream C): 6 trigger tools.
+        // v1.2 Trigger Core (Stream C): 3 mutation trigger tools remain.
         "trigger_register",
-        "trigger_list",
-        "trigger_get",
         "trigger_delete",
         "trigger_set_enabled",
-        "trigger_events",
+        // EVM read primitives.
+        "evm_receipt",
+        "evm_view",
     ] {
         assert!(
             names.contains(&expected),
             "missing tool: {expected} — got: {names:?}"
+        );
+    }
+    // v1.4 Track B: every former read tool is dropped.
+    for dropped in [
+        "strategy_list",
+        "strategy_get",
+        "trigger_list",
+        "trigger_get",
+        "trigger_events",
+        "execution_get",
+        "policy_get",
+    ] {
+        assert!(
+            !names.contains(&dropped),
+            "v1.4 Track B should have dropped {dropped} from the tool surface; got: {names:?}"
         );
     }
     assert!(
@@ -86,8 +101,8 @@ async fn tools_list_emits_full_surface() -> Result<()> {
     );
     assert_eq!(
         tools.len(),
-        15,
-        "expected exactly 15 tools (7 base + 2 evm read/view + 6 trigger), got {}",
+        8,
+        "v1.4 Track B: expected exactly 8 tools (3 strategy mutations + 3 trigger mutations + 2 evm read/view), got {}",
         tools.len()
     );
     for t in tools {
@@ -140,32 +155,34 @@ async fn dropped_policy_update_returns_unknown_tool() -> Result<()> {
     Ok(())
 }
 
-// VALIDATION.md 1-02-03 — narrowed in Plan 02-02 + updated in Plan 05-03:
-// `policy_get` now returns the live policy via `Arc<RwLock<Option<LoadedPolicy>>>`.
-// In the bare `spawn_server_with_state(":memory:")` setup there is no
-// `[policy].path` configured, so the response is the fail-closed placeholder
-// `{loaded: false, reason: ...}` (D-15).
+// VALIDATION.md 1-02-03 — narrowed in Plan 02-02 + updated in Plan 05-03 +
+// v1.4 Track B: `policy_get` moved to the `policy://current` resource. In the
+// bare `spawn_server_with_state(":memory:")` setup there is no `[policy].path`
+// configured, so the response is the fail-closed placeholder
+// `{loaded: false, reason: ..., confidence: "missing", remediation: ...}` (D-15
+// + v1.4 honesty contract).
 #[tokio::test]
-async fn policy_get_returns_loaded_false_when_policy_not_configured() -> Result<()> {
+async fn policy_current_resource_returns_loaded_false_when_policy_not_configured() -> Result<()> {
     let mut proc = common::spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
     send(
         &mut proc,
         json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": { "name": "policy_get", "arguments": {} }
+            "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+            "params": { "uri": "policy://current" }
         }),
     )
     .await?;
     let r = recv(&mut proc).await?;
-    let content = r["result"]["content"][0]["text"]
-        .as_str()
-        .expect("content text");
-    let body: Value = serde_json::from_str(content)?;
+    let contents = r["result"]["contents"]
+        .as_array()
+        .expect("policy://current contents");
+    let text = contents[0]["text"].as_str().expect("text");
+    let body: Value = serde_json::from_str(text)?;
     assert_eq!(
         body["loaded"], false,
-        "policy_get without [policy].path must return loaded: false (D-15 fail-closed)"
+        "policy://current without [policy].path must return loaded: false (D-15 fail-closed)"
     );
     assert!(
         body["reason"]
@@ -173,6 +190,17 @@ async fn policy_get_returns_loaded_false_when_policy_not_configured() -> Result<
             .is_some_and(|s| s.contains("policy not loaded")),
         "reason missing fail-closed marker: {}",
         body["reason"]
+    );
+    // v1.4 honesty contract — when data is missing, mark confidence accordingly.
+    assert_eq!(
+        body["confidence"], "missing",
+        "policy://current without [policy].path must declare confidence=missing"
+    );
+    assert!(
+        body["remediation"]
+            .as_str()
+            .is_some_and(|s| s.contains("policy.toml")),
+        "remediation should reference .local/policy.toml: {body}"
     );
 
     proc.child.kill().await?;
@@ -218,6 +246,18 @@ async fn resources_surface_matches_contract() -> Result<()> {
         template_uris.contains(&"strategy://{strategy_id}"),
         "missing strategy template; got {template_uris:?}"
     );
+    // v1.4 Track B: new read-fabric templates.
+    for required in [
+        "strategy://list",
+        "strategy://by-name/{name}",
+        "trigger://list",
+        "policy://current",
+    ] {
+        assert!(
+            template_uris.contains(&required),
+            "v1.4 Track B missing template {required}; got {template_uris:?}"
+        );
+    }
     assert!(
         template_uris.contains(&"execution://{run_id}"),
         "missing execution template; got {template_uris:?}"
@@ -356,8 +396,8 @@ async fn prompts_surface_matches_contract() -> Result<()> {
     );
     let text = messages[0]["content"]["text"].as_str().unwrap_or_default();
     assert!(
-        text.contains("s-1") && text.contains("policy_get"),
-        "review body did not reference id + policy_get: {text}"
+        text.contains("s-1") && text.contains("policy://current"),
+        "review body did not reference id + policy://current: {text}"
     );
 
     // prompts/get getting_started → v1.4 Track E1 prefetched orientation:
@@ -385,8 +425,8 @@ async fn prompts_surface_matches_contract() -> Result<()> {
         text.len()
     );
     assert!(
-        text.contains("Registered strategies") && text.contains("strategy_list"),
-        "getting_started missing prefetched strategy_list header: {text}"
+        text.contains("Registered strategies") && text.contains("strategy://list"),
+        "getting_started missing prefetched strategy://list header: {text}"
     );
     assert!(
         text.contains("First-action playbook"),
@@ -733,7 +773,7 @@ async fn strategy_register_rejects_empty_name() -> Result<()> {
 }
 
 #[tokio::test]
-async fn strategy_list_excludes_source_payload() -> Result<()> {
+async fn strategy_list_resource_excludes_source_payload() -> Result<()> {
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -748,8 +788,18 @@ async fn strategy_list_excludes_source_payload() -> Result<()> {
         assert!(r["error"].is_null(), "register {i} failed: {r}");
     }
 
-    let r = call_tool(&mut proc, 10, "strategy_list", json!({})).await?;
-    let body = extract_json_result(&r);
+    // v1.4 Track B: strategy_list tool dropped; read via the resource.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 10, "method": "resources/read",
+            "params": { "uri": "strategy://list" }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let text = r["result"]["contents"][0]["text"].as_str().expect("text");
+    let body: Value = serde_json::from_str(text)?;
     let items = body["strategies"].as_array().expect("strategies array");
     assert_eq!(items.len(), 2);
     for it in items {
@@ -764,7 +814,7 @@ async fn strategy_list_excludes_source_payload() -> Result<()> {
 }
 
 #[tokio::test]
-async fn strategy_list_filters_deleted_by_default() -> Result<()> {
+async fn strategy_list_resource_filters_deleted_by_default() -> Result<()> {
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -800,18 +850,32 @@ async fn strategy_list_filters_deleted_by_default() -> Result<()> {
     .await?;
     assert!(dr["error"].is_null(), "delete failed: {dr}");
 
-    let active = extract_json_result(&call_tool(&mut proc, 5, "strategy_list", json!({})).await?);
+    // v1.4 Track B: status=active is the default → 1 row.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+            "params": { "uri": "strategy://list" }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let text = r["result"]["contents"][0]["text"].as_str().expect("text");
+    let active: Value = serde_json::from_str(text)?;
     assert_eq!(active["strategies"].as_array().unwrap().len(), 1);
 
-    let all = extract_json_result(
-        &call_tool(
-            &mut proc,
-            6,
-            "strategy_list",
-            json!({ "include_deleted": true }),
-        )
-        .await?,
-    );
+    // status=all → 2 rows.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 6, "method": "resources/read",
+            "params": { "uri": "strategy://list?status=all" }
+        }),
+    )
+    .await?;
+    let r = recv(&mut proc).await?;
+    let text = r["result"]["contents"][0]["text"].as_str().expect("text");
+    let all: Value = serde_json::from_str(text)?;
     assert_eq!(all["strategies"].as_array().unwrap().len(), 2);
 
     proc.child.kill().await?;
@@ -819,7 +883,7 @@ async fn strategy_list_filters_deleted_by_default() -> Result<()> {
 }
 
 #[tokio::test]
-async fn strategy_get_by_id_returns_source() -> Result<()> {
+async fn strategy_resource_by_id_returns_source() -> Result<()> {
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -836,8 +900,18 @@ async fn strategy_get_by_id_returns_source() -> Result<()> {
         .unwrap()
         .to_string();
 
-    let g = call_tool(&mut proc, 3, "strategy_get", json!({ "strategy_id": id })).await?;
-    let body = extract_json_result(&g);
+    // v1.4 Track B: strategy_get tool dropped; read via the resource.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 3, "method": "resources/read",
+            "params": { "uri": format!("strategy://{id}") }
+        }),
+    )
+    .await?;
+    let g = recv(&mut proc).await?;
+    let text = g["result"]["contents"][0]["text"].as_str().expect("text");
+    let body: Value = serde_json::from_str(text)?;
     assert_eq!(body["source"], src);
 
     proc.child.kill().await?;
@@ -845,7 +919,7 @@ async fn strategy_get_by_id_returns_source() -> Result<()> {
 }
 
 #[tokio::test]
-async fn strategy_get_by_name_only_returns_active() -> Result<()> {
+async fn strategy_by_name_resource_only_returns_active() -> Result<()> {
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
@@ -869,10 +943,158 @@ async fn strategy_get_by_name_only_returns_active() -> Result<()> {
     )
     .await?;
 
-    let g = call_tool(&mut proc, 4, "strategy_get", json!({ "name": "arb" })).await?;
+    // v1.4 Track B: name lookup via strategy://by-name/{name} returns
+    // resource_not_found (-32002) for the soft-deleted strategy.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 4, "method": "resources/read",
+            "params": { "uri": "strategy://by-name/arb" }
+        }),
+    )
+    .await?;
+    let g = recv(&mut proc).await?;
     let err = &g["error"];
-    assert_eq!(err["code"], -32014);
+    assert_eq!(err["code"], -32002);
     assert_eq!(err["data"]["code"], "not_found");
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+// v1.4 Track B: assert `strategy://list` summary shape carries the inline
+// fields the design contract promises so an agent can answer
+// "what is running?" with one resource call.
+#[tokio::test]
+async fn strategy_list_summary_carries_required_inline_fields() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    // Register one strategy and attach a trigger so trigger_kinds is non-empty.
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "s1", "source": "// s1 source" }),
+    )
+    .await?;
+    let id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let _ = call_tool(
+        &mut proc,
+        3,
+        "trigger_register",
+        json!({
+            "strategy_id": id,
+            "kind": "manual",
+            "config": {},
+        }),
+    )
+    .await?;
+
+    let r = common::read_resource(&mut proc, 4, "strategy://list").await?;
+    let body = common::extract_resource_json(&r);
+    let items = body["strategies"].as_array().expect("strategies array");
+    assert_eq!(items.len(), 1, "expected 1 active strategy: {body}");
+    let item = &items[0];
+
+    // Required inline fields per v1.4-AGENT-UX-DESIGN.md §4.
+    for required in [
+        "id",
+        "name",
+        "description",
+        "tags",
+        "created_at",
+        "trigger_kinds",
+        "last_fire_at",
+        "last_24h",
+        "has_bundle",
+        "view_uri",
+    ] {
+        assert!(
+            item.get(required).is_some(),
+            "summary missing field `{required}`: {item}"
+        );
+    }
+    // trigger_kinds is an array of wire-strings.
+    let kinds = item["trigger_kinds"].as_array().expect("trigger_kinds array");
+    assert_eq!(kinds.len(), 1, "expected one trigger registered");
+    assert_eq!(kinds[0], "manual");
+
+    // last_24h has the four required sub-fields.
+    let last_24h = &item["last_24h"];
+    for sub in ["runs", "succeeded", "failed", "actions"] {
+        assert!(
+            last_24h.get(sub).is_some(),
+            "last_24h missing `{sub}`: {item}"
+        );
+    }
+
+    // view_uri references the strategy id.
+    let view_uri = item["view_uri"].as_str().expect("view_uri string");
+    assert!(view_uri.contains(&id), "view_uri should reference id: {view_uri}");
+
+    // Honesty contract: zero runs in 24h → confidence: partial.
+    assert_eq!(
+        body["confidence"], "partial",
+        "no runs in 24h should produce confidence=partial: {body}"
+    );
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+// v1.4 Track B: trigger://list returns the active trigger summaries with
+// query-string filters.
+#[tokio::test]
+async fn trigger_list_resource_filters() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({ "name": "t1", "source": "// t1" }),
+    )
+    .await?;
+    let id = extract_json_result(&r)["strategy_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let _ = call_tool(
+        &mut proc,
+        3,
+        "trigger_register",
+        json!({
+            "strategy_id": id,
+            "kind": "manual",
+            "config": {},
+        }),
+    )
+    .await?;
+
+    // No filter → 1 row.
+    let r = common::read_resource(&mut proc, 4, "trigger://list").await?;
+    let body = common::extract_resource_json(&r);
+    assert_eq!(body["triggers"].as_array().unwrap().len(), 1);
+
+    // kind=manual → 1 row.
+    let r = common::read_resource(&mut proc, 5, "trigger://list?kind=manual").await?;
+    let body = common::extract_resource_json(&r);
+    assert_eq!(body["triggers"].as_array().unwrap().len(), 1);
+
+    // kind=interval → 0 rows.
+    let r = common::read_resource(&mut proc, 6, "trigger://list?kind=interval").await?;
+    let body = common::extract_resource_json(&r);
+    assert_eq!(body["triggers"].as_array().unwrap().len(), 0);
+
+    // Unknown kind → invalid_params.
+    let r = common::read_resource(&mut proc, 7, "trigger://list?kind=nope").await?;
+    assert_eq!(r["error"]["code"], -32602);
 
     proc.child.kill().await?;
     Ok(())
@@ -917,9 +1139,19 @@ async fn strategy_delete_is_soft_and_idempotent() -> Result<()> {
     );
     assert_eq!(d2["deleted_at"].as_str().unwrap(), deleted_at_1);
 
-    // get_by_id still returns the row, with deleted_at populated.
-    let g = call_tool(&mut proc, 5, "strategy_get", json!({ "strategy_id": id })).await?;
-    let body = extract_json_result(&g);
+    // v1.4 Track B: get_by_id via the strategy://{id} resource still
+    // returns the row, with deleted_at populated.
+    send(
+        &mut proc,
+        json!({
+            "jsonrpc": "2.0", "id": 5, "method": "resources/read",
+            "params": { "uri": format!("strategy://{id}") }
+        }),
+    )
+    .await?;
+    let g = recv(&mut proc).await?;
+    let text = g["result"]["contents"][0]["text"].as_str().expect("text");
+    let body: Value = serde_json::from_str(text)?;
     assert_eq!(body["deleted_at"].as_str().unwrap(), deleted_at_1);
 
     proc.child.kill().await?;
@@ -1009,20 +1241,22 @@ async fn resource_read_strategy_uri_returns_body() -> Result<()> {
 }
 
 #[tokio::test]
-async fn execution_get_returns_not_found_when_empty() -> Result<()> {
+async fn execution_resource_returns_not_found_when_empty() -> Result<()> {
     let mut proc = spawn_server_with_state(":memory:").await?;
     let _ = initialize(&mut proc).await?;
 
-    let r = call_tool(
+    // v1.4 Track B: execution_get tool dropped; read via execution://{run_id}.
+    send(
         &mut proc,
-        2,
-        "execution_get",
-        json!({ "run_id": "01HGXNONEXISTENTRUNIDXXXXX" }),
+        json!({
+            "jsonrpc": "2.0", "id": 2, "method": "resources/read",
+            "params": { "uri": "execution://01HGXNONEXISTENTRUNIDXXXXX" }
+        }),
     )
     .await?;
+    let r = recv(&mut proc).await?;
     let err = &r["error"];
-    assert_eq!(err["code"], -32014);
-    assert_eq!(err["data"]["code"], "not_found");
+    assert_eq!(err["code"], -32002);
 
     proc.child.kill().await?;
     Ok(())
@@ -1054,15 +1288,10 @@ async fn execution_status_surfaces_match() -> Result<()> {
 
     let mut proc = spawn_server_with_state(&db_path_str).await?;
     let _ = initialize(&mut proc).await?;
-    let tool = extract_json_result(
-        &call_tool(
-            &mut proc,
-            2,
-            "execution_get",
-            json!({ "run_id": run_id }),
-        )
-        .await?,
-    );
+    // v1.4 Track B: execution_get tool dropped — only the
+    // `execution://{run_id}` resource remains. The original test asserted
+    // tool/resource equality; we now assert the resource payload matches
+    // the seeded run shape directly.
     send(
         &mut proc,
         json!({
@@ -1078,16 +1307,13 @@ async fn execution_status_surfaces_match() -> Result<()> {
     let resource_text = contents[0]["text"].as_str().expect("resource text");
     let resource: Value = serde_json::from_str(resource_text)?;
 
-    assert_eq!(tool["run_id"], run_id);
-    assert_eq!(tool["strategy_id"], strategy_id);
-    assert_eq!(tool["run_id"], resource["run_id"]);
-    assert_eq!(tool["status"], resource["status"]);
-    assert_eq!(tool["actions"], resource["actions"]);
-    assert_eq!(tool["actions"][0]["action_index"], 1);
-    assert_eq!(tool["actions"][0]["status"], "confirmed");
-    assert_eq!(tool["actions"][0]["receipt_status"], "success");
-    assert_eq!(tool["actions"][0]["gas_used"], "21000");
-    assert_eq!(tool["actions"][0]["tx_hash"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert_eq!(resource["run_id"], run_id);
+    assert_eq!(resource["strategy_id"], strategy_id);
+    assert_eq!(resource["actions"][0]["action_index"], 1);
+    assert_eq!(resource["actions"][0]["status"], "confirmed");
+    assert_eq!(resource["actions"][0]["receipt_status"], "success");
+    assert_eq!(resource["actions"][0]["gas_used"], "21000");
+    assert_eq!(resource["actions"][0]["tx_hash"], "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
     proc.child.kill().await?;
     Ok(())
@@ -1119,14 +1345,9 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
     {
         let mut proc = common::spawn_server_with_state(&db_path_str).await?;
         let _ = initialize(&mut proc).await?;
-        let r = call_tool(
-            &mut proc,
-            2,
-            "execution_get",
-            json!({ "run_id": run_id }),
-        )
-        .await?;
-        let body = extract_json_result(&r);
+        // v1.4 Track B: execution_get tool dropped; read via the resource.
+        let r = common::read_resource(&mut proc, 2, &format!("execution://{run_id}")).await?;
+        let body = common::extract_resource_json(&r);
         assert_eq!(body["run_id"].as_str(), Some(run_id.as_str()));
         assert_eq!(body["strategy_id"].as_str(), Some(strategy_id.as_str()));
         assert_eq!(body["status"].as_str(), Some("queued"));
@@ -1162,14 +1383,8 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
     {
         let mut proc = common::spawn_server_with_state(&db_path_str).await?;
         let _ = initialize(&mut proc).await?;
-        let r = call_tool(
-            &mut proc,
-            2,
-            "execution_get",
-            json!({ "run_id": run_id }),
-        )
-        .await?;
-        let body = extract_json_result(&r);
+        let r = common::read_resource(&mut proc, 2, &format!("execution://{run_id}")).await?;
+        let body = common::extract_resource_json(&r);
         assert_eq!(body["status"].as_str(), Some("running"));
         assert!(
             body.get("finished_at").is_none_or(|v| v.is_null()),
@@ -1190,14 +1405,8 @@ async fn run_roundtrip_insert_get_update_status() -> Result<()> {
     {
         let mut proc = common::spawn_server_with_state(&db_path_str).await?;
         let _ = initialize(&mut proc).await?;
-        let r = call_tool(
-            &mut proc,
-            2,
-            "execution_get",
-            json!({ "run_id": run_id }),
-        )
-        .await?;
-        let body = extract_json_result(&r);
+        let r = common::read_resource(&mut proc, 2, &format!("execution://{run_id}")).await?;
+        let body = common::extract_resource_json(&r);
         assert_eq!(body["status"].as_str(), Some("succeeded"));
         assert!(
             body["finished_at"].as_str().is_some_and(|s| !s.is_empty()),
@@ -1295,8 +1504,9 @@ async fn strategies_persist_across_restart() -> Result<()> {
     {
         let mut proc2 = spawn_server_with_state(&db_path_str).await?;
         let _ = initialize(&mut proc2).await?;
-        let body =
-            extract_json_result(&call_tool(&mut proc2, 2, "strategy_list", json!({})).await?);
+        // v1.4 Track B: read strategy listing via the resource.
+        let r = common::read_resource(&mut proc2, 2, "strategy://list").await?;
+        let body = common::extract_resource_json(&r);
         let items = body["strategies"].as_array().unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "persist");
@@ -3237,4 +3447,161 @@ async fn strategy_run_returns_policy_violation_for_raw_call_denied() -> Result<(
         "raw_call_denied",
     )
     .await
+}
+// ─────────── v1.4 Track G: strategy_register dry_run end-to-end ───────────
+//
+// Track A1 landed the `dry_run: Option<bool>` field + the short-circuit in
+// `strategy_register`; Track G now exercises it over the wire to lock the
+// response shape and the no-side-effects invariant.
+
+use common::{extract_resource_json, read_resource};
+
+#[tokio::test]
+async fn strategy_register_dry_run_returns_would_be_id_and_skips_insert() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    // Use a source no other test in this file uses, so we can confidently
+    // assert "absent from strategy_list" later.
+    let source = "// dry-run-source-track-G-001";
+    let r = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({
+            "name": "dry-run-only",
+            "source": source,
+            "dry_run": true,
+        }),
+    )
+    .await?;
+    assert!(r["error"].is_null(), "dry_run register failed: {r}");
+    let body = extract_json_result(&r);
+    assert_eq!(body["dry_run"], true, "dry_run flag must echo true");
+    let would_be_id = body["would_be_strategy_id"]
+        .as_str()
+        .expect("would_be_strategy_id must be a string");
+    assert_eq!(
+        would_be_id.len(),
+        64,
+        "would_be id is sha256 hex (64 chars); got: {would_be_id}"
+    );
+    assert!(
+        would_be_id.chars().all(|c| c.is_ascii_hexdigit()),
+        "would_be id is lower-case hex; got: {would_be_id}"
+    );
+    assert_eq!(body["name"], "dry-run-only");
+    assert_eq!(
+        body["has_bundle"], false,
+        "no records/view supplied → has_bundle: false"
+    );
+    // Shape contract: created_at / strategy_id / already_exists must NOT leak
+    // from the persisted path; the dry-run envelope is a different shape.
+    assert!(
+        body.get("strategy_id").is_none(),
+        "dry_run response must not include the persisted `strategy_id` field"
+    );
+    assert!(
+        body.get("created_at").is_none(),
+        "dry_run response must not include `created_at`"
+    );
+
+    // Verify NO row was inserted. v1.4 Track B dropped `strategy_list` as a
+    // tool — read the `strategy://list` resource instead.
+    let list_r = read_resource(&mut proc, 3, "strategy://list").await?;
+    let list_body = extract_resource_json(&list_r);
+    let items = list_body["strategies"]
+        .as_array()
+        .expect("strategies array");
+    assert!(
+        items.is_empty(),
+        "dry_run must NOT insert a row; strategy://list returned: {items:?}"
+    );
+
+    proc.child.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn strategy_register_dry_run_bundle_id_differs_from_source_only() -> Result<()> {
+    let mut proc = spawn_server_with_state(":memory:").await?;
+    let _ = initialize(&mut proc).await?;
+
+    let source = "// dry-run-source-track-G-002";
+
+    // First: source-only dry-run.
+    let r1 = call_tool(
+        &mut proc,
+        2,
+        "strategy_register",
+        json!({
+            "name": "source-only",
+            "source": source,
+            "dry_run": true,
+        }),
+    )
+    .await?;
+    assert!(r1["error"].is_null(), "source-only dry_run failed: {r1}");
+    let b1 = extract_json_result(&r1);
+    assert_eq!(b1["has_bundle"], false);
+    let id_source_only = b1["would_be_strategy_id"]
+        .as_str()
+        .expect("source-only would_be id")
+        .to_string();
+
+    // Second: same source + records + view → must hash differently.
+    let r2 = call_tool(
+        &mut proc,
+        3,
+        "strategy_register",
+        json!({
+            "name": "bundled",
+            "source": source,
+            "records": [
+                {
+                    "name": "supply",
+                    "on": { "kind": "contractCall", "selector": "0x617ba037" },
+                    "capture": { "amount": "args[1]" }
+                }
+            ],
+            "view": "(ctx, records) => ({ supplied: records.supply.sum('amount') })",
+            "dry_run": true,
+        }),
+    )
+    .await?;
+    assert!(r2["error"].is_null(), "bundled dry_run failed: {r2}");
+    let b2 = extract_json_result(&r2);
+    assert_eq!(b2["dry_run"], true);
+    assert_eq!(
+        b2["has_bundle"], true,
+        "records+view supplied → has_bundle: true"
+    );
+    let id_bundled = b2["would_be_strategy_id"]
+        .as_str()
+        .expect("bundled would_be id")
+        .to_string();
+    assert_eq!(id_bundled.len(), 64);
+
+    // Different bundle content → different content-addressed id. This is the
+    // key invariant: the v1.4 hash is `sha256(source + records + view)`, NOT
+    // just `sha256(source)`.
+    assert_ne!(
+        id_source_only, id_bundled,
+        "bundle fields must change the would-be id (sha256(source+records+view))"
+    );
+
+    // And: still no DB inserts. v1.4 Track B replaced `strategy_list` tool
+    // with `strategy://list` resource.
+    let list_r = read_resource(&mut proc, 4, "strategy://list").await?;
+    let items = extract_resource_json(&list_r)["strategies"]
+        .as_array()
+        .expect("strategies array")
+        .clone();
+    assert!(
+        items.is_empty(),
+        "two dry_run calls must produce zero persisted rows; got: {items:?}"
+    );
+
+    proc.child.kill().await?;
+    Ok(())
 }

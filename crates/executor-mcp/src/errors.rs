@@ -14,6 +14,13 @@
 //!
 //! Wire code: **-32010** (unimplemented) verified against rmcp 1.5
 //! `model::ErrorCode(pub i32)` tuple struct — cf. RESEARCH.md RESOLVED #4.
+//!
+//! ## v1.4 Track D — `hint` field
+//!
+//! Every constructor accepts a `hint: impl Into<String>` parameter as its
+//! LAST argument. The hint is embedded into the `ErrorData.data` JSON as
+//! `data.hint` and names a concrete next tool call or URI the agent can use
+//! to recover. Empty hints panic in debug builds (`require_hint`).
 
 use executor_evm::{EvmError, SimulationFailReason};
 use executor_policy::DecisionVerdict;
@@ -45,15 +52,49 @@ pub const STRATEGY_RUNTIME_ERROR: ErrorCode = ErrorCode(-32017);
 /// returned a Promise (D-10), or violated Shape B (D-05).
 pub const STRATEGY_INVALID_OUTPUT: ErrorCode = ErrorCode(-32018);
 
+// ─────────── v1.4 Track D ───────────
+
+/// v1.4 Track D — every error MUST carry a non-empty `hint`. Empty hint
+/// panics in debug builds and logs at `warn` in release so the lint failure
+/// is loud during development while still failing-open in production.
+pub(crate) fn require_hint(s: String) -> String {
+    debug_assert!(
+        !s.is_empty(),
+        "v1.4: every error needs a hint — empty hints violate the agent-UX honesty contract"
+    );
+    if s.is_empty() {
+        tracing::warn!(
+            "v1.4 lint: empty hint reached the wire; agent UX contract violated"
+        );
+    }
+    s
+}
+
+/// Common "recoverable next action" hints. Centralized so call sites stay
+/// consistent and a code audit can grep them.
+pub mod hints {
+    pub const STRATEGY_LIST: &str =
+        "list active strategies via strategy://list?status=active";
+    pub const STRATEGY_LIST_DELETED: &str =
+        "list including deleted via strategy://list?status=all";
+    pub const TRIGGER_LIST: &str = "list triggers via trigger://list";
+    pub const POLICY_DOCS: &str =
+        "create .local/policy.toml — see docs://policy-model";
+    pub const STRATEGY_BUNDLE_DOCS: &str = "see docs://strategy-bundle";
+}
+
 /// Build a `STRATEGY_DELETED` (-32011) error. Carries `data.code = "strategy_deleted"`
 /// and `data.strategy_id` so agents can re-register before retrying.
-pub fn strategy_deleted(strategy_id: &str) -> McpError {
+pub fn strategy_deleted(strategy_id: &str, hint: impl Into<String>) -> McpError {
+    let hint = require_hint(hint.into());
     McpError::new(
         STRATEGY_DELETED,
         format!("strategy {strategy_id} is soft-deleted; cannot run"),
         Some(json!({
             "code": "strategy_deleted",
+            "kind": "strategy_deleted",
             "strategy_id": strategy_id,
+            "hint": hint,
         })),
     )
 }
@@ -65,8 +106,10 @@ pub fn strategy_runtime_error(
     kind: &'static str,
     detail: impl Into<String>,
     run_id: &str,
+    hint: impl Into<String>,
 ) -> McpError {
     let detail = detail.into();
+    let hint = require_hint(hint.into());
     McpError::new(
         STRATEGY_RUNTIME_ERROR,
         format!("strategy runtime error ({kind}): {detail}"),
@@ -75,6 +118,7 @@ pub fn strategy_runtime_error(
             "kind": kind,
             "detail": detail,
             "run_id": run_id,
+            "hint": hint,
         })),
     )
 }
@@ -82,15 +126,22 @@ pub fn strategy_runtime_error(
 /// Build a `STRATEGY_INVALID_OUTPUT` (-32018) error. `data.detail` carries
 /// the rejection reason; `data.run_id` references the run row whose journal
 /// captured the validation failure.
-pub fn strategy_invalid_output(detail: impl Into<String>, run_id: &str) -> McpError {
+pub fn strategy_invalid_output(
+    detail: impl Into<String>,
+    run_id: &str,
+    hint: impl Into<String>,
+) -> McpError {
     let detail = detail.into();
+    let hint = require_hint(hint.into());
     McpError::new(
         STRATEGY_INVALID_OUTPUT,
         format!("strategy invalid output: {detail}"),
         Some(json!({
             "code": "strategy_invalid_output",
+            "kind": "strategy_invalid_output",
             "detail": detail,
             "run_id": run_id,
+            "hint": hint,
         })),
     )
 }
@@ -105,18 +156,41 @@ pub fn strategy_invalid_output(detail: impl Into<String>, run_id: &str) -> McpEr
 /// `stack_overflow`, `exception`).
 pub fn map_runtime_error(e: RuntimeError, run_id: &str) -> McpError {
     match e {
-        RuntimeError::Timeout => {
-            strategy_runtime_error("timeout", "wall-clock budget exceeded", run_id)
-        }
-        RuntimeError::Oom => strategy_runtime_error("oom", "heap budget exceeded", run_id),
-        RuntimeError::StackOverflow => {
-            strategy_runtime_error("stack_overflow", "max stack size exceeded", run_id)
-        }
-        RuntimeError::Exception(msg) => strategy_runtime_error("exception", msg, run_id),
-        RuntimeError::EngineInit(msg) => {
-            strategy_runtime_error("exception", format!("engine init: {msg}"), run_id)
-        }
-        RuntimeError::InvalidOutput { detail } => strategy_invalid_output(detail, run_id),
+        RuntimeError::Timeout => strategy_runtime_error(
+            "timeout",
+            "wall-clock budget exceeded",
+            run_id,
+            "review the strategy source for unbounded loops or large allocations; read it via strategy://{strategy_id}",
+        ),
+        RuntimeError::Oom => strategy_runtime_error(
+            "oom",
+            "heap budget exceeded",
+            run_id,
+            "review the strategy for large allocations; read journal://{run_id} for the recorded payload",
+        ),
+        RuntimeError::StackOverflow => strategy_runtime_error(
+            "stack_overflow",
+            "max stack size exceeded",
+            run_id,
+            "remove recursive calls; read the source via strategy://{strategy_id}",
+        ),
+        RuntimeError::Exception(msg) => strategy_runtime_error(
+            "exception",
+            msg,
+            run_id,
+            "fix the JS exception; inspect journal://{run_id} for the recorded detail",
+        ),
+        RuntimeError::EngineInit(msg) => strategy_runtime_error(
+            "exception",
+            format!("engine init: {msg}"),
+            run_id,
+            "rare host-level error; retry strategy_run and check daemon logs",
+        ),
+        RuntimeError::InvalidOutput { detail } => strategy_invalid_output(
+            detail,
+            run_id,
+            "return either \"noop\" or an Action[]; see docs://strategy-bundle for shapes",
+        ),
         // Phase 4 D-12: EVM errors get the extended data.kind taxonomy and
         // wire-safe stable strings (HR/MR-01 carry-forward).
         RuntimeError::Evm(evm_err) => map_evm_error(evm_err, run_id),
@@ -136,6 +210,12 @@ pub fn map_evm_error(e: EvmError, run_id: &str) -> McpError {
     // strings live in the per-variant Display impls.
     let stable = e.to_string();
     tracing::warn!(detail = %detail_log, kind = %kind, run_id = %run_id, "evm error");
+    let hint = require_hint(match kind {
+        "evm_rpc_error" => "check [evm].rpc_url in config; see docs://eip-7702",
+        "evm_decode_error" => "verify the action ABI and arg shapes match the target contract",
+        "evm_revert" => "read journal://{run_id} for the recorded revert reason and adjust the strategy",
+        _ => "inspect journal://{run_id} for the recorded payload",
+    }.to_string());
     McpError::new(
         STRATEGY_RUNTIME_ERROR,
         stable.clone(),
@@ -144,6 +224,7 @@ pub fn map_evm_error(e: EvmError, run_id: &str) -> McpError {
             "kind": kind,
             "detail": stable,
             "run_id": run_id,
+            "hint": hint,
         })),
     )
 }
@@ -151,26 +232,6 @@ pub fn map_evm_error(e: EvmError, run_id: &str) -> McpError {
 /// Phase 5 D-08 — emit `-32017 STRATEGY_RUNTIME_ERROR` with `data.kind =
 /// "simulation_failure"` for a failed `simulate_one` outcome (per Phase 4
 /// D-12 reuse precedent — no new wire codes).
-///
-/// Wire shape (LOCKED — Plan 05-04 stdio test pins this):
-/// - `error.code` = `-32017` STRATEGY_RUNTIME_ERROR.
-/// - `data.code` = `"strategy_runtime_error"` (string canon).
-/// - `data.kind` = `"simulation_failure"` (Phase 5 D-08; distinguishes from
-///   `"exception"` / `"timeout"` / `"evm_*"` so agents can dispatch).
-/// - `data.fail_reason` ∈ `{"revert", "transport", "timeout"}`.
-/// - `data.action_index`: zero-based index of the failing action in the
-///   strategy's action array.
-/// - `data.decoded_revert`: SANITIZED revert reason (string) or `null`. The
-///   sanitizer ([`executor_evm::read::sanitize_revert_reason`], WR-04) runs
-///   at `simulate_one` BEFORE this factory sees the data — attacker-controllable
-///   text is the only string that may survive to wire and only after
-///   sanitization (control-char strip + 256-byte cap).
-/// - `data.detail` mirrors `error.message` and starts with `"simulation failed: "`.
-/// - `data.run_id`: the run row whose journal captured the denial.
-///
-/// MR-01 carry-forward: NO raw alloy / reqwest text reaches the wire. The
-/// `SimulationOutcome::Fail::raw_for_log` field is consumed by `tracing::warn!`
-/// at the simulate site; this factory only sees the typed `SimulationFailReason`.
 pub fn map_simulation_error(
     reason: &SimulationFailReason,
     action_index: u32,
@@ -186,9 +247,6 @@ pub fn map_simulation_error(
         ("revert", None) => "simulation failed: evm revert: unknown".to_string(),
         ("transport", _) => "simulation failed: evm rpc error: transport".to_string(),
         ("timeout", _) => "simulation failed: evm rpc error: timeout".to_string(),
-        // The match above is exhaustive — `fail_reason` is one of three
-        // const string literals. The compiler can't prove this, so use a
-        // safe fallback rather than `unreachable!()`.
         _ => "simulation failed".to_string(),
     };
     tracing::warn!(
@@ -197,6 +255,12 @@ pub fn map_simulation_error(
         fail_reason,
         "simulation denial",
     );
+    let hint = require_hint(match fail_reason {
+        "revert" => "fix the on-chain state assumption in the strategy or update args; inspect journal://{run_id}",
+        "transport" => "check [evm].rpc_url health and retry; see docs://eip-7702",
+        "timeout" => "retry strategy_run when the RPC is healthier",
+        _ => "inspect journal://{run_id} for the recorded simulation outcome",
+    }.to_string());
     McpError::new(
         STRATEGY_RUNTIME_ERROR,
         detail.clone(),
@@ -208,32 +272,13 @@ pub fn map_simulation_error(
             "decoded_revert": decoded_revert,
             "detail": detail,
             "run_id": run_id,
+            "hint": hint,
         })),
     )
 }
 
 /// Phase 5 Plan 05-03 / D-08 — emit `-32017 STRATEGY_RUNTIME_ERROR` with
 /// `data.kind = "policy_violation"` for a policy denial verdict.
-///
-/// Wire shape (LOCKED — Plan 05-04 stdio tests pin this):
-/// - `error.code` = `-32017` STRATEGY_RUNTIME_ERROR (no new wire codes per D-08).
-/// - `data.code` = `"strategy_runtime_error"` (string canon).
-/// - `data.kind` = `"policy_violation"` (distinguishes from `"exception"` /
-///   `"timeout"` / `"evm_*"` / `"simulation_failure"` / `"policy_not_loaded"`).
-/// - `data.rule` = stable rule taxonomy (`chain_not_allowed`,
-///   `contract_not_allowed`, `selector_not_allowed`, `native_value_exceeds`,
-///   `erc20_spend_exceeds`, `raw_call_denied`).
-/// - `data.action_index` = 0-based index of the failing action.
-/// - `data.detail` = `"policy violation: " + verdict.detail` (stable wire-safe
-///   per MR-01; `verdict.detail` originates in `executor_policy::eval`).
-/// - `data.run_id` mirrors the run row whose journal will (Plan 05-04) record
-///   the denial.
-///
-/// MR-01 lock: `verdict.detail` strings are constructed in `eval.rs` from
-/// stable taxonomy templates; no raw alloy / serde / toml text.
-///
-/// **Panics** in debug builds when called with `DecisionVerdict::Allow` —
-/// callers must filter Allow verdicts before invoking this factory.
 pub fn map_policy_error(
     verdict: &DecisionVerdict,
     action_index: u32,
@@ -242,8 +287,6 @@ pub fn map_policy_error(
     let (rule, detail_inner) = match verdict {
         DecisionVerdict::Deny { rule, detail } => (rule.clone(), detail.clone()),
         DecisionVerdict::Allow => {
-            // Defense: do not panic in release; produce a synthetic deny so
-            // we never silently emit a malformed envelope.
             debug_assert!(
                 false,
                 "map_policy_error called with Allow — caller must filter"
@@ -261,6 +304,11 @@ pub fn map_policy_error(
         rule = %rule.as_ref(),
         "policy denial",
     );
+    // Hint references the policy rule + a concrete next action.
+    let hint = require_hint(format!(
+        "adjust .local/policy.toml to allow this {rule}, or change the strategy; see docs://policy-model and policy://current",
+        rule = rule.as_ref(),
+    ));
     McpError::new(
         STRATEGY_RUNTIME_ERROR,
         stable_detail.clone(),
@@ -271,21 +319,18 @@ pub fn map_policy_error(
             "action_index": action_index,
             "detail": stable_detail,
             "run_id": run_id,
+            "hint": hint,
         })),
     )
 }
 
 /// Phase 5 Plan 05-03 / D-15 — emit `-32017 STRATEGY_RUNTIME_ERROR` with
 /// `data.kind = "policy_not_loaded"` when `ExecutorServer.policy` is `None`.
-///
-/// Triggered at the orchestrator (Plan 05-04 — `tools::strategy_run`) when
-/// the policy field is `None` (boot-time load failed OR `[policy].path` was
-/// not configured). Stable detail string locks the operator-actionable hint:
-/// "set [policy].path in config".
 pub fn policy_not_loaded(run_id: &str) -> McpError {
     let detail =
         "policy violation: policy file not loaded — set [policy].path in config".to_string();
     tracing::warn!(run_id, "strategy_run blocked: policy not loaded");
+    let hint = require_hint(hints::POLICY_DOCS.to_string());
     McpError::new(
         STRATEGY_RUNTIME_ERROR,
         detail.clone(),
@@ -294,21 +339,28 @@ pub fn policy_not_loaded(run_id: &str) -> McpError {
             "kind": "policy_not_loaded",
             "detail": detail,
             "run_id": run_id,
+            "hint": hint,
         })),
     )
 }
 
 /// Build an `unimplemented` error for `tool_name`, pointing agents at the
 /// phase where it will land.
-pub fn unimplemented_err(tool_name: &'static str, phase: u8) -> McpError {
+pub fn unimplemented_err(
+    tool_name: &'static str,
+    phase: u8,
+    hint: impl Into<String>,
+) -> McpError {
+    let hint = require_hint(hint.into());
     McpError::new(
         UNIMPLEMENTED_CODE,
         format!("{tool_name} is not implemented yet (lands in Phase {phase})"),
         Some(json!({
             "code": "unimplemented",
+            "kind": "unimplemented",
             "tool": tool_name,
             "phase": phase,
-            "hint": format!("will be implemented when Phase {phase} lands"),
+            "hint": hint,
         })),
     )
 }
@@ -316,71 +368,143 @@ pub fn unimplemented_err(tool_name: &'static str, phase: u8) -> McpError {
 /// Map a storage-layer [`StateError`] to its MCP wire code + structured `data`
 /// payload. Agents key off `data.code` (string) for stable matching; the
 /// numeric `error.code` is provided for JSON-RPC clients.
+///
+/// The hint surfaced here is the **generic** state-error hint. Callers that
+/// want a more specific hint (e.g. "list triggers via trigger://list" for a
+/// trigger NotFound) should classify the error themselves before calling this.
 pub fn map_state_error(e: StateError) -> McpError {
     match e {
-        StateError::NotFound(what) => McpError::new(
-            STORAGE_NOT_FOUND,
-            format!("not found: {what}"),
-            Some(json!({ "code": "not_found", "resource": what })),
-        ),
+        StateError::NotFound(what) => {
+            // Best-effort: route the hint based on the resource prefix the
+            // state layer used. Falls back to strategy://list (the most
+            // common case in the agent UX) if the resource string is opaque.
+            let lower = what.to_lowercase();
+            let hint = if lower.starts_with("strategy") {
+                hints::STRATEGY_LIST.to_string()
+            } else if lower.starts_with("run") {
+                "list recent runs via execution://list".to_string()
+            } else if lower.starts_with("trigger") {
+                hints::TRIGGER_LIST.to_string()
+            } else {
+                format!("verify the id and retry; if unknown, list via the matching *://list resource (was: {what})")
+            };
+            let hint = require_hint(hint);
+            McpError::new(
+                STORAGE_NOT_FOUND,
+                format!("not found: {what}"),
+                Some(json!({
+                    "code": "not_found",
+                    "kind": "not_found",
+                    "resource": what,
+                    "hint": hint,
+                })),
+            )
+        }
         StateError::NameConflict {
             attempted_name,
             existing_strategy_id,
             existing_source_hash: _,
             existing_created_at,
-        } => McpError::new(
-            STORAGE_NAME_CONFLICT,
-            format!(
-                "strategy name '{attempted_name}' already used by strategy_id={existing_strategy_id} \
-                 (created {existing_created_at}); soft-delete that strategy to reuse the name, \
-                 or choose a different name"
-            ),
-            Some(json!({
-                "code": "name_conflict",
-                "attempted_name": attempted_name,
-                "existing_strategy_id": existing_strategy_id,
-                "existing_created_at": existing_created_at,
-            })),
-        ),
+        } => {
+            let hint = require_hint(format!(
+                "choose a different name or use the existing strategy_id `{existing_strategy_id}`; soft-delete the existing row with strategy_delete to free the name"
+            ));
+            McpError::new(
+                STORAGE_NAME_CONFLICT,
+                format!(
+                    "strategy name '{attempted_name}' already used by strategy_id={existing_strategy_id} \
+                     (created {existing_created_at}); soft-delete that strategy to reuse the name, \
+                     or choose a different name"
+                ),
+                Some(json!({
+                    "code": "name_conflict",
+                    "kind": "name_conflict",
+                    "attempted_name": attempted_name,
+                    "existing_strategy_id": existing_strategy_id,
+                    "existing_created_at": existing_created_at,
+                    "hint": hint,
+                })),
+            )
+        }
         StateError::InvalidInput(msg) => invalid_params(msg),
         StateError::SerializationError(msg) => {
-            // MR-03: serde failure on a journal payload. Same wire-leak
-            // discipline as Storage — raw text to tracing, stable taxonomy
-            // string on the wire.
             tracing::warn!(detail = %msg, "journal payload serialization failed");
+            let hint = require_hint(
+                "this is a server-side encoding bug; report it with the run_id and check daemon logs"
+                    .to_string(),
+            );
             McpError::new(
                 STORAGE_ERROR,
                 "journal payload serialization failed".to_string(),
                 Some(json!({
                     "code": "storage_error",
+                    "kind": "storage_error",
                     "detail": "journal payload serialization failed",
+                    "hint": hint,
                 })),
             )
         }
         StateError::Storage(msg) => {
-            // MR-01: Do NOT echo raw rusqlite text (constraint names, table
-            // names, SQLite-internal phrasing) onto the wire — it leaks
-            // schema details. Route the raw text to `tracing::warn!` for
-            // operator forensics, and surface a stable taxonomy string in
-            // `data.detail` so agent dispatch on `data.code == "storage_error"`
-            // remains robust.
             tracing::warn!(detail = %msg, "storage error");
+            let hint = require_hint(
+                "retry the call; if it persists, check daemon logs for the underlying SQLite error"
+                    .to_string(),
+            );
             McpError::new(
                 STORAGE_ERROR,
                 "storage backend error".to_string(),
-                Some(json!({ "code": "storage_error", "detail": "storage backend error" })),
+                Some(json!({
+                    "code": "storage_error",
+                    "kind": "storage_error",
+                    "detail": "storage backend error",
+                    "hint": hint,
+                })),
             )
         }
     }
 }
 
 /// Build an `invalid_params` error (JSON-RPC -32602) from a free-form message.
+///
+/// The hint is chosen heuristically from the message content — `address` /
+/// `run_id` / `strategy_id` / `tx_hash` get specialized hints; everything
+/// else falls back to a generic schema pointer.
 pub fn invalid_params(msg: impl Into<String>) -> McpError {
     let msg = msg.into();
+    let lower = msg.to_lowercase();
+    let hint = if lower.contains("address") {
+        "address must be 0x + 40 hex chars (EIP-55 mixed case or lowercase accepted)"
+    } else if lower.contains("run_id") {
+        "run_id must be a 26-char ULID; list runs via execution://list"
+    } else if lower.contains("strategy_id") {
+        "strategy_id must be 64 lowercase hex chars; list via strategy://list"
+    } else if lower.contains("tx_hash") || lower.contains("tx hash") {
+        "tx_hash must be 0x + 64 hex chars"
+    } else if lower.contains("source") {
+        "see docs://strategy-bundle for the strategy source contract"
+    } else if lower.contains("tag") {
+        "each tag must be non-empty and ≤ 64 chars; max 16 tags"
+    } else if lower.contains("name") {
+        "name must be non-empty, ≤ 128 chars, and active-unique"
+    } else if lower.contains("limit") {
+        "limit must be an integer between 1 and 500"
+    } else if lower.contains("since") {
+        "since must be an RFC3339 timestamp (e.g. 2026-05-14T00:00:00Z)"
+    } else if lower.contains("status") {
+        "status must be one of: succeeded | failed | noop"
+    } else {
+        "re-read the tool description's `inputSchema`; correct the offending field and retry"
+    };
+    let hint = require_hint(hint.to_string());
     McpError::new(
         INVALID_PARAMS,
         msg.clone(),
-        Some(json!({ "code": "invalid_params", "detail": msg })),
+        Some(json!({
+            "code": "invalid_params",
+            "kind": "invalid_params",
+            "detail": msg,
+            "hint": hint,
+        })),
     )
 }
 
@@ -389,10 +513,18 @@ pub fn invalid_params(msg: impl Into<String>) -> McpError {
 /// so all storage-path errors carry a uniform `data.code == "storage_error"`.
 pub fn storage_error(msg: impl Into<String>) -> McpError {
     let msg = msg.into();
+    let hint = require_hint(
+        "transient or internal — retry the call; if it persists check daemon logs".to_string(),
+    );
     McpError::new(
         STORAGE_ERROR,
         format!("storage error: {msg}"),
-        Some(json!({ "code": "storage_error", "detail": msg })),
+        Some(json!({
+            "code": "storage_error",
+            "kind": "storage_error",
+            "detail": msg,
+            "hint": hint,
+        })),
     )
 }
 
@@ -402,12 +534,16 @@ mod tests {
 
     #[test]
     fn carries_structured_data() {
-        let e = unimplemented_err("strategy_register", 2);
+        let e = unimplemented_err("strategy_register", 2, "see docs://strategy-bundle");
         assert_eq!(e.code, UNIMPLEMENTED_CODE);
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "unimplemented");
         assert_eq!(data["tool"], "strategy_register");
         assert_eq!(data["phase"], 2);
+        assert!(
+            data["hint"].as_str().is_some_and(|h| !h.is_empty()),
+            "hint must be present and non-empty: {data}"
+        );
     }
 
     #[test]
@@ -418,6 +554,29 @@ mod tests {
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "not_found");
         assert_eq!(data["resource"], "foo");
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
+    }
+
+    #[test]
+    fn map_state_error_not_found_strategy_hint_points_at_strategy_list() {
+        let e = map_state_error(StateError::NotFound("strategy abc".into()));
+        let data = e.data.as_ref().expect("data");
+        let hint = data["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("strategy://list"),
+            "strategy not_found hint should point at strategy://list: {hint}"
+        );
+    }
+
+    #[test]
+    fn map_state_error_not_found_trigger_hint_points_at_trigger_list() {
+        let e = map_state_error(StateError::NotFound("trigger xyz".into()));
+        let data = e.data.as_ref().expect("data");
+        let hint = data["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("trigger://list"),
+            "trigger not_found hint should point at trigger://list: {hint}"
+        );
     }
 
     #[test]
@@ -440,6 +599,11 @@ mod tests {
             "message missing canonical phrase: {}",
             e.message
         );
+        let hint = data["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("abc") || hint.contains("existing_strategy_id"),
+            "name_conflict hint should reference the existing id: {hint}"
+        );
     }
 
     #[test]
@@ -449,8 +613,7 @@ mod tests {
         assert_eq!(e.code, ErrorCode(-32016));
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "storage_error");
-        // MR-01: raw rusqlite text MUST NOT appear on the wire. The detail
-        // is a stable taxonomy string; the raw text goes to tracing only.
+        // MR-01: raw rusqlite text MUST NOT appear on the wire.
         assert!(
             !e.message.contains("boom"),
             "raw rusqlite text leaked to wire: {}",
@@ -462,32 +625,35 @@ mod tests {
             data["detail"]
         );
         assert_eq!(data["detail"], "storage backend error");
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
     fn strategy_deleted_uses_32011() {
-        let e = strategy_deleted("abc");
+        let e = strategy_deleted("abc", "register a new strategy");
         assert_eq!(e.code, STRATEGY_DELETED);
         assert_eq!(e.code, ErrorCode(-32011));
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "strategy_deleted");
         assert_eq!(data["strategy_id"], "abc");
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
     fn strategy_invalid_output_uses_32018_carries_run_id_and_detail() {
-        let e = strategy_invalid_output("got number", "01ARZ123");
+        let e = strategy_invalid_output("got number", "01ARZ123", "return \"noop\" or Action[]");
         assert_eq!(e.code, STRATEGY_INVALID_OUTPUT);
         assert_eq!(e.code, ErrorCode(-32018));
         let data = e.data.as_ref().expect("data present");
         assert_eq!(data["code"], "strategy_invalid_output");
         assert_eq!(data["detail"], "got number");
         assert_eq!(data["run_id"], "01ARZ123");
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
     fn strategy_runtime_error_timeout_uses_32017_with_kind_timeout() {
-        let e = strategy_runtime_error("timeout", "wall clock", "01ARZ123");
+        let e = strategy_runtime_error("timeout", "wall clock", "01ARZ123", "review source");
         assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
         assert_eq!(e.code, ErrorCode(-32017));
         let data = e.data.as_ref().expect("data present");
@@ -495,6 +661,7 @@ mod tests {
         assert_eq!(data["kind"], "timeout");
         assert_eq!(data["detail"], "wall clock");
         assert_eq!(data["run_id"], "01ARZ123");
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
@@ -503,6 +670,7 @@ mod tests {
         let e = map_runtime_error(RuntimeError::Timeout, "rid");
         assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
         assert_eq!(e.data.as_ref().unwrap()["kind"], "timeout");
+        assert!(e.data.as_ref().unwrap()["hint"].as_str().is_some_and(|h| !h.is_empty()));
         // Oom
         let e = map_runtime_error(RuntimeError::Oom, "rid");
         assert_eq!(e.code, STRATEGY_RUNTIME_ERROR);
@@ -538,6 +706,7 @@ mod tests {
         assert_eq!(e.data.as_ref().unwrap()["code"], "strategy_invalid_output");
         assert_eq!(e.data.as_ref().unwrap()["detail"], "promise return");
         assert_eq!(e.data.as_ref().unwrap()["run_id"], "rid");
+        assert!(e.data.as_ref().unwrap()["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
@@ -557,6 +726,7 @@ mod tests {
         assert!(!e.message.contains("Reqwest"));
         assert!(!data["detail"].as_str().unwrap().contains("Reqwest"));
         assert!(!data["detail"].as_str().unwrap().contains("boom"));
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
 
         // Decode → evm_decode_error
         let e = map_runtime_error(
@@ -619,6 +789,24 @@ mod tests {
             "message not preserved: {}",
             e.message
         );
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
+    }
+
+    #[test]
+    fn invalid_params_specializes_hint_for_address() {
+        let e = invalid_params("expected address but got abcd");
+        let hint = e.data.as_ref().unwrap()["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("0x") && hint.contains("40"),
+            "address hint should mention 0x+40 hex: {hint}"
+        );
+    }
+
+    #[test]
+    fn invalid_params_specializes_hint_for_run_id() {
+        let e = invalid_params("run_id parse error");
+        let hint = e.data.as_ref().unwrap()["hint"].as_str().unwrap();
+        assert!(hint.contains("26") && hint.contains("ULID"), "run_id hint: {hint}");
     }
 
     // ─────────── Phase 5 Plan 05-02 / D-08 simulation_failure ───────────
@@ -649,6 +837,7 @@ mod tests {
             "detail missing canonical prefix: {}",
             data["detail"]
         );
+        assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
     }
 
     #[test]
@@ -689,8 +878,6 @@ mod tests {
 
     #[test]
     fn map_simulation_error_does_not_leak_raw_alloy_text() {
-        // MR-01: even with a benign decoded revert, no top-level field
-        // carries raw alloy crate names. The factory never sees raw_for_log.
         let e = map_simulation_error(
             &SimulationFailReason::Revert {
                 decoded: Some("benign reason".into()),
@@ -732,11 +919,11 @@ mod tests {
                 "detail missing prefix: {detail}"
             );
             assert!(detail.contains("contract 0xdead not allowed"));
+            assert!(data["hint"].as_str().is_some_and(|h| !h.is_empty()));
         }
 
         #[test]
         fn map_policy_error_carries_each_rule_taxonomy() {
-            // Probe each of the 6 stable rule strings.
             for rule in [
                 "chain_not_allowed",
                 "contract_not_allowed",
@@ -769,17 +956,13 @@ mod tests {
                 data["detail"],
                 "policy violation: policy file not loaded — set [policy].path in config"
             );
-            // No `rule` or `action_index` for policy_not_loaded — distinguishes
-            // wire shape from policy_violation.
+            assert!(data["hint"].as_str().is_some_and(|h| h.contains("policy")));
             assert!(data.get("rule").is_none() || data["rule"].is_null());
             assert!(data.get("action_index").is_none() || data["action_index"].is_null());
         }
 
         #[test]
         fn map_policy_error_does_not_leak_raw_alloy_text() {
-            // MR-01 — even with attacker-shaped detail text from eval.rs, the
-            // wire envelope carries only the stable taxonomy + the eval-built
-            // detail (which itself has stable prefixes by construction).
             let verdict = DecisionVerdict::Deny {
                 rule: Cow::Borrowed("chain_not_allowed"),
                 detail: "chain 999 not in policy allowlist".into(),
