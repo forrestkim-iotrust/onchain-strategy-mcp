@@ -82,6 +82,7 @@ fn map_trigger_row(
     created_at: String,
     dedup_window_ms: Option<i64>,
     note: Option<String>,
+    strategy_lineage_id: Option<String>,
 ) -> Result<Trigger, StateError> {
     Ok(Trigger {
         id,
@@ -94,6 +95,7 @@ fn map_trigger_row(
         created_at,
         dedup_window_ms: dedup_window_ms.and_then(|n| u64::try_from(n).ok()),
         note,
+        strategy_lineage_id,
     })
 }
 
@@ -101,20 +103,25 @@ pub(crate) fn register(
     conn: &Connection,
     input: RegisterTriggerInput,
 ) -> Result<TriggerRegisterOutcome, StateError> {
-    // Ensure strategy exists.
-    let strategy_exists: Option<i64> = conn
+    // Ensure strategy exists AND grab its lineage_id so the trigger row can
+    // attach to a LINEAGE (survives view/records-spec re-registrations of
+    // the same name) rather than a specific version.
+    let lineage_row: Option<Option<String>> = conn
         .query_row(
-            "SELECT 1 FROM strategies WHERE id = ?1",
+            "SELECT lineage_id FROM strategies WHERE id = ?1",
             params![&input.strategy_id],
-            |r| r.get(0),
+            |r| r.get::<_, Option<String>>(0),
         )
         .optional()?;
-    if strategy_exists.is_none() {
-        return Err(StateError::NotFound(format!(
-            "strategy {}",
-            input.strategy_id
-        )));
-    }
+    let strategy_lineage_id = match lineage_row {
+        None => {
+            return Err(StateError::NotFound(format!(
+                "strategy {}",
+                input.strategy_id
+            )));
+        }
+        Some(opt) => opt,
+    };
 
     let config_json = canonical_config(&input.config);
     let id = hash_trigger(
@@ -132,8 +139,9 @@ pub(crate) fn register(
     let dedup = input.dedup_window_ms.map(|n| n as i64);
     conn.execute(
         "INSERT INTO triggers(id, strategy_id, kind, config_json, predicate_js,
-                              enabled, last_fired_at, created_at, dedup_window_ms, note)
-         VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, ?6, ?7, ?8)",
+                              enabled, last_fired_at, created_at, dedup_window_ms,
+                              note, strategy_lineage_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL, ?6, ?7, ?8, ?9)",
         params![
             &id,
             &input.strategy_id,
@@ -143,6 +151,7 @@ pub(crate) fn register(
             &now,
             dedup,
             input.note.as_deref(),
+            &strategy_lineage_id,
         ],
     )?;
 
@@ -157,6 +166,7 @@ pub(crate) fn register(
         created_at: now,
         dedup_window_ms: input.dedup_window_ms,
         note: input.note,
+        strategy_lineage_id,
     }))
 }
 
@@ -165,7 +175,8 @@ pub(crate) fn list(
     filter: Option<&TriggerListFilter>,
 ) -> Result<Vec<TriggerSummary>, StateError> {
     let mut sql = String::from(
-        "SELECT id, strategy_id, kind, enabled, last_fired_at, created_at, note \
+        "SELECT id, strategy_id, kind, enabled, last_fired_at, created_at, \
+                note, strategy_lineage_id \
          FROM triggers",
     );
     let mut clauses: Vec<String> = Vec::new();
@@ -182,6 +193,10 @@ pub(crate) fn list(
         if let Some(sid) = &f.strategy_id {
             clauses.push(format!("strategy_id = ?{}", binds.len() + 1));
             binds.push(Box::new(sid.clone()));
+        }
+        if let Some(lid) = &f.strategy_lineage_id {
+            clauses.push(format!("strategy_lineage_id = ?{}", binds.len() + 1));
+            binds.push(Box::new(lid.clone()));
         }
     }
     if !clauses.is_empty() {
@@ -202,11 +217,12 @@ pub(crate) fn list(
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, sid, kind, enabled, last_fired_at, created_at, note) in rows {
+    for (id, sid, kind, enabled, last_fired_at, created_at, note, lineage) in rows {
         out.push(TriggerSummary {
             id,
             strategy_id: sid,
@@ -215,6 +231,7 @@ pub(crate) fn list(
             last_fired_at,
             created_at,
             note,
+            strategy_lineage_id: lineage,
         });
     }
     Ok(out)
@@ -223,7 +240,7 @@ pub(crate) fn list(
 pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Trigger>, StateError> {
     conn.query_row(
         "SELECT id, strategy_id, kind, config_json, predicate_js, enabled,
-                last_fired_at, created_at, dedup_window_ms, note
+                last_fired_at, created_at, dedup_window_ms, note, strategy_lineage_id
          FROM triggers WHERE id = ?1",
         params![id],
         |r| {
@@ -238,11 +255,12 @@ pub(crate) fn get_by_id(conn: &Connection, id: &str) -> Result<Option<Trigger>, 
                 r.get::<_, String>(7)?,
                 r.get::<_, Option<i64>>(8)?,
                 r.get::<_, Option<String>>(9)?,
+                r.get::<_, Option<String>>(10)?,
             ))
         },
     )
     .optional()?
-    .map(|t| map_trigger_row(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9))
+    .map(|t| map_trigger_row(t.0, t.1, t.2, t.3, t.4, t.5, t.6, t.7, t.8, t.9, t.10))
     .transpose()
 }
 

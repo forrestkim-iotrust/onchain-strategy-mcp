@@ -18,6 +18,7 @@ pub fn seed_strategies(store: &mut StateStore, n: usize) -> Vec<String> {
                 .expect("register seed")
             {
                 RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
             }
         })
         .collect()

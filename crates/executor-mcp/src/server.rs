@@ -404,6 +404,7 @@ impl ExecutorServer {
             kind: None,
             enabled: Some(true),
             strategy_id: None,
+            strategy_lineage_id: None,
         };
         // Use try_lock — `arc` is brand new and no other task can hold these
         // mutexes yet. Avoids `blocking_lock` which panics inside a tokio

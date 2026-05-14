@@ -125,11 +125,13 @@ async fn execution_list_with_runs_returns_summaries() -> Result<()> {
             .register_strategy("alpha", "// alpha", None, None)?
         {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
         let sid_b = match store
             .register_strategy("beta", "// beta", None, None)?
         {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
         };
 
         let a1 = store.__test_insert_run_with_time(

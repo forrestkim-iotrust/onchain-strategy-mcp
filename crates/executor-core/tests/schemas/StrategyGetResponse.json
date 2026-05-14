@@ -19,6 +19,13 @@
         "null"
       ]
     },
+    "lineage_id": {
+      "description": "v1.8: stable lineage anchor — preserved across re-registrations of\nthe same name. Optional for back-compat with old clients.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "name": {
       "type": "string"
     },
@@ -36,6 +43,15 @@
       "items": {
         "type": "string"
       }
+    },
+    "version": {
+      "description": "v1.8: 1-based version of this row within its lineage.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
     }
   },
   "required": [

@@ -21,6 +21,7 @@ fn seed(state: &Arc<Mutex<StateStore>>, name: &str) -> (String, String) {
         .unwrap();
     let sid = match outcome {
         RegisterOutcome::Created(x) | RegisterOutcome::AlreadyExists(x) => x.id,
+        RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     };
     let rid = s.insert_run(&sid, RunStatus::Queued).unwrap();
     (sid, rid)

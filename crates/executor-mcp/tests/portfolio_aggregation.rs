@@ -164,6 +164,7 @@ fn seed_bundle_with_assets_view(
     )?;
     let sid = match outcome {
         RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     };
     // Insert at least one queued run so `strategy_records` / view caching
     // exercises the full path. Not strictly required — view runs even with
@@ -358,6 +359,7 @@ async fn strategy_contributing_60_assets_truncates_to_50() -> Result<()> {
         )?;
         let s = match outcome {
             RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s,
+            RegisterOutcome::ReplacedVersion { created, .. } => created,
         };
         s.id
     };

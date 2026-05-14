@@ -31,5 +31,8 @@ pub use runs::{
     LIST_RUNS_DEFAULT_LIMIT, LIST_RUNS_LIMIT_CAP, Run, RunListFilter, RunRepo, RunSummary,
 };
 pub use store::StateStore;
-pub use strategies::{RegisterOutcome, Strategy, StrategySummary, hash_bundle, hash_source};
+pub use strategies::{
+    RegisterOutcome, Strategy, StrategySummary, hash_bundle, hash_bundle_with_lineage,
+    hash_source,
+};
 pub use triggers::TriggerRegisterOutcome;

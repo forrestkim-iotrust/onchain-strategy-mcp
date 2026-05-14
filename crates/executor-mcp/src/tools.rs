@@ -269,6 +269,10 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                 deleted_at: s.deleted_at,
                 contracts_touched: Some(contracts_touched_value),
                 policy_alignment: Some(alignment_value),
+                lineage_id: Some(s.lineage_id),
+                // First version of a fresh lineage.
+                version: Some(1),
+                replaced_version: None,
             },
             RegisterOutcome::AlreadyExists(s) => {
                 // Read the existing row's cached extraction. NULL on legacy
@@ -286,6 +290,22 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                     Some(&existing_extraction),
                     policy_value.as_ref(),
                 );
+                // v1.8: compute the existing row's per-lineage version so
+                // the response surfaces the same `version` value an agent
+                // would see via `strategy://list`.
+                let version_for_existing = {
+                    let state_v = self.state.clone();
+                    let id_v = s.id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let store = state_v.blocking_lock();
+                        store.strategy_version_for_id(&id_v)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten()
+                    .unwrap_or(1)
+                };
                 StrategyRegisterResponse {
                     strategy_id: s.id.clone(),
                     name: s.name.clone(),
@@ -297,8 +317,42 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
                     deleted_at: s.deleted_at,
                     contracts_touched: Some(existing_extraction),
                     policy_alignment: Some(crate::alignment::to_json(&existing_alignment)),
+                    lineage_id: Some(s.lineage_id),
+                    version: Some(version_for_existing),
+                    replaced_version: None,
                 }
             }
+            RegisterOutcome::ReplacedVersion {
+                created,
+                previous,
+                new_version,
+                previous_version,
+                execute_changed,
+                records_changed,
+                view_changed,
+            } => StrategyRegisterResponse {
+                strategy_id: created.id.clone(),
+                name: created.name.clone(),
+                created_at: created.created_at.clone(),
+                already_exists: false,
+                existing_name: None,
+                existing_description: None,
+                existing_tags: None,
+                deleted_at: created.deleted_at.clone(),
+                contracts_touched: Some(contracts_touched_value),
+                policy_alignment: Some(alignment_value),
+                lineage_id: Some(created.lineage_id),
+                version: Some(new_version),
+                replaced_version: Some(
+                    executor_core::schema::strategy::ReplacedVersionInfo {
+                        previous_id: previous.id,
+                        previous_version,
+                        previous_view_changed: view_changed,
+                        previous_records_changed: records_changed,
+                        previous_execute_changed: execute_changed,
+                    },
+                ),
+            },
         };
         json_result(&resp)
     }
@@ -1167,6 +1221,8 @@ pub(crate) fn summary_to_item(s: StrategySummary) -> StrategyListItem {
         tags: s.tags,
         created_at: s.created_at,
         deleted_at: s.deleted_at,
+        lineage_id: Some(s.lineage_id),
+        version: Some(s.version),
     }
 }
 

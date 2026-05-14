@@ -118,6 +118,36 @@ impl StateStore {
         strategies::is_deleted(&self.conn, id)
     }
 
+    // ---- v1.8 name-anchored lineage façade ----
+
+    /// Return the current (single, non-deleted) version for a lineage, if
+    /// one is still active. After `strategy_delete` on the latest version
+    /// the lineage has no active row and this returns `None`.
+    pub fn get_active_strategy_for_lineage(
+        &self,
+        lineage_id: &str,
+    ) -> Result<Option<strategies::Strategy>, StateError> {
+        strategies::get_active_for_lineage(&self.conn, lineage_id)
+    }
+
+    /// List every row belonging to a lineage (active + soft-deleted),
+    /// newest-first. Powers `strategy://lineage/{id}/history`.
+    pub fn list_strategies_for_lineage(
+        &self,
+        lineage_id: &str,
+    ) -> Result<Vec<strategies::StrategySummary>, StateError> {
+        strategies::list_for_lineage(&self.conn, lineage_id)
+    }
+
+    /// Cheap helper: 1-based version of THIS row within its lineage.
+    /// Returns `None` if the id doesn't exist.
+    pub fn strategy_version_for_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<u32>, StateError> {
+        strategies::version_for_id(&self.conn, id)
+    }
+
     // ---- Records capture façade (v1.4 strategy bundle) ----
 
     /// Insert one row into `strategy_records_capture`. Callers (the
@@ -144,6 +174,19 @@ impl StateStore {
         limit: u64,
     ) -> Result<Vec<records_capture::RecordCaptureEntry>, StateError> {
         records_capture::list_for_strategy(&self.conn, strategy_id, since, limit)
+    }
+
+    /// v1.8: list captures for an entire LINEAGE (every version of the
+    /// strategy name combined), newest-first. Used by the bundle view and
+    /// `strategy://{id}/records` so iterating on view/records spec does
+    /// not orphan historical captures.
+    pub fn list_strategy_records_for_lineage(
+        &self,
+        lineage_id: &str,
+        since: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<records_capture::RecordCaptureEntry>, StateError> {
+        records_capture::list_for_lineage(&self.conn, lineage_id, since, limit)
     }
 
     // ---- Run façade ----

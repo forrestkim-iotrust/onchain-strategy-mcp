@@ -120,6 +120,35 @@ impl Dispatcher {
             }
 
             // 4. Run the strategy.
+            //
+            // v1.8 name-anchored lineage: if the trigger is attached to a
+            // lineage, resolve to the lineage's CURRENT active version and
+            // run that — not the pinned `strategy_id` captured when the
+            // trigger was registered. This is the central UX win: view-only
+            // re-registrations don't orphan triggers.
+            //
+            // Fallback: if the trigger has no `strategy_lineage_id` (pre-
+            // v1.8 row that somehow never got backfilled) OR the lineage
+            // has no active version, fall back to the literal strategy_id.
+            // The latter run will surface a typed `strategy_deleted` error
+            // for the operator instead of silently routing somewhere else.
+            let target_id: String = match &trigger.strategy_lineage_id {
+                Some(lin) => {
+                    let state = self.state.clone();
+                    let lin_owned = lin.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let store = state.blocking_lock();
+                        store.get_active_strategy_for_lineage(&lin_owned)
+                    })
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten()
+                    .map(|s| s.id)
+                    .unwrap_or_else(|| trigger.strategy_id.clone())
+                }
+                None => trigger.strategy_id.clone(),
+            };
             let server = match self.server.upgrade() {
                 Some(s) => s,
                 None => {
@@ -128,7 +157,7 @@ impl Dispatcher {
                 }
             };
             let result = server
-                .run_strategy_with_event(&trigger.strategy_id, Some(e.payload.clone()))
+                .run_strategy_with_event(&target_id, Some(e.payload.clone()))
                 .await;
             match result {
                 Ok((run_id, _outcome)) => {

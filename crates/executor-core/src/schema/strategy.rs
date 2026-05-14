@@ -144,6 +144,40 @@ pub struct StrategyRegisterResponse {
 Verdict ∈ satisfied | partial | missing | incomplete. Always recomputed against the live policy — not cached.")]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_alignment: Option<serde_json::Value>,
+    /// v1.8 name-anchored lineage: stable identifier preserved across
+    /// re-registrations of the same name. Triggers, runs, and records attach
+    /// to a lineage, not to a specific version.
+    #[schemars(description = "v1.8: stable lineage identifier — preserved across re-registrations of the same name.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_id: Option<String>,
+    /// v1.8: 1-based position of THIS version within its lineage. 1 means
+    /// the first time `name` was registered; 2 means the second iteration,
+    /// and so on. Present on Created / ReplacedVersion / AlreadyExists.
+    #[schemars(description = "v1.8: 1-based version of this row within its lineage. 1 = first register, 2 = second iteration, ...")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    /// v1.8: present when this register call replaced a previously active
+    /// version of the same lineage (the old row was soft-deleted as part
+    /// of the transaction). Carries which bundle parts changed so agents
+    /// and UIs can render "what's new" badges.
+    #[schemars(description = "v1.8: details about the version this register superseded. Present only when register replaced an existing active row of the same name.")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replaced_version: Option<ReplacedVersionInfo>,
+}
+
+/// v1.8: surfaces the SCOPE of a same-name re-registration. Compares the
+/// new bundle against the previously active row's bundle so agents (and
+/// the UI's "what's new" badge) know what kind of change just landed.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[schemars(description = "v1.8: details of the version a register call superseded.")]
+pub struct ReplacedVersionInfo {
+    /// `strategy_id` of the row that was just soft-deleted.
+    pub previous_id: String,
+    /// 1-based version of the row that was just superseded.
+    pub previous_version: u32,
+    pub previous_view_changed: bool,
+    pub previous_records_changed: bool,
+    pub previous_execute_changed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -158,6 +192,13 @@ pub struct StrategyListItem {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    /// v1.8 name-anchored lineage: stable across version bumps. Optional
+    /// for back-compat with old clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_id: Option<String>,
+    /// v1.8: 1-based version of this row within its lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -179,6 +220,13 @@ pub struct StrategyGetResponse {
     pub created_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    /// v1.8: stable lineage anchor — preserved across re-registrations of
+    /// the same name. Optional for back-compat with old clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_id: Option<String>,
+    /// v1.8: 1-based version of this row within its lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

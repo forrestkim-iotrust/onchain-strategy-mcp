@@ -11,6 +11,7 @@ fn seed_run(store: &mut StateStore) -> String {
         .expect("register")
     {
         RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     };
     store
         .insert_run(

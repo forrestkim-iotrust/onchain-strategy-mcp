@@ -10,7 +10,7 @@
 //! façade.
 
 use crate::error::StateError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 /// One row of `strategy_records_capture` projected to the resource layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,10 @@ fn now_rfc3339() -> String {
 /// Insert one capture row. Capture is non-fatal: callers wrap this in their
 /// own swallow-error guard so a failed INSERT never propagates into
 /// action-confirm.
+///
+/// v1.8 name-anchored lineage: the row is stamped with the strategy's
+/// `lineage_id` (looked up from the strategy table) so the capture survives
+/// view/records-spec re-registrations of the same name.
 pub(crate) fn insert(
     conn: &Connection,
     run_id: &str,
@@ -39,13 +43,84 @@ pub(crate) fn insert(
     payload_json: &str,
 ) -> Result<(), StateError> {
     let now = now_rfc3339();
+    let lineage_id: Option<String> = conn
+        .query_row(
+            "SELECT lineage_id FROM strategies WHERE id = ?1",
+            params![strategy_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     conn.execute(
         "INSERT INTO strategy_records_capture \
-           (run_id, strategy_id, record_name, captured_at, payload_json) \
-           VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![run_id, strategy_id, record_name, &now, payload_json],
+           (run_id, strategy_id, record_name, captured_at, payload_json, strategy_lineage_id) \
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![run_id, strategy_id, record_name, &now, payload_json, lineage_id],
     )?;
     Ok(())
+}
+
+/// v1.8: list capture rows attached to a LINEAGE (across all versions),
+/// newest-first. Mirrors [`list_for_strategy`]'s filter semantics.
+///
+/// This is the read path that powers `strategy://{id}/view` and
+/// `strategy://{id}/records` after the lineage refactor — captures from
+/// every version of the same strategy name aggregate into one history.
+pub(crate) fn list_for_lineage(
+    conn: &Connection,
+    lineage_id: &str,
+    since: Option<&str>,
+    limit: u64,
+) -> Result<Vec<RecordCaptureEntry>, StateError> {
+    let capped = limit.min(500) as i64;
+    let mut entries = Vec::new();
+    match since {
+        Some(s) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, strategy_id, record_name, captured_at, payload_json \
+                 FROM strategy_records_capture \
+                 WHERE strategy_lineage_id = ?1 AND captured_at > ?2 \
+                 ORDER BY captured_at DESC, id DESC \
+                 LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![lineage_id, s, capped], |r| {
+                Ok(RecordCaptureEntry {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    strategy_id: r.get(2)?,
+                    record_name: r.get(3)?,
+                    captured_at: r.get(4)?,
+                    payload_json: r.get(5)?,
+                })
+            })?;
+            for row in rows {
+                entries.push(row?);
+            }
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT id, run_id, strategy_id, record_name, captured_at, payload_json \
+                 FROM strategy_records_capture \
+                 WHERE strategy_lineage_id = ?1 \
+                 ORDER BY captured_at DESC, id DESC \
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![lineage_id, capped], |r| {
+                Ok(RecordCaptureEntry {
+                    id: r.get(0)?,
+                    run_id: r.get(1)?,
+                    strategy_id: r.get(2)?,
+                    record_name: r.get(3)?,
+                    captured_at: r.get(4)?,
+                    payload_json: r.get(5)?,
+                })
+            })?;
+            for row in rows {
+                entries.push(row?);
+            }
+        }
+    }
+    Ok(entries)
 }
 
 /// List capture rows for a strategy, newest-first, optionally filtered by

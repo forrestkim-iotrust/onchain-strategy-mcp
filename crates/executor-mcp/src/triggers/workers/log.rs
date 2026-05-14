@@ -255,6 +255,7 @@ mod tests {
             last_fired_at: None,
             created_at: "1970-01-01T00:00:00Z".into(),
             note: None,
+            strategy_lineage_id: None,
         }
     }
 

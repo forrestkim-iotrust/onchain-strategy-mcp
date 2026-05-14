@@ -9,6 +9,7 @@ use executor_state::{RegisterOutcome, StateError};
 fn seed_strategy(store: &mut executor_state::StateStore, name: &str, source: &str) -> String {
     match store.register_strategy(name, source, None, None).unwrap() {
         RegisterOutcome::Created(s) | RegisterOutcome::AlreadyExists(s) => s.id,
+            RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     }
 }
 

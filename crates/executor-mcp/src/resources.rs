@@ -706,6 +706,18 @@ pub(crate) async fn dispatch_uri(
         let name = name.to_string();
         return read_strategy_by_name(uri, name, state).await;
     }
+    // v1.8 name-anchored lineage: history + latest-by-lineage reads. Both
+    // MUST be matched BEFORE the generic `strategy://{id}` branch since the
+    // lineage_id is a ULID (26 chars), not a 64-char hex id.
+    if let Some(rest) = uri.strip_prefix("strategy://lineage/") {
+        if let Some((lin, tail)) = rest.split_once('/') {
+            if tail == "history" {
+                return read_strategy_lineage_history(uri.clone(), lin.to_string(), state).await;
+            }
+        } else {
+            return read_strategy_lineage_active(uri.clone(), rest.to_string(), state, evm).await;
+        }
+    }
     // v1.4 Track A4: bundle view + raw records browse.
     // Match `strategy://{id}/view` and `strategy://{id}/records[?...]` BEFORE
     // the generic `strategy://{id}` branch below.
@@ -817,19 +829,22 @@ async fn read_strategy(
         ));
     }
 
-    // Pull row + active policy in one blocking pass so alignment is computed
-    // against a snapshot consistent with what the row carries (v1.5 Track 1C).
+    // Pull row + active policy + version in one blocking pass so alignment
+    // is computed against a snapshot consistent with what the row carries
+    // (v1.5 Track 1C). v1.8: include the per-lineage version so the
+    // response surfaces "this is v2 of `eth-funnel-bundle`".
     let id_owned = id.clone();
     let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let store = state.blocking_lock();
         let s = store.get_strategy_by_id(&id_owned)?;
         let pol = store.get_active_policy()?;
-        Ok((s, pol))
+        let v = store.strategy_version_for_id(&id_owned)?;
+        Ok((s, pol, v))
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
-    let (row, active_policy) = lookup;
+    let (row, active_policy, version) = lookup;
 
     match row {
         None => Err(McpError::resource_not_found(
@@ -837,7 +852,7 @@ async fn read_strategy(
             Some(json!({ "uri": uri })),
         )),
         Some(s) => {
-            let body = enrich_strategy_body(s, active_policy.as_ref())?;
+            let body = enrich_strategy_body(s, active_policy.as_ref(), version)?;
             let body_text = serde_json::to_string(&body)
                 .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
             Ok(ReadResourceResult::new(vec![
@@ -856,6 +871,7 @@ async fn read_strategy(
 fn enrich_strategy_body(
     s: executor_state::Strategy,
     active_policy: Option<&executor_state::PolicyRevision>,
+    version: Option<u32>,
 ) -> Result<serde_json::Value, McpError> {
     let contracts_touched_value: Option<serde_json::Value> = s
         .contracts_touched_json
@@ -876,6 +892,8 @@ fn enrich_strategy_body(
         tags: s.tags,
         created_at: s.created_at,
         deleted_at: s.deleted_at,
+        lineage_id: Some(s.lineage_id),
+        version,
     };
     let mut body = serde_json::to_value(&resp)
         .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
@@ -1574,6 +1592,8 @@ async fn read_strategy_list(
                 "has_bundle": s.has_bundle,
                 "view_uri": format!("strategy://{id}/view", id = s.id),
                 "policy_alignment": alignment_str,
+                "lineage_id": s.lineage_id,
+                "version": s.version,
             }));
         } else {
             strategy_jsons.push(json!({
@@ -1585,6 +1605,8 @@ async fn read_strategy_list(
                 "deleted_at": s.deleted_at,
                 "has_bundle": s.has_bundle,
                 "policy_alignment": alignment_str,
+                "lineage_id": s.lineage_id,
+                "version": s.version,
             }));
         }
     }
@@ -1612,6 +1634,117 @@ async fn read_strategy_list(
     ]))
 }
 
+/// v1.8: `strategy://lineage/{lineage_id}` — read the current active version
+/// for a lineage. Returns 404 when the lineage has no active row (e.g.
+/// after `strategy_delete` on the last version) so the caller can detect
+/// the dormant state and decide whether to re-register.
+async fn read_strategy_lineage_active(
+    uri: String,
+    lineage_id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+    _evm: ViewEvm,
+) -> Result<ReadResourceResult, McpError> {
+    if lineage_id.is_empty() {
+        return Err(McpError::resource_not_found(
+            format!("malformed lineage_id in uri: {uri}"),
+            Some(json!({ "uri": uri, "code": "malformed_lineage_id" })),
+        ));
+    }
+    let lin_owned = lineage_id.clone();
+    let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state.blocking_lock();
+        let s = store.get_active_strategy_for_lineage(&lin_owned)?;
+        let pol = store.get_active_policy()?;
+        let v = match &s {
+            Some(row) => store.strategy_version_for_id(&row.id)?,
+            None => None,
+        };
+        Ok((s, pol, v))
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    let (row, active_policy, version) = lookup;
+    match row {
+        None => Err(McpError::resource_not_found(
+            format!("no active version for lineage `{lineage_id}`"),
+            Some(json!({
+                "uri": uri,
+                "code": "not_found",
+                "hint": "the lineage's most recent version was soft-deleted; \
+                         re-register the strategy name to mint a new lineage \
+                         OR read strategy://lineage/{id}/history for archived versions",
+            })),
+        )),
+        Some(s) => {
+            let body = enrich_strategy_body(s, active_policy.as_ref(), version)?;
+            let body_text = serde_json::to_string(&body)
+                .map_err(|e| storage_error(format!("serialize lineage active: {e}")))?;
+            Ok(ReadResourceResult::new(vec![
+                ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+            ]))
+        }
+    }
+}
+
+/// v1.8: `strategy://lineage/{lineage_id}/history` — every row in the
+/// lineage (active + soft-deleted), newest-first. Each entry carries:
+/// `strategy_id`, `version`, `created_at`, `deleted_at`, `is_active`,
+/// `has_bundle`, name, description, tags.
+async fn read_strategy_lineage_history(
+    uri: String,
+    lineage_id: String,
+    state: Arc<tokio::sync::Mutex<StateStore>>,
+) -> Result<ReadResourceResult, McpError> {
+    if lineage_id.is_empty() {
+        return Err(McpError::resource_not_found(
+            format!("malformed lineage_id in uri: {uri}"),
+            Some(json!({ "uri": uri, "code": "malformed_lineage_id" })),
+        ));
+    }
+    let lin_owned = lineage_id.clone();
+    let rows = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
+        let store = state.blocking_lock();
+        store.list_strategies_for_lineage(&lin_owned)
+    })
+    .await
+    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+    .map_err(map_state_error)?;
+    if rows.is_empty() {
+        return Err(McpError::resource_not_found(
+            format!("no rows for lineage `{lineage_id}`"),
+            Some(json!({ "uri": uri, "code": "not_found" })),
+        ));
+    }
+    let versions_json: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|s| {
+            json!({
+                "strategy_id": s.id,
+                "name": s.name,
+                "description": s.description,
+                "tags": s.tags,
+                "version": s.version,
+                "created_at": s.created_at,
+                "deleted_at": s.deleted_at,
+                "is_active": s.deleted_at.is_none(),
+                "has_bundle": s.has_bundle,
+                "lineage_id": s.lineage_id,
+            })
+        })
+        .collect();
+    let body = json!({
+        "lineage_id": lineage_id,
+        "versions": versions_json,
+        "count": rows.len(),
+    });
+    let body_text = serde_json::to_string(&body)
+        .map_err(|e| storage_error(format!("serialize lineage history: {e}")))?;
+    Ok(ReadResourceResult::new(vec![
+        ResourceContents::text(body_text, uri).with_mime_type("application/json"),
+    ]))
+}
+
 async fn read_strategy_by_name(
     uri: String,
     name: String,
@@ -1632,12 +1765,17 @@ async fn read_strategy_by_name(
         let store = state.blocking_lock();
         let s = store.get_strategy_by_name(&name_for_lookup)?;
         let pol = store.get_active_policy()?;
-        Ok((s, pol))
+        // Compute version from the (possibly None) row's id.
+        let v = match &s {
+            Some(row) => store.strategy_version_for_id(&row.id)?,
+            None => None,
+        };
+        Ok((s, pol, v))
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
-    let (row, active_policy) = lookup;
+    let (row, active_policy, version) = lookup;
     match row {
         None => Err(McpError::resource_not_found(
             format!("strategy with name `{name}` not found"),
@@ -1648,7 +1786,7 @@ async fn read_strategy_by_name(
             })),
         )),
         Some(s) => {
-            let body = enrich_strategy_body(s, active_policy.as_ref())?;
+            let body = enrich_strategy_body(s, active_policy.as_ref(), version)?;
             let body_text = serde_json::to_string(&body)
                 .map_err(|e| storage_error(format!("serialize strategy: {e}")))?;
             Ok(ReadResourceResult::new(vec![
@@ -1893,12 +2031,17 @@ async fn read_strategy_view(
         ));
     }
 
-    // 1. Load strategy + records snapshot in one blocking pass.
+    // 1. Load strategy + lineage-wide records snapshot in one blocking pass.
+    //    v1.8: records are pulled by `strategy_lineage_id`, NOT `strategy_id`,
+    //    so captures survive view/records-spec re-registrations.
     let id_for_blocking = id.clone();
     let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let store = state.blocking_lock();
         let s = store.get_strategy_by_id(&id_for_blocking)?;
-        let records = store.list_strategy_records(&id_for_blocking, None, 500)?;
+        let records = match &s {
+            Some(row) => store.list_strategy_records_for_lineage(&row.lineage_id, None, 500)?,
+            None => Vec::new(),
+        };
         Ok((s, records))
     })
     .await
@@ -2243,11 +2386,29 @@ async fn read_strategy_records(
     }
     let capped = limit.min(500);
 
+    // v1.8: read by lineage so re-registrations of the same name surface
+    // the full record history. Look up the strategy's lineage_id first;
+    // if the id doesn't exist we fall back to the original strategy_id read
+    // path (returns the same row's records, which will be empty).
     let id_for_blocking = id.clone();
     let since_for_blocking = since.clone();
     let rows = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
         let store = state.blocking_lock();
-        store.list_strategy_records(&id_for_blocking, since_for_blocking.as_deref(), capped)
+        let lineage = store
+            .get_strategy_by_id(&id_for_blocking)?
+            .map(|s| s.lineage_id);
+        match lineage {
+            Some(lin) => store.list_strategy_records_for_lineage(
+                &lin,
+                since_for_blocking.as_deref(),
+                capped,
+            ),
+            None => store.list_strategy_records(
+                &id_for_blocking,
+                since_for_blocking.as_deref(),
+                capped,
+            ),
+        }
     })
     .await
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?

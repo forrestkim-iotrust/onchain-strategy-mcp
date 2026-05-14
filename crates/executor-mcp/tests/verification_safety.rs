@@ -406,6 +406,7 @@ fn seed_strategy(db_path: &std::path::Path, name: &str, source: &str) -> Result<
     let id = match outcome {
         executor_state::RegisterOutcome::Created(s)
         | executor_state::RegisterOutcome::AlreadyExists(s) => s.id,
+        executor_state::RegisterOutcome::ReplacedVersion { created, .. } => created.id,
     };
     Ok(id)
 }

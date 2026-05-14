@@ -22,6 +22,10 @@ pub struct Run {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub error: Option<String>,
+    /// v1.8 name-anchored lineage: the lineage this run belongs to. Set
+    /// from the strategy row's lineage_id at insert time. Survives
+    /// re-registrations of the same strategy name.
+    pub strategy_lineage_id: Option<String>,
 }
 
 /// Marker namespace — actual entry points are the free functions below
@@ -80,9 +84,22 @@ pub(crate) fn insert_run(
     }
     let id = ulid::Ulid::new().to_string();
     let started = super::strategies::now_rfc3339();
+    // v1.8 name-anchored lineage: stamp the run with the strategy row's
+    // current lineage_id so triggers/portfolio views aggregate across
+    // version bumps. The legacy `strategy_id` column still points to the
+    // exact version that ran (forensics + journal join).
+    let lineage_id: Option<String> = conn
+        .query_row(
+            "SELECT lineage_id FROM strategies WHERE id = ?1",
+            params![strategy_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     conn.execute(
-        "INSERT INTO runs(id, strategy_id, status, started_at) VALUES (?1, ?2, ?3, ?4)",
-        params![&id, strategy_id, status_to_wire(status), &started],
+        "INSERT INTO runs(id, strategy_id, status, started_at, strategy_lineage_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![&id, strategy_id, status_to_wire(status), &started, lineage_id],
     )?;
     Ok(id)
 }
@@ -105,9 +122,18 @@ pub(crate) fn insert_run_with_started_at(
         )));
     }
     let id = ulid::Ulid::new().to_string();
+    let lineage_id: Option<String> = conn
+        .query_row(
+            "SELECT lineage_id FROM strategies WHERE id = ?1",
+            params![strategy_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
     conn.execute(
-        "INSERT INTO runs(id, strategy_id, status, started_at) VALUES (?1, ?2, ?3, ?4)",
-        params![&id, strategy_id, status_to_wire(status), started_at],
+        "INSERT INTO runs(id, strategy_id, status, started_at, strategy_lineage_id) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![&id, strategy_id, status_to_wire(status), started_at, lineage_id],
     )?;
     Ok(id)
 }
@@ -209,7 +235,7 @@ pub(crate) fn update_run_status_with_transition(
 pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, StateError> {
     let row = conn
         .query_row(
-            "SELECT id, strategy_id, status, started_at, finished_at, error \
+            "SELECT id, strategy_id, status, started_at, finished_at, error, strategy_lineage_id \
              FROM runs WHERE id = ?1",
             params![run_id],
             |r| {
@@ -220,6 +246,7 @@ pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, St
                     r.get::<_, String>(3)?,
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<String>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
                 ))
             },
         )
@@ -227,14 +254,17 @@ pub(crate) fn get_run(conn: &Connection, run_id: &str) -> Result<Option<Run>, St
 
     match row {
         None => Ok(None),
-        Some((id, strategy_id, status_wire, started_at, finished_at, error)) => Ok(Some(Run {
-            id,
-            strategy_id,
-            status: status_from_wire(&status_wire)?,
-            started_at,
-            finished_at,
-            error,
-        })),
+        Some((id, strategy_id, status_wire, started_at, finished_at, error, lineage)) => {
+            Ok(Some(Run {
+                id,
+                strategy_id,
+                status: status_from_wire(&status_wire)?,
+                started_at,
+                finished_at,
+                error,
+                strategy_lineage_id: lineage,
+            }))
+        }
     }
 }
 
@@ -243,7 +273,7 @@ pub(crate) fn list_runs_for_strategy(
     strategy_id: &str,
 ) -> Result<Vec<Run>, StateError> {
     let mut stmt = conn.prepare(
-        "SELECT id, strategy_id, status, started_at, finished_at, error \
+        "SELECT id, strategy_id, status, started_at, finished_at, error, strategy_lineage_id \
          FROM runs WHERE strategy_id = ?1 ORDER BY started_at ASC, id ASC",
     )?;
     let rows = stmt
@@ -255,13 +285,14 @@ pub(crate) fn list_runs_for_strategy(
                 r.get::<_, String>(3)?,
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         })?
         .collect::<Result<Vec<_>, rusqlite::Error>>()?;
 
     rows.into_iter()
         .map(
-            |(id, strategy_id, status_wire, started_at, finished_at, error)| {
+            |(id, strategy_id, status_wire, started_at, finished_at, error, lineage)| {
                 Ok(Run {
                     id,
                     strategy_id,
@@ -269,6 +300,7 @@ pub(crate) fn list_runs_for_strategy(
                     started_at,
                     finished_at,
                     error,
+                    strategy_lineage_id: lineage,
                 })
             },
         )
