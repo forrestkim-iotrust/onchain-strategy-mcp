@@ -31,5 +31,9 @@ pub mod triggers;
 pub mod validation;
 // v1.6 Track 6A: local web UI HTTP server (loopback-only, observation-only).
 pub mod web;
+// v1.6 Track 6C: portfolio aggregation primitives ($assets merge + idle
+// balance walk). Pulled into a separate module so `web.rs` stays focused on
+// routing.
+pub mod web_portfolio;
 
 pub use server::ExecutorServer;
