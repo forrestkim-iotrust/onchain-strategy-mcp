@@ -475,6 +475,15 @@ impl ExecutorServer {
             .copied()
     }
 
+    /// v1.6 Track 6A: clone the shared `StateStore` handle so the web UI
+    /// task can serve read-only `/api/*` queries without re-opening the DB.
+    /// Returns the same `Arc<Mutex<_>>` used by the MCP resource handlers,
+    /// so a write through one path is immediately visible through the
+    /// other.
+    pub fn state_handle(&self) -> Arc<Mutex<StateStore>> {
+        self.state.clone()
+    }
+
     pub async fn evm_provider(&self) -> Result<Arc<DynProvider>, EvmError> {
         let cell = self.evm_provider.clone();
         let cfg = self.evm_config.clone();

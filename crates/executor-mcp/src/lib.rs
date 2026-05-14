@@ -29,5 +29,7 @@ pub mod server;
 pub mod tools;
 pub mod triggers;
 pub mod validation;
+// v1.6 Track 6A: local web UI HTTP server (loopback-only, observation-only).
+pub mod web;
 
 pub use server::ExecutorServer;

@@ -57,6 +57,11 @@ strategy-js = { path = "../strategy-js" }            # Plan 03-03: needed by too
 executor-evm = { path = "../executor-evm" }
 # Phase 5 Plan 05-03: policy DSL load + evaluator (alloy-FREE per D-20).
 executor-policy = { path = "../executor-policy" }
+# v1.6 Track 6A: local web UI. axum is the HTTP framework; tower-http will
+# serve static assets in Track 6B. maud (HTML templating) is deferred to
+# Track 6B as well — 6A is JSON-only.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "matched-path"] }
+tower-http = { version = "0.6", features = ["set-header"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-std", "signal", "process", "io-util", "time"] }
@@ -67,3 +72,7 @@ anyhow.workspace = true
 # per-crate to mirror Phase 1's [logging]-only workspace-deps precedent.
 tempfile = "3"
 rusqlite = { version = "0.39", features = ["bundled"] }
+# v1.6 Track 6A: HTTP client used by the web-api integration tests. We bring
+# in a minimal reqwest build (no TLS, no features beyond JSON + plain HTTP)
+# since the test loop only ever hits 127.0.0.1.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
