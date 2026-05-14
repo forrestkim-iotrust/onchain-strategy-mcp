@@ -220,7 +220,10 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let mut proc = spawn_server().await?;
     let _ = initialize(&mut proc).await?;
 
-    // resources/list → empty array
+    // resources/list → v1.11 Track B: `runtime://status` is the first
+    // (and currently only) singleton URI in the catalogue. Per-strategy and
+    // per-run resources stay in `resources/templates/list` so the catalogue
+    // doesn't blow up with one entry per row.
     send(
         &mut proc,
         json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
@@ -230,9 +233,13 @@ async fn resources_surface_matches_contract() -> Result<()> {
     let list = r["result"]["resources"]
         .as_array()
         .expect("resources array");
+    let uris: Vec<&str> = list
+        .iter()
+        .map(|t| t["uri"].as_str().unwrap_or_default())
+        .collect();
     assert!(
-        list.is_empty(),
-        "resources/list must be empty in Phase 1, got {list:?}"
+        uris.contains(&"runtime://status"),
+        "v1.11 Track B: runtime://status must be in resources/list; got {uris:?}"
     );
 
     // resources/templates/list → 3 URI templates
