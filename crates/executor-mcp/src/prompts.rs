@@ -16,7 +16,8 @@
 use std::fmt::Write as _;
 
 use executor_core::schema::prompt_args::{
-    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, WriteEvmStrategyArgs,
+    AuthorStrategyArgs, ReviewEvmStrategyArgs, SafetyReviewArgs, TuneThresholdsArgs,
+    WriteEvmStrategyArgs,
 };
 use executor_policy::LoadedPolicy;
 use executor_state::StrategySummary;
@@ -30,7 +31,10 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::errors::invalid_params;
+use crate::resources::{ViewEvm, dispatch_uri_to_json};
 use crate::server::ExecutorServer;
+use crate::validation::validate_strategy_id_format;
 
 /// Argless prompt payload. rmcp's `#[prompt]` macro requires a `Parameters<T>`
 /// even for prompts that take no input — `EmptyPromptArgs` keeps the schema
@@ -390,6 +394,362 @@ fn surface_common_pitfalls(source: &str) -> Vec<String> {
         );
     }
     findings
+}
+
+// ────────────────────────── v1.11 Track E3 — tune_thresholds ──────────────────────────
+//
+// Pull last N runs for a strategy, static-parse the source for numeric
+// threshold candidates, correlate with run history, propose raise/lower/keep.
+// Proposals are NEVER auto-applied — they're reviewed by the user.
+//
+// Heuristic design (see plan: `.planning/v1.11-SURFACE-COMPLETION.md` E3):
+//
+// - Pure scanner over the source string. No real JS parser (`include_str!`
+//   sources stay short; an n^2 scan over a typically-<5KB source is fine).
+// - Strip `// ...` and `/* ... */` regions BEFORE candidate extraction so a
+//   numeric literal inside a comment never makes it to the candidate list.
+// - Strip string literals (`"..."`, `'...'`, backticks) too — a version string
+//   like `"1.0.0"` shouldn't surface as three threshold candidates.
+// - Walk every line; require a comparison operator on the line to seed a
+//   candidate. Then scan the line for numeric literals using a hand-rolled
+//   tokenizer (no regex dependency).
+
+/// A threshold-candidate extracted by the static scanner.
+#[derive(Debug, Clone)]
+struct ThresholdCandidate {
+    /// Parsed numeric value (after `_` separator removal). Kept for
+    /// downstream consumers that want numeric comparison; the table
+    /// rendering uses `raw_value` so the source text round-trips.
+    #[allow(dead_code)]
+    value: f64,
+    raw_value: String,
+    line_number: u32,
+    column: u32,
+    raw_line_text: String,
+    /// The first comparison operator found on the line — used to decide
+    /// whether "fires often" means "consider raising" vs "consider lowering".
+    op: String,
+}
+
+/// Strip `//` line comments and `/* ... */` block comments AND string
+/// literals from `source`, replacing each removed region with spaces (one
+/// space per byte) so byte offsets / line / column positions of the
+/// remaining code stay stable. Used as a pre-pass before threshold
+/// extraction — anything inside a comment or quoted string is excluded
+/// from the candidate scan.
+fn strip_comments_and_strings(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // Block comment `/* ... */`. May span multiple lines — preserve `\n`
+        // so line numbers downstream still align.
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            out.push(b' ');
+            out.push(b' ');
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                i += 1;
+            }
+            if i + 1 < bytes.len() {
+                out.push(b' ');
+                out.push(b' ');
+                i += 2;
+            } else {
+                // Truncated block comment — pad rest and stop.
+                while i < bytes.len() {
+                    out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // Line comment `// ...` — strip to end of line, preserve the `\n`.
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+        // String literal `"..."` / `'...'` / template `` `...` ``. Preserve
+        // newlines (template strings can be multi-line); replace contents
+        // with spaces so embedded numbers don't surface.
+        if b == b'"' || b == b'\'' || b == b'`' {
+            let quote = b;
+            out.push(b' ');
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    out.push(b' ');
+                    out.push(b' ');
+                    i += 2;
+                    continue;
+                }
+                out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                i += 1;
+            }
+            if i < bytes.len() {
+                out.push(b' ');
+                i += 1;
+            }
+            continue;
+        }
+        out.push(b);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| source.to_string())
+}
+
+/// Threshold-relevant vocabulary on a line bumps the candidate up the
+/// ranking when we need to drop overflow. Match case-insensitive substring.
+const THRESHOLD_VOCAB: &[&str] = &[
+    "threshold",
+    "limit",
+    "min",
+    "max",
+    "target",
+    "slippage",
+    "apy",
+    "rate",
+    "amount",
+    "cap",
+    "floor",
+];
+
+/// Vocab that suggests a numeric is a timestamp / block height — exclude
+/// candidates whose surrounding identifier on the line contains any of these.
+const TIMESTAMP_VOCAB: &[&str] = &["ts", "time", "block", "deadline", "expiry"];
+
+/// True when `c` could continue a JS identifier.
+fn is_ident_cont(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+}
+
+/// Extract numeric-literal threshold candidates from a strategy source. The
+/// heuristic is documented inline at the call site and in the module
+/// header — see `tune_thresholds` for the exact rules.
+fn extract_threshold_candidates(source: &str) -> Vec<ThresholdCandidate> {
+    let scrubbed = strip_comments_and_strings(source);
+    let mut out: Vec<ThresholdCandidate> = Vec::new();
+
+    for (line_idx, line) in scrubbed.lines().enumerate() {
+        // Skip lines with no comparison operator. We don't try to be clever
+        // about `=` (assignment) vs `==` (comparison) — assignment-only
+        // lines have no comparison anyway.
+        let op = first_comparison_op(line);
+        let Some(op) = op else { continue };
+
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c.is_ascii_digit() || (c == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit()) {
+                // Skip if this digit is part of an identifier (`a1`, `b2`).
+                if i > 0 && is_ident_cont(bytes[i - 1]) {
+                    // Advance past the rest of the identifier.
+                    while i < bytes.len() && is_ident_cont(bytes[i]) {
+                        i += 1;
+                    }
+                    continue;
+                }
+                let start = i;
+                // Walk the numeric literal: digits / `.` / `_` / `e±N`.
+                let mut saw_dot = c == b'.';
+                let mut saw_exp = false;
+                while i < bytes.len() {
+                    let b = bytes[i];
+                    if b.is_ascii_digit() || b == b'_' {
+                        i += 1;
+                    } else if b == b'.' && !saw_dot && !saw_exp {
+                        saw_dot = true;
+                        i += 1;
+                    } else if (b == b'e' || b == b'E') && !saw_exp {
+                        saw_exp = true;
+                        i += 1;
+                        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+                            i += 1;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                let raw = &line[start..i];
+
+                // Skip hex / address-like literals: `0x...`. Our scanner
+                // doesn't enter the digit branch for `0x` (the `x` breaks
+                // the loop), so when raw is `0` and the next non-digit char
+                // is `x`, recognise that as the start of a hex literal and
+                // walk past the whole hex token.
+                if raw == "0" && i < bytes.len() && (bytes[i] == b'x' || bytes[i] == b'X') {
+                    let hex_start = i - 1;
+                    i += 1;
+                    while i < bytes.len() && bytes[i].is_ascii_hexdigit() {
+                        i += 1;
+                    }
+                    let hex_len = i - hex_start;
+                    // Skip both address-like (≥10 hex chars) AND selector-like
+                    // (`0x` + <10 hex chars). Neither is a threshold.
+                    let _ = hex_len; // both branches: skip silently.
+                    continue;
+                }
+
+                // Skip if this number is an array index: `<ident>[<number>]`.
+                // Find the previous non-space char before `start`.
+                let mut p = start;
+                while p > 0 {
+                    p -= 1;
+                    if bytes[p] == b' ' || bytes[p] == b'\t' {
+                        continue;
+                    }
+                    break;
+                }
+                if start > 0 && bytes[p] == b'[' {
+                    // Confirm there is an identifier directly before `[`.
+                    let mut q = p;
+                    while q > 0 && (bytes[q - 1] == b' ' || bytes[q - 1] == b'\t') {
+                        q -= 1;
+                    }
+                    if q > 0 && is_ident_cont(bytes[q - 1]) {
+                        continue;
+                    }
+                }
+
+                // Skip the literal `0` and `1` — too generic.
+                let parsed: Option<f64> = raw.replace('_', "").parse::<f64>().ok();
+                let Some(val) = parsed else { continue };
+                if (val - 0.0).abs() < f64::EPSILON || (val - 1.0).abs() < f64::EPSILON {
+                    continue;
+                }
+
+                // Skip timestamps-by-vocab: large integer (10+ digits) AND
+                // any identifier on the line matches TIMESTAMP_VOCAB.
+                let digit_count = raw.chars().filter(|c| c.is_ascii_digit()).count();
+                if digit_count >= 10 {
+                    let lower = line.to_ascii_lowercase();
+                    if TIMESTAMP_VOCAB.iter().any(|kw| {
+                        // Word-ish match: substring is enough for the
+                        // heuristic; precise tokenisation is overkill.
+                        lower.contains(kw)
+                    }) {
+                        continue;
+                    }
+                }
+
+                out.push(ThresholdCandidate {
+                    value: val,
+                    raw_value: raw.to_string(),
+                    line_number: (line_idx as u32) + 1,
+                    column: (start as u32) + 1,
+                    raw_line_text: line.trim().to_string(),
+                    op: op.to_string(),
+                });
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // Cap at 20. When over the cap, prefer candidates whose `raw_line_text`
+    // mentions threshold-y vocab.
+    if out.len() > 20 {
+        out.sort_by_key(|c| {
+            let lower = c.raw_line_text.to_ascii_lowercase();
+            if THRESHOLD_VOCAB.iter().any(|kw| lower.contains(kw)) {
+                0
+            } else {
+                1
+            }
+        });
+        out.truncate(20);
+    }
+    out
+}
+
+/// Return the first comparison operator we find on `line`, or `None` if the
+/// line has none. Recognises `<=`, `>=`, `==`, `!=`, `<`, `>` (in that
+/// length-priority order so `<=` isn't truncated to `<`).
+fn first_comparison_op(line: &str) -> Option<&'static str> {
+    let two = ["<=", ">=", "==", "!="];
+    let one = ["<", ">"];
+    let mut best: Option<(usize, &'static str)> = None;
+    for op in two.iter() {
+        if let Some(idx) = line.find(op) {
+            match best {
+                Some((bi, _)) if bi <= idx => {}
+                _ => best = Some((idx, *op)),
+            }
+        }
+    }
+    for op in one.iter() {
+        if let Some(idx) = line.find(op) {
+            // Skip `<=` / `>=` already matched at the same position.
+            if line.as_bytes().get(idx + 1).copied() == Some(b'=') {
+                continue;
+            }
+            match best {
+                Some((bi, _)) if bi <= idx => {}
+                _ => best = Some((idx, *op)),
+            }
+        }
+    }
+    best.map(|(_, op)| op)
+}
+
+/// Count how many runs in `runs_json` have a journal whose `decisions[]`
+/// rows or `actions[].payload_json` substrings contain `needle`. Pragmatic
+/// substring match — false positives are tolerable, false negatives are not.
+async fn count_threshold_hits(
+    state: std::sync::Arc<tokio::sync::Mutex<executor_state::StateStore>>,
+    evm: ViewEvm,
+    runs: &[serde_json::Value],
+    needle: &str,
+) -> u32 {
+    let mut hits: u32 = 0;
+    for r in runs {
+        let Some(run_id) = r.get("run_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let journal_uri = format!("journal://{run_id}");
+        let Ok(j) = dispatch_uri_to_json(journal_uri, state.clone(), evm.clone()).await else {
+            continue;
+        };
+        let mut found = false;
+        if let Some(decisions) = j.get("decisions").and_then(|v| v.as_array()) {
+            for d in decisions {
+                if let Some(detail) = d.get("detail").and_then(|v| v.as_str()) {
+                    if detail.contains(needle) {
+                        found = true;
+                        break;
+                    }
+                }
+                if let Some(payload) = d.get("payload_json").and_then(|v| v.as_str()) {
+                    if payload.contains(needle) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !found {
+            if let Some(actions) = j.get("actions").and_then(|v| v.as_array()) {
+                for a in actions {
+                    if let Some(payload) = a.get("payload_json").and_then(|v| v.as_str()) {
+                        if payload.contains(needle) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if found {
+            hits += 1;
+        }
+    }
+    hits
 }
 
 #[prompt_router(vis = "pub(crate)")]
@@ -815,6 +1175,275 @@ impl ExecutorServer {
             body,
         )])
         .with_description("One-screen status digest: System + Positions + Strategies"))
+    }
+
+    /// v1.11 Track E3: pull last N runs for a strategy, static-parse the
+    /// source for numeric thresholds, correlate with run history, and
+    /// propose raise/lower/keep. Proposals are NEVER auto-applied — they're
+    /// reviewed by the user and re-registered manually.
+    #[prompt(
+        name = "tune_thresholds",
+        description = "Threshold tuning report: static-parse strategy source + correlate with last N runs."
+    )]
+    async fn tune_thresholds(
+        &self,
+        Parameters(args): Parameters<TuneThresholdsArgs>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        // 1. Validate strategy_id format early — invalid hex → invalid_params
+        //    with a hint pointing at `strategy://list`.
+        if let Err(e) = validate_strategy_id_format(&args.strategy_id) {
+            return Err(invalid_params(format!(
+                "tune_thresholds: strategy_id is malformed: {e}. \
+                 call resource strategy://list to see active strategy ids"
+            )));
+        }
+        // Clamp lookback. Default 20, hard cap 200.
+        let lookback: u32 = args.lookback_runs.unwrap_or(20).min(200).max(1);
+
+        let state = self.state.clone();
+        let evm = ViewEvm::default();
+
+        // 2. Prefetch strategy meta. `not_found` → invalid_params with hint.
+        let strategy_uri = format!("strategy://{}", args.strategy_id);
+        let strategy_meta = match dispatch_uri_to_json(strategy_uri.clone(), state.clone(), evm.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                // `resource_not_found` (-32002) and `not_found` (-32014) both
+                // map to "no such strategy". Re-raise as invalid_params with
+                // the listing hint per the plan.
+                if e.code.0 == -32002 || e.code.0 == -32014 {
+                    return Err(invalid_params(format!(
+                        "tune_thresholds: strategy_id {} not found. \
+                         call resource strategy://list to see active strategy ids",
+                        args.strategy_id
+                    )));
+                }
+                return Err(e);
+            }
+        };
+
+        let strategy_name = strategy_meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(unknown)")
+            .to_string();
+        let strategy_version = strategy_meta
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let source = strategy_meta
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // 3. Prefetch recent run summaries.
+        let runs_uri = format!(
+            "execution://list?strategy_id={}&limit={}",
+            args.strategy_id, lookback
+        );
+        let runs_body = dispatch_uri_to_json(runs_uri, state.clone(), evm.clone())
+            .await
+            .unwrap_or_else(|_| serde_json::json!({ "runs": [], "count": 0 }));
+        let empty_runs: Vec<serde_json::Value> = Vec::new();
+        let runs = runs_body
+            .get("runs")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty_runs);
+        let actual_run_count = runs.len() as u32;
+
+        // Compute the earliest started_at + the latest one (for the report
+        // header). `started_at` is RFC3339 — we don't need to parse, just
+        // string-min / string-max (RFC3339 strings sort chronologically when
+        // they share a timezone offset, which our runtime always emits as
+        // `Z`).
+        let earliest_ts = runs
+            .iter()
+            .filter_map(|r| r.get("started_at").and_then(|v| v.as_str()))
+            .min()
+            .map(|s| s.to_string());
+        let latest_ts = runs
+            .iter()
+            .filter_map(|r| r.get("started_at").and_then(|v| v.as_str()))
+            .max()
+            .map(|s| s.to_string());
+
+        // 4. Pull records during the window — informational only for the
+        //    report; the correlation hit count is journal-based.
+        let records_uri = match &earliest_ts {
+            Some(ts) => format!(
+                "strategy://{}/records?since={}",
+                args.strategy_id,
+                // Minimal percent-encode: `:` stays, `+` would break the
+                // parser. RFC3339 timestamps don't include `+` for `Z`-suffixed
+                // wire values, so pass through as-is.
+                ts
+            ),
+            None => format!("strategy://{}/records", args.strategy_id),
+        };
+        let records_body = dispatch_uri_to_json(records_uri, state.clone(), evm.clone())
+            .await
+            .unwrap_or_else(|_| serde_json::json!({ "records": [], "count": 0 }));
+        let records_count = records_body
+            .get("count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        // 5. Static-parse source for candidates.
+        let candidates = extract_threshold_candidates(&source);
+
+        // 6. If no candidates, return the graceful missing-data response.
+        if candidates.is_empty() {
+            let body = format!(
+                "# Threshold tuning report — `{name}` [v{ver}]\n\n\
+                 Lookback: last {requested} runs requested ({actual} found).\n\n\
+                 ## confidence: missing\n\n\
+                 No numeric-literal thresholds were found in this strategy's source.\n\n\
+                 `tune_thresholds` expects comparison expressions whose right-hand side is a \
+                 literal number — e.g. `apy > 0.05`, `balance >= 100_000`, `price < 2_000`. \
+                 This strategy doesn't appear to have any (or it gets all thresholds from \
+                 strategy args / config rather than from inline literals).\n\n\
+                 ## Suggested next step\n\n\
+                 - If thresholds are passed via strategy args, inspect the args distribution \
+                   from `execution://list?strategy_id={id}` and the per-run journals (`journal://{{run_id}}`).\n\
+                 - If the strategy is pure-read (`noop`), thresholds may not be the right \
+                   tuning surface — re-evaluate the decision rule itself.\n\n\
+                 ## Caveats\n\n\
+                 - Static parse is heuristic; it scans for literal numbers in comparison \
+                   expressions only.\n\
+                 - Comments and string literals are excluded from candidate scanning.\n",
+                name = strategy_name,
+                ver = strategy_version,
+                requested = lookback,
+                actual = actual_run_count,
+                id = args.strategy_id,
+            );
+            return Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+                PromptMessageRole::User,
+                body,
+            )])
+            .with_description("Threshold tuning (no candidates found)"));
+        }
+
+        // 7. Correlate each candidate with run history.
+        let half = (actual_run_count / 2).max(1);
+        let mut table_rows = String::new();
+        let mut fires_often = 0u32;
+        let mut never_fires = 0u32;
+        let mut occasional = 0u32;
+        for c in &candidates {
+            let trigger_count = count_threshold_hits(
+                state.clone(),
+                evm.clone(),
+                runs,
+                &c.raw_value,
+            )
+            .await;
+            let (proposal, rationale) = if actual_run_count == 0 {
+                (
+                    "keep".to_string(),
+                    "no runs in window — not enough signal to adjust".to_string(),
+                )
+            } else if trigger_count == 0 {
+                never_fires += 1;
+                (
+                    "keep".to_string(),
+                    "never triggered in window; not enough signal to adjust".to_string(),
+                )
+            } else if trigger_count >= half {
+                fires_often += 1;
+                // For `>` / `>=`: gate fires often => threshold too permissive
+                // (the comparison passes too often) => suggest *raising* the
+                // threshold. For `<` / `<=`: gate fires often => threshold too
+                // restrictive => suggest *lowering*. `==` / `!=`: unclear
+                // direction, leave as "review".
+                match c.op.as_str() {
+                    ">" | ">=" => (
+                        format!("raise (currently `{}`)", c.raw_value),
+                        "gate fires often, may be too permissive".to_string(),
+                    ),
+                    "<" | "<=" => (
+                        format!("lower (currently `{}`)", c.raw_value),
+                        "gate fires often, may be too restrictive".to_string(),
+                    ),
+                    _ => (
+                        "review".to_string(),
+                        "gate fires often; direction depends on operator semantics".to_string(),
+                    ),
+                }
+            } else {
+                occasional += 1;
+                (
+                    "keep".to_string(),
+                    format!("gate fires occasionally ({trigger_count}/{actual_run_count})"),
+                )
+            };
+            let snippet: String = c.raw_line_text.chars().take(80).collect();
+            let _ = writeln!(
+                table_rows,
+                "| `{raw}` | line {line}, col {col} | {hits} / {total} | {prop} | {rat} ({op}) — `{snip}` |",
+                raw = c.raw_value,
+                line = c.line_number,
+                col = c.column,
+                hits = trigger_count,
+                total = actual_run_count,
+                prop = proposal,
+                rat = rationale,
+                op = c.op,
+                snip = snippet,
+            );
+        }
+
+        let window_line = match (&earliest_ts, &latest_ts) {
+            (Some(e), Some(l)) => format!("Lookback: last {} runs ({} to {})", actual_run_count, e, l),
+            _ => format!("Lookback: last {} runs requested ({} found)", lookback, actual_run_count),
+        };
+
+        let body = format!(
+            "# Threshold tuning report — `{name}` [v{ver}]\n\n\
+             {window}\n\n\
+             Records in window: {recs}\n\n\
+             | Current value | Location | Trigger count | Proposal | Rationale |\n\
+             |---|---|---|---|---|\n\
+             {rows}\n\
+             ## Summary\n\n\
+             Found {n_cand} threshold candidate(s) — {fires} fire often (>= half the window), \
+             {never} never fired, {occ} fire occasionally. \
+             {adjustable_note}\n\n\
+             ## Caveats\n\n\
+             - Static parse is heuristic; some literals may be array sizes, magic constants, \
+               or other non-threshold numbers mis-identified as thresholds.\n\
+             - Proposals are NEVER auto-applied. Review and re-register the strategy yourself \
+               if you decide to change a value.\n\
+             - Correlation via journal substring match — false positives possible if the same \
+               numeric literal appears in unrelated payloads (e.g. as part of an amount or \
+               address fragment).\n\
+             - Operator direction matters: `>` / `>=` firing often suggests *raise*; `<` / `<=` \
+               firing often suggests *lower*. `==` / `!=` are flagged for manual review.\n",
+            name = strategy_name,
+            ver = strategy_version,
+            window = window_line,
+            recs = records_count,
+            rows = table_rows,
+            n_cand = candidates.len(),
+            fires = fires_often,
+            never = never_fires,
+            occ = occasional,
+            adjustable_note = if fires_often > 0 {
+                "Some candidates look adjustable — review the `raise` / `lower` rows above."
+            } else if never_fires == candidates.len() as u32 {
+                "None look adjustable from this window — every candidate has zero hits."
+            } else {
+                "No urgent adjustments — most candidates fire occasionally or not at all."
+            },
+        );
+
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+            PromptMessageRole::User,
+            body,
+        )])
+        .with_description("Threshold tuning report"))
     }
 }
 
