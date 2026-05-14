@@ -19,12 +19,14 @@
     inflight: false,
     expanded: new Set(), // expand-state keys (survive re-renders)
     historyFilters: { strategy_id: "", status: "", since: "" },
-    // cache of last data so partial-failure re-renders don't blank tabs
-    cache: { portfolio: null, strategies: null, policy: null, triggers: null, runs: null },
-    // Anti-flicker: per-target stable JSON hashes of the last RENDERED payload.
-    // Tab renderers (and the detail-page async populator) skip the DOM rebuild
-    // when the incoming payload's hash matches the last one painted.
-    lastHash: { detail: null },
+    // cache of last data so partial-failure re-renders don't blank tabs.
+    // `detail` is keyed by strategy_id — populated by pollOnce when on the
+    // strategy-detail page so renderStrategyDetail can read synchronously.
+    cache: { portfolio: null, strategies: null, policy: null, triggers: null, runs: null, detail: {} },
+    // Anti-flicker: stable JSON hash of the LAST RENDERED tab payload.
+    // pollOnce compares the fresh payload against this — identical ⇒ skip
+    // the full renderTab() rebuild so the DOM doesn't blink on no-op ticks.
+    lastTabHash: "",
   };
 
   /// Cheap stable hash of an arbitrary JSON value — used to skip no-op
@@ -714,35 +716,29 @@
     ]));
     root.appendChild(back);
 
-    // Pull detailed shape async; for the initial paint show what we already
-    // have from /api/strategies. The poller will refresh.
+    // Read the per-strategy detail SYNCHRONOUSLY from cache (populated by
+    // pollOnce). This avoids the renderTab/getJson race that left the
+    // page stuck on "loading…" when a fresh poll overlapped the async
+    // resolution — and removes a layer of DOM churn from the 5s tick.
+    const d = S.cache.detail && S.cache.detail[id];
     const detailSec = el("div", { class: "section" });
     detailSec.appendChild(el("div", { class: "section-head", text: "detail" }));
     const detailBody = el("div", { class: "section-body" });
-    detailBody.appendChild(el("div", { class: "dim", text: "loading…" }));
     detailSec.appendChild(detailBody);
     root.appendChild(detailSec);
 
-    // Per-strategy triggers section — populated below after /api/triggers
-    // is pulled. Kept outside the async callback so the section header
-    // appears immediately and the poll can append rows incrementally.
+    // Per-strategy triggers section, read sync from S.cache.triggers.
     const triggersSec = el("div", { class: "section" });
     triggersSec.appendChild(el("div", { class: "section-head", text: "triggers" }));
     const triggersBody = el("div", { class: "section-body" });
-    triggersBody.appendChild(el("div", { class: "dim", text: "loading…" }));
     triggersSec.appendChild(triggersBody);
     root.appendChild(triggersSec);
-
-    // Cached triggers list ships in S.cache.triggers when the user has
-    // visited the Triggers tab once; otherwise we fetch on demand.
-    const fillTriggers = (triggersData) => {
-      const all = (triggersData && triggersData.triggers) || [];
-      const mine = all.filter((t) => t.strategy_id === id);
-      triggersBody.innerHTML = "";
-      if (mine.length === 0) {
-        triggersBody.appendChild(el("div", { class: "dim", text: "no triggers attached" }));
-        return;
-      }
+    const all = (S.cache.triggers && S.cache.triggers.triggers) || [];
+    const mine = all.filter((t) => t.strategy_id === id);
+    if (mine.length === 0) {
+      triggersBody.appendChild(el("div", { class: "dim",
+        text: S.cache.triggers ? "no triggers attached" : "loading…" }));
+    } else {
       const tbl = el("table", { class: "compact" });
       tbl.appendChild(el("thead", null, [el("tr", null, [
         el("th", { text: "kind" }),
@@ -765,22 +761,18 @@
       });
       tbl.appendChild(tb);
       triggersBody.appendChild(tbl);
-    };
-    if (S.cache.triggers) fillTriggers(S.cache.triggers);
-    else getJson("/api/triggers").then(fillTriggers, () => {
-      triggersBody.innerHTML = "";
-      triggersBody.appendChild(el("div", { class: "dim", text: "trigger fetch failed" }));
-    });
+    }
 
-    getJson("/api/strategy/" + encodeURIComponent(id)).then((d) => {
-      // Anti-flicker: skip the rebuild when the payload hash matches the
-      // last successful render. The 5s poll mostly produces identical
-      // bodies; rebuilding the DOM every tick is what made the page
-      // blink visibly. Identical hash ⇒ DOM already correct ⇒ no-op.
-      const h = jsonHash(d);
-      if (h === S.lastHash.detail) return;
-      S.lastHash.detail = h;
-      detailBody.innerHTML = "";
+    // Cache miss on first navigation — render placeholder; pollOnce will
+    // populate the cache on its next tick and the resulting render will
+    // pick up the data.
+    if (!d) {
+      detailBody.appendChild(el("div", { class: "dim", text: "loading…" }));
+      return root;
+    }
+
+    // Direct sync render of the detail payload.
+    ((d) => {
       const chain = portfolio && portfolio.chain_id;
       // meta block — `policy_alignment` is lifted out and rendered as a
       // dedicated row below so the verdict + copy-report button are the
@@ -875,10 +867,7 @@
         sec.appendChild(head); sec.appendChild(body2);
         root.appendChild(sec);
       }
-    }).catch((e) => {
-      detailBody.innerHTML = "";
-      detailBody.appendChild(el("div", { class: "dim", text: "failed to load: " + e.message }));
-    });
+    })(d);
 
     return root;
   }
@@ -1237,13 +1226,19 @@
         getJson("/api/strategies").catch((e) => ({ _err: e })),
       ];
       // Tab-specific extras. The strategy DETAIL view (strategies tab with
-      // a sub.strategy) also wants live triggers so the per-strategy
-      // trigger table refreshes alongside the meta block.
+      // a sub.strategy) also wants live triggers AND the per-strategy
+      // detail payload (records, view_output, policy_alignment, etc.) —
+      // we cache that under S.cache.detail[id] so renderStrategyDetail
+      // can read it synchronously, avoiding the render/fetch race that
+      // dropped the View output on every other poll.
       if (S.tab === "policy")   tasks.push(getJson("/api/policy").catch((e) => ({ _err: e })));
       if (S.tab === "triggers") tasks.push(getJson("/api/triggers").catch((e) => ({ _err: e })));
       if (S.tab === "history")  tasks.push(getJson(buildRunsPath()).catch((e) => ({ _err: e })));
-      if (S.tab === "strategies" && S.sub && S.sub.strategy) {
+      const onDetail = S.tab === "strategies" && S.sub && S.sub.strategy;
+      if (onDetail) {
         tasks.push(getJson("/api/triggers").catch((e) => ({ _err: e })));
+        tasks.push(getJson("/api/strategy/" + encodeURIComponent(S.sub.strategy))
+          .catch((e) => ({ _err: e })));
       }
 
       const results = await Promise.all(tasks);
@@ -1253,8 +1248,13 @@
       if (S.tab === "policy"   && tail[0] && !tail[0]._err) S.cache.policy   = tail[0];
       if (S.tab === "triggers" && tail[0] && !tail[0]._err) S.cache.triggers = tail[0];
       if (S.tab === "history"  && tail[0] && !tail[0]._err) S.cache.runs     = tail[0];
-      if (S.tab === "strategies" && S.sub && S.sub.strategy
-          && tail[0] && !tail[0]._err) S.cache.triggers = tail[0];
+      if (onDetail) {
+        if (tail[0] && !tail[0]._err) S.cache.triggers = tail[0];
+        if (tail[1] && !tail[1]._err) {
+          S.cache.detail = S.cache.detail || {};
+          S.cache.detail[S.sub.strategy] = tail[1];
+        }
+      }
 
       // Consider the cycle successful if at least portfolio came through;
       // others are best-effort and the previous cache stays valid.
@@ -1265,9 +1265,47 @@
         S.lastErr = results[0]._err;
       }
       updateHeader(S.cache.portfolio);
-      renderTab();
+      // Anti-flicker: hash the inputs the current tab consumes; if the
+      // payload is unchanged since the last render, skip the rebuild
+      // entirely. The DOM stays exactly as it was — no flash.
+      const fingerprint = jsonHash(currentTabFingerprint());
+      if (fingerprint !== S.lastTabHash) {
+        S.lastTabHash = fingerprint;
+        renderTab();
+      }
     } finally {
       S.inflight = false;
+    }
+  }
+
+  // Compute the subset of S.cache + S.sub that the current tab actually
+  // renders against. Two polls producing identical fingerprints can
+  // safely skip the renderTab() rebuild — same data, same DOM.
+  function currentTabFingerprint() {
+    switch (S.tab) {
+      case "portfolio":
+        return { t: "portfolio", p: S.cache.portfolio };
+      case "strategies": {
+        const sid = S.sub && S.sub.strategy;
+        if (sid) {
+          return {
+            t: "detail", sid,
+            d: S.cache.detail && S.cache.detail[sid],
+            tr: S.cache.triggers,
+            // burner / chain context only — full portfolio churns too much
+            chain: S.cache.portfolio && S.cache.portfolio.chain_id,
+          };
+        }
+        return { t: "strategies", s: S.cache.strategies, p: S.cache.portfolio };
+      }
+      case "policy":
+        return { t: "policy", p: S.cache.policy };
+      case "triggers":
+        return { t: "triggers", g: S.cache.triggers, s: S.cache.strategies };
+      case "history":
+        return { t: "history", r: S.cache.runs, s: S.cache.strategies };
+      default:
+        return { t: S.tab };
     }
   }
 
