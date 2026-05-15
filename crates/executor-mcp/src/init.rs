@@ -42,6 +42,10 @@ pub struct InitOptions {
     pub force: bool,
     /// Skip interactive prompts (used in CI / smoke tests).
     pub non_interactive: bool,
+    /// Store burner key in the OS keychain instead of `.local/.burner.env`.
+    /// Off by default — the env-var path works on every platform without
+    /// libsecret/gnome-keyring/etc. and matches what most users do anyway.
+    pub keychain: bool,
 }
 
 pub fn run(opts: InitOptions) -> Result<()> {
@@ -64,14 +68,33 @@ pub fn run(opts: InitOptions) -> Result<()> {
     // 2. Generate fresh burner key.
     let (hex_key, address) = generate_burner();
 
-    // 3. Store in OS keychain.
-    store_in_keychain(KEY_ID, &hex_key).map_err(|err| {
-        anyhow::anyhow!(
-            "failed to store private key in OS keychain: {err}\n\
-             on Linux this usually means libsecret / gnome-keyring is missing — try:\n  \
-             sudo apt-get install -y libsecret-1-0 gnome-keyring"
-        )
-    })?;
+    // 3. Persist the key. Default: write `.local/.burner.env` (env-var
+    //    backend; works on every platform). Opt-in `--keychain`: store in
+    //    OS keychain (requires libsecret on Linux). The signer backend
+    //    config.toml writes points at `private_key_env = "EXECUTOR_PRIVATE_KEY"`
+    //    in both cases — the env-var path is just direct, the keychain
+    //    path was the v1.0..v1.13 default that needed libsecret.
+    let burner_env_path = local_dir.join(".burner.env");
+    if opts.keychain {
+        store_in_keychain(KEY_ID, &hex_key).map_err(|err| {
+            anyhow::anyhow!(
+                "failed to store private key in OS keychain: {err}\n\
+                 on Linux this usually means libsecret / gnome-keyring is missing — try:\n  \
+                 sudo apt-get install -y libsecret-1-0 gnome-keyring\n\
+                 (or re-run init without --keychain to skip the keychain entirely)"
+            )
+        })?;
+    } else {
+        let env_contents = format!("export EXECUTOR_PRIVATE_KEY={hex_key}\n");
+        write_file(&burner_env_path, &env_contents)?;
+        // Restrict to owner-read-only — best effort, non-fatal on platforms
+        // where chmod is a no-op (Windows).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&burner_env_path, fs::Permissions::from_mode(0o600));
+        }
+    }
     // Wipe the key from this process's memory ASAP.
     drop(hex_key);
 
@@ -93,7 +116,12 @@ pub fn run(opts: InitOptions) -> Result<()> {
     println!("onchain-strategy-mcp initialised.");
     println!();
     println!("  burner address : {address}");
-    println!("  keychain entry : service={KEYCHAIN_SERVICE}, account={KEY_ID}");
+    if opts.keychain {
+        println!("  keychain entry : service={KEYCHAIN_SERVICE}, account={KEY_ID}");
+    } else {
+        println!("  burner key     : {} (env-var backend)", burner_env_path.display());
+        println!("                   load with: source {}", burner_env_path.display());
+    }
     println!("  config         : {}", config_path.display());
     println!("  policy         : {}", policy_path.display());
     println!();

@@ -32,7 +32,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Scaffold `./.local/` and store a fresh burner key in the OS keychain.
+    /// Scaffold `./.local/` and a fresh burner key. Default writes the key
+    /// to `./.local/.burner.env` (env-var backend); pass `--keychain` to
+    /// store in the OS keychain instead (requires libsecret on Linux).
     Init {
         /// Overwrite an existing `./.local/config.toml`.
         #[arg(long)]
@@ -40,6 +42,9 @@ enum Command {
         /// Skip interactive prompts (CI / smoke tests).
         #[arg(long)]
         non_interactive: bool,
+        /// Store burner in the OS keychain instead of `.local/.burner.env`.
+        #[arg(long)]
+        keychain: bool,
     },
     /// Run the stdio MCP server (default behaviour when no subcommand
     /// is given).
@@ -67,9 +72,11 @@ fn main() -> Result<()> {
         Some(Command::Init {
             force,
             non_interactive,
+            keychain,
         }) => init::run(init::InitOptions {
             force,
             non_interactive,
+            keychain,
         }),
         Some(Command::DeployDelegate {
             rpc_url,
