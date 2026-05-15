@@ -158,6 +158,7 @@ fn build_router(app: AppState) -> Router {
         .route("/api/strategies", get(api_strategies))
         .route("/api/strategy/{id}", get(api_strategy))
         .route("/api/policy", get(api_policy))
+        .route("/api/policy/history", get(api_policy_history))
         .route("/api/triggers", get(api_triggers))
         .route("/api/runs", get(api_runs))
         .route("/api/run/{id}", get(api_run))
@@ -388,6 +389,18 @@ async fn api_policy(State(app): State<AppState>) -> Response {
         "history": history.unwrap_or_else(|e| json!({ "error": e.message.to_string() })),
     });
     json_response(Ok(body))
+}
+
+/// `/api/policy/history` — `policy://history` with query forwarding. Used
+/// by the v1.13 P4 diff lens to fetch `?include_body=true&limit=2` on
+/// demand without altering the cheap default `/api/policy` envelope.
+async fn api_policy_history(State(app): State<AppState>, RawQuery(q): RawQuery) -> Response {
+    let uri = match q.as_deref() {
+        Some(qs) if !qs.is_empty() => format!("policy://history?{qs}"),
+        _ => "policy://history".to_string(),
+    };
+    let body = dispatch_or_error(&app, uri).await;
+    json_response(body)
 }
 
 /// `/api/triggers` — `trigger://list`.
