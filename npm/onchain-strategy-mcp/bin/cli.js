@@ -20,7 +20,7 @@ Usage:
 Aliases:
   osmcp <command>                           Short alias for onchain-strategy-mcp.
 
-`init` auto-registers the MCP with Claude Code when `claude` is on PATH.
+'init' auto-registers the MCP with Claude Code when 'claude' is on PATH.
 If you need to register manually later:
   claude mcp add osmcp -- npx onchain-strategy-mcp serve
 
