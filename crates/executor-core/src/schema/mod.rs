@@ -5,6 +5,7 @@
 
 pub mod action;
 pub mod execution;
+pub mod honesty;
 pub mod policy;
 pub mod prompt_args;
 pub mod strategy;
