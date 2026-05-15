@@ -2040,49 +2040,92 @@ async fn read_policy_history(
     query: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
-    // Parse `?limit=N`. Default 20, cap 200.
+    // Parse `?limit=N&include_body=true|false`.
+    //   - `limit` — default 20, cap 200 (v1.5 Track 1A).
+    //   - `include_body` — default false; when true each revision entry gains
+    //     a parsed `body` field (v1.13 Track P3, backs the Policy-tab diff
+    //     lens). Default response is byte-identical to pre-v1.13.
     let mut limit: u64 = 20;
+    let mut include_body = false;
     if !query.is_empty() {
         for pair in query.split('&') {
             let (k, v) = match pair.split_once('=') {
                 Some(p) => p,
                 None => continue,
             };
-            if k == "limit" {
-                match v.parse::<u64>() {
+            match k {
+                "limit" => match v.parse::<u64>() {
                     Ok(n) if n > 0 => limit = n.min(200),
                     _ => {
                         return Err(crate::errors::invalid_params(
                             "policy://history?limit must be a positive integer between 1 and 200",
                         ));
                     }
+                },
+                "include_body" => {
+                    include_body = v == "true" || v == "1";
                 }
+                _ => {}
             }
         }
     }
 
-    let summaries = tokio::task::spawn_blocking(move || {
-        let store = state.blocking_lock();
-        store.list_policy_revisions(limit)
-    })
-    .await
-    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-    .map_err(map_state_error)?;
-
-    let revisions: Vec<serde_json::Value> = summaries
-        .iter()
-        .map(|s| {
-            json!({
-                "revision_id": s.revision_id,
-                "set_at": s.set_at,
-                "rationale": s.rationale,
-                "is_active": s.is_active,
-            })
+    let revisions: Vec<serde_json::Value> = if include_body {
+        let rows = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_policy_revisions_with_body(limit)
         })
-        .collect();
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        rows.iter()
+            .map(|r| {
+                // Parse `body_json` per-row. A corrupt row should NOT fail
+                // the whole listing — emit `body: null` + a per-row
+                // `body_parse_error` so the frontend can degrade gracefully.
+                match serde_json::from_str::<serde_json::Value>(&r.body_json) {
+                    Ok(parsed) => json!({
+                        "revision_id": r.revision_id,
+                        "set_at": r.set_at,
+                        "rationale": r.rationale,
+                        "is_active": r.is_active,
+                        "body": parsed,
+                    }),
+                    Err(e) => json!({
+                        "revision_id": r.revision_id,
+                        "set_at": r.set_at,
+                        "rationale": r.rationale,
+                        "is_active": r.is_active,
+                        "body": serde_json::Value::Null,
+                        "body_parse_error": e.to_string(),
+                    }),
+                }
+            })
+            .collect()
+    } else {
+        let summaries = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_policy_revisions(limit)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        summaries
+            .iter()
+            .map(|s| {
+                json!({
+                    "revision_id": s.revision_id,
+                    "set_at": s.set_at,
+                    "rationale": s.rationale,
+                    "is_active": s.is_active,
+                })
+            })
+            .collect()
+    };
+
     let body = json!({
         "revisions": revisions,
-        "count": summaries.len(),
+        "count": revisions.len(),
     });
     let body_text = serde_json::to_string(&body)
         .map_err(|e| storage_error(format!("policy://history encode: {e}")))?;

@@ -576,4 +576,14 @@ impl StateStore {
     ) -> Result<Vec<policy_revisions::PolicyRevisionSummary>, StateError> {
         policy_revisions::list_revisions(&self.conn, limit)
     }
+
+    /// List policy revisions newest-first **with** `body_json` payload —
+    /// backs the opt-in `policy://history?include_body=true` query
+    /// (v1.13 Track P3). `limit` is hard-capped at 200.
+    pub fn list_policy_revisions_with_body(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<policy_revisions::PolicyRevisionWithBody>, StateError> {
+        policy_revisions::list_revisions_with_body(&self.conn, limit)
+    }
 }
