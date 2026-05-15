@@ -346,6 +346,16 @@
   }
   /* Wide wordmarks (>4:1 aspect) — auto-cap by max-width so they shrink in height */
   .logo-cell.wide img { height: auto; max-height: 28px; }
+  /* Text-wordmark fallback for brands without a usable SVG/PNG logo */
+  .logo-cell .text-mark {
+    font-weight: 600;
+    font-size: 1.1rem;
+    letter-spacing: -.015em;
+    color: var(--fg);
+    opacity: .58;
+    transition: opacity .15s;
+  }
+  .logo-cell:hover .text-mark { opacity: 1; }
 
   /* ─── HOW IT WORKS ─── */
   .steps {
@@ -595,7 +605,7 @@
       <div class="logo-cell"><img src="./logos/compound.png" alt="Compound" /></div>
       <div class="logo-cell"><img src="./logos/morpho.svg" alt="Morpho" /></div>
       <div class="logo-cell"><img src="./logos/uniswap.svg" alt="Uniswap" /></div>
-      <div class="logo-cell"><img src="./logos/curve.png" alt="Curve" /></div>
+      <div class="logo-cell"><span class="text-mark">Curve</span></div>
       <div class="logo-cell"><img src="./logos/pendle.svg" alt="Pendle" /></div>
 
       <div class="logo-cell"><img src="./logos/hyperliquid.png" alt="Hyperliquid" /></div>
