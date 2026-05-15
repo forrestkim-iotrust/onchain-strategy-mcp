@@ -143,6 +143,156 @@
     },
   };
 
+  // ─── v1.12: strategy view health classification ────────────
+  // The view envelope can be in one of four states. Encoded as a
+  // single string so renderers can key off a data-health attribute,
+  // transitions can be detected by string comparison, and the
+  // portfolio summary banner can count by bucket.
+  //
+  //   healthy → view.confidence === "full"
+  //   stale   → view.confidence === "stale"   AND view.staleness present
+  //   failed  → confidence ∈ {"partial"} AND no data + no staleness
+  //   missing → confidence === "missing"      (view function not declared)
+  //
+  // We're defensive: a partial envelope WITH a data block we'll
+  // still treat as failed (the renderer hides the dotted-line bar
+  // when data is present anyway), and a missing envelope keeps the
+  // current near-silent rendering (no banner pollution for an
+  // intentionally-absent view function).
+  function computeHealth(view) {
+    if (!view || typeof view !== "object") return "missing";
+    const c = view.confidence;
+    if (!c || c === "full") return "healthy";
+    if (c === "stale") return "stale";
+    if (c === "missing") return "missing";
+    // confidence === "partial" (or anything else non-full) — runtime
+    // failure path. The B2 stale-cache branch upgrades to "stale"
+    // when a prior good cache exists; absence of staleness here
+    // means we have nothing to show.
+    return "failed";
+  }
+
+  // Age in seconds from an ISO timestamp; null if unparseable.
+  function ageSeconds(iso) {
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (!isFinite(t)) return null;
+    const s = (Date.now() - t) / 1000;
+    return s < 0 ? 0 : s;
+  }
+
+  // Compact glanceable age for the STALE badge. Spec:
+  //   <60s → "just now", <60min → "Nm", <24h → "Nh", else "1d+".
+  function staleAgeLabel(secs) {
+    if (secs == null) return "stale";
+    if (secs < 60)        return "just now";
+    if (secs < 3600)      return Math.round(secs / 60) + "m";
+    if (secs < 86400)     return Math.round(secs / 3600) + "h";
+    return "1d+";
+  }
+
+  // Build the small top-right badge that flags a non-healthy card.
+  // Healthy/missing return null (no badge — healthy is the default
+  // state, missing is already handled by the existing partial badge).
+  function healthBadge(state, view) {
+    if (state === "stale") {
+      const st = view && view.staleness ? view.staleness : {};
+      const secs = ageSeconds(st.succeeded_at) ||
+                   (typeof st.age_seconds === "number" ? st.age_seconds : null);
+      const label = "STALE · " + staleAgeLabel(secs);
+      const tip = [
+        st.succeeded_at ? "last good: " + st.succeeded_at : null,
+        st.current_error ? "current error: " + st.current_error : null,
+        "showing cached values — refresh is failing",
+      ].filter(Boolean).join("\n");
+      return el("span", {
+        class: "health-badge",
+        "data-state": "stale",
+        title: tip,
+        text: label,
+      });
+    }
+    if (state === "failed") {
+      const reason = (view && view.reason) || "view function failed";
+      return el("span", {
+        class: "health-badge",
+        "data-state": "failed",
+        title: reason + "\n(your balances are not affected — this is a read-side error)",
+        text: "VIEW UNAVAILABLE",
+      });
+    }
+    return null;
+  }
+
+  // ─── v1.12: transition toast queue ─────────────────────────
+  // We toast on healthy→stale and stale→healthy transitions only,
+  // and only AFTER the first successful poll (so a page-open with
+  // a pre-existing stale strategy doesn't trigger a stale toast).
+  // Per-id debounce keeps a flapping strategy from spamming.
+  const TOAST_DEBOUNCE_MS = 60_000;
+  const TOAST_DISMISS_MS  = 8_000;
+  const TOAST_MAX_VISIBLE = 3;
+  // strategy_id → ts of last toast we emitted for that id (any kind).
+  const _lastToastTs = {};
+  // strategy_id → health-state from the previous poll. `null` means
+  // "first poll not yet observed" — used to suppress initial toasts.
+  let _prevHealthMap = null;
+
+  function showToast(title, msg, level) {
+    const stack = document.getElementById("toast-stack");
+    if (!stack) return;
+    // Cap visible toasts. Drop oldest first.
+    while (stack.children.length >= TOAST_MAX_VISIBLE) {
+      stack.removeChild(stack.firstChild);
+    }
+    const t = el("div", {
+      class: "toast " + (level === "info" ? "info" : "warn"),
+      onclick: () => { if (t.parentNode) t.parentNode.removeChild(t); },
+    }, [
+      el("div", { class: "toast-title", text: title }),
+      msg ? el("div", { class: "toast-msg", text: msg }) : null,
+    ]);
+    stack.appendChild(t);
+    setTimeout(() => {
+      if (t.parentNode) t.parentNode.removeChild(t);
+    }, TOAST_DISMISS_MS);
+  }
+
+  // Inspect the current portfolio payload, compare per-strategy health
+  // to the prior poll, and fire toasts on transitions. First call
+  // (when _prevHealthMap is null) silently seeds the map without
+  // toasting — we only announce CHANGES during the session.
+  function detectHealthTransitions(portfolio) {
+    if (!portfolio || !Array.isArray(portfolio.strategies)) return;
+    const next = {};
+    const now = Date.now();
+    portfolio.strategies.forEach((s) => {
+      const h = computeHealth(s.view_output);
+      next[s.id] = h;
+      if (_prevHealthMap == null) return; // initial seed — suppress
+      const prev = _prevHealthMap[s.id];
+      if (!prev || prev === h) return;
+      const lastTs = _lastToastTs[s.id] || 0;
+      if (now - lastTs < TOAST_DEBOUNCE_MS) return;
+      const name = s.name || fmt.shortHex(s.id, 6, 4);
+      if (prev === "healthy" && h === "stale") {
+        const succeededAt = s.view_output && s.view_output.staleness &&
+                            s.view_output.staleness.succeeded_at;
+        const rel = succeededAt ? fmt.rel(succeededAt) : "recent values";
+        showToast(
+          name + " · view refresh failed",
+          "showing last-good values from " + rel,
+          "warn",
+        );
+        _lastToastTs[s.id] = now;
+      } else if (prev === "stale" && h === "healthy") {
+        showToast(name + " · view recovered", "live values restored", "info");
+        _lastToastTs[s.id] = now;
+      }
+    });
+    _prevHealthMap = next;
+  }
+
   // ─── Heuristics ────────────────────────────────────────────
   const HEX_RE_ADDR = /^0x[0-9a-fA-F]{40}$/;
   const HEX_RE_TX   = /^0x[0-9a-fA-F]{64}$/;
@@ -579,6 +729,11 @@
     const root = el("div");
     const chain = data && data.chain_id;
 
+    // v1.12 health summary banner — only when at least one strategy
+    // is non-healthy. Quiet otherwise.
+    const banner = renderHealthSummaryBanner(data);
+    if (banner) root.appendChild(banner);
+
     // Header KPIs
     const total = aggregateAssetsTotal(data);
     const kpis = el("div", { class: "kpis" }, [
@@ -689,33 +844,120 @@
     return wrap;
   }
 
+  // v1.12: emit the portfolio-level health summary banner — or null
+  // when every strategy is healthy/missing (don't be noisy). Reads
+  // the backend-supplied `_health_summary` if B4 has stamped one;
+  // otherwise computes from `data.strategies[].view_output`.
+  function renderHealthSummaryBanner(data) {
+    if (!data) return null;
+    let summary = data._health_summary;
+    if (!summary || typeof summary !== "object") {
+      summary = { healthy: 0, stale: 0, partial: 0, missing: 0, failed: 0 };
+      (data.strategies || []).forEach((s) => {
+        const h = computeHealth(s.view_output);
+        if (h === "healthy") summary.healthy++;
+        else if (h === "stale") summary.stale++;
+        else if (h === "missing") summary.missing++;
+        else if (h === "failed") summary.failed++;
+      });
+    }
+    const stale = Number(summary.stale || 0);
+    // "partial" is the older bucket name; treat as failed for display.
+    const failed = Number(summary.failed || 0) + Number(summary.partial || 0);
+    if (stale === 0 && failed === 0) return null;
+
+    const parts = [];
+    if (stale > 0) {
+      parts.push(stale + " strategy" + (stale === 1 ? "" : "s") +
+                 " stale (view refresh failing)");
+    }
+    if (failed > 0) {
+      parts.push(failed + " failed");
+    }
+    return el("div", { class: "health-summary" }, [
+      el("span", { class: "icon mono", text: "⚠" }),
+      el("span", { text: parts.join(" · ") }),
+      el("span", { class: "dim", text: "— balances shown are last-good cached values" }),
+    ]);
+  }
+
   function strategyCard(s, chain) {
     const view = s.view_output || {};
     const data = view.data || view;
     const conf = view.confidence;
+    const health = computeHealth(view);
     const obs = {};
     if (data && typeof data === "object" && !Array.isArray(data)) {
       Object.keys(data).forEach((k) => { if (k !== "$assets") obs[k] = data[k]; });
     }
-    const title = el("div", null, [
+    // Title row. The legacy `confidence` badge is preserved for the
+    // "missing" case (view function not declared) so existing users
+    // don't lose that signal. The new `healthBadge` takes over for
+    // stale/failed and gets a distinctly different visual.
+    const titleChildren = [
       el("span", { text: s.name || s.id }),
-      " ",
-      conf && conf !== "full" ? el("span", { class: "badge partial", text: conf }) : null,
-    ]);
+    ];
+    if (conf === "missing") {
+      titleChildren.push(document.createTextNode(" "));
+      titleChildren.push(el("span", { class: "badge partial", text: "missing" }));
+    }
+    const hb = healthBadge(health, view);
+    if (hb) titleChildren.push(hb);
+    const title = el("div", null, titleChildren);
     const head = el("div", { class: "section-head" }, [
       title,
       el("span", { class: "mono dim", text: fmt.shortHex(s.id, 6, 4), title: s.id }),
     ]);
     const body = el("div", { class: "section-body" });
-    if (view.reason) {
-      body.appendChild(el("div", { class: "dim", text: view.reason }));
-    }
-    if (Object.keys(obs).length === 0) {
-      body.appendChild(el("div", { class: "empty", text: "no observations" }));
+
+    if (health === "failed") {
+      // The cardinal-rule rendering: a "view unavailable" failed card
+      // must look NOTHING like "balance went to zero". The strategy
+      // name and version stay prominent in the head, the body shows
+      // a single dashed-amber bar that says "view unavailable" with
+      // a remediation hint — no zero-balance grid, no blank space.
+      body.appendChild(el("div", { class: "view-unavailable" }, [
+        el("span", { text: "view unavailable" }),
+        el("span", { class: "hint",
+          text: "— run a fresh evm_view against this strategy to repro" }),
+      ]));
+      if (view.reason) {
+        body.appendChild(el("div", { class: "dim small",
+          text: "reason: " + view.reason, title: view.reason }));
+      }
     } else {
-      body.appendChild(renderObjectAsKV(obs, chain));
+      if (view.reason) {
+        body.appendChild(el("div", { class: "dim", text: view.reason }));
+      }
+      if (Object.keys(obs).length === 0) {
+        body.appendChild(el("div", { class: "empty", text: "no observations" }));
+      } else {
+        body.appendChild(renderObjectAsKV(obs, chain));
+      }
+      // Stale footnote — values above are last-good cache. We render
+      // this AFTER the observations so the user sees the values
+      // first, then the "as of …" annotation.
+      if (health === "stale") {
+        const st = view.staleness || {};
+        const succeededAt = st.succeeded_at;
+        const rel = succeededAt ? fmt.rel(succeededAt) : "an earlier poll";
+        const foot = el("div", { class: "stale-foot" }, [
+          el("span", { text: "as of " + rel + " · refresh failing" }),
+        ]);
+        if (st.current_error) {
+          foot.appendChild(el("span", {
+            class: "err",
+            title: st.current_error,
+            text: "(" + (st.current_error.length > 80
+              ? st.current_error.slice(0, 80) + "…"
+              : st.current_error) + ")",
+          }));
+        }
+        body.appendChild(foot);
+      }
     }
-    const card = el("div", { class: "section" });
+
+    const card = el("div", { class: "section", "data-health": health });
     card.appendChild(head);
     card.appendChild(body);
     return card;
@@ -973,16 +1215,18 @@
       if (data && typeof data === "object" && !Array.isArray(data)) {
         Object.keys(data).forEach((k) => { if (k !== "$assets") obs[k] = data[k]; });
       }
+      const detailHealth = computeHealth(view);
       // Render the View-output section when either there's data to show OR
       // the view failed (so the copy-report button is reachable even on a
       // bare confidence:"partial"/"missing" envelope with null data).
       const viewFailed = view.confidence && view.confidence !== "full";
       if (Object.keys(obs).length > 0 || viewFailed) {
-        root.appendChild(section("View output", (function () {
+        const sec = section("View output", (function () {
           const b = el("div", { class: "section-body" });
           if (viewFailed) {
+            const hb = healthBadge(detailHealth, view);
             const headRow = el("div", { class: "row gap" }, [
-              el("span", { class: "badge partial", text: view.confidence }),
+              hb || el("span", { class: "badge partial", text: view.confidence }),
               reportBtn("view_failure", {
                 strategy_id:  d.strategy_id || id,
                 name:         d.name,
@@ -994,10 +1238,42 @@
             ]);
             b.appendChild(headRow);
           }
+          if (detailHealth === "failed" && Object.keys(obs).length === 0) {
+            // No cached data — show the same dashed-amber bar as the
+            // portfolio card so the affordance is identical across
+            // surfaces. The strategy NAME is already prominent in
+            // the parent detail section title.
+            b.appendChild(el("div", { class: "view-unavailable" }, [
+              el("span", { text: "view unavailable" }),
+              el("span", { class: "hint",
+                text: "— run a fresh evm_view against this strategy to repro" }),
+            ]));
+          }
           if (view.reason) b.appendChild(el("div", { class: "dim", text: view.reason }));
           if (Object.keys(obs).length > 0) b.appendChild(renderObjectAsKV(obs, chain));
+          if (detailHealth === "stale") {
+            const st = view.staleness || {};
+            const rel = st.succeeded_at ? fmt.rel(st.succeeded_at) : "an earlier poll";
+            const foot = el("div", { class: "stale-foot" }, [
+              el("span", { text: "as of " + rel + " · refresh failing" }),
+            ]);
+            if (st.current_error) {
+              foot.appendChild(el("span", {
+                class: "err",
+                title: st.current_error,
+                text: "(" + (st.current_error.length > 120
+                  ? st.current_error.slice(0, 120) + "…"
+                  : st.current_error) + ")",
+              }));
+            }
+            b.appendChild(foot);
+          }
           return b;
-        })()));
+        })());
+        // Stamp the same data-health on the detail section so its
+        // border/background match the portfolio-card treatment.
+        sec.setAttribute("data-health", detailHealth);
+        root.appendChild(sec);
       }
       // records — open by default now that we have a focused table view.
       // The generic renderValue spilled every column (including the
@@ -1419,7 +1695,14 @@
       }
 
       const results = await Promise.all(tasks);
-      if (!results[0]._err) S.cache.portfolio  = results[0];
+      if (!results[0]._err) {
+        S.cache.portfolio  = results[0];
+        // v1.12: detect health transitions on the freshly-fetched
+        // portfolio. First successful poll seeds the prior-state map
+        // silently (no toast); subsequent polls fire toasts on
+        // healthy⇄stale transitions, debounced per-strategy.
+        detectHealthTransitions(results[0]);
+      }
       if (!results[1]._err) S.cache.strategies = results[1];
       const tail = results.slice(2);
       if (S.tab === "policy"   && tail[0] && !tail[0]._err) S.cache.policy   = tail[0];
