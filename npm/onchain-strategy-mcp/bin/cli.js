@@ -20,7 +20,8 @@ Usage:
 Aliases:
   osmcp <command>                           Short alias for onchain-strategy-mcp.
 
-After 'init' you can register the MCP with Claude Code:
+`init` auto-registers the MCP with Claude Code when `claude` is on PATH.
+If you need to register manually later:
   claude mcp add osmcp -- npx onchain-strategy-mcp serve
 
 Docs: https://github.com/forrestkim-iotrust/onchain-strategy-mcp
@@ -47,7 +48,38 @@ async function runBinary(args) {
   if (result.error) {
     fail(`Failed to execute ${bin}: ${result.error.message}`);
   }
-  process.exit(result.status ?? 0);
+  return result.status ?? 0;
+}
+
+// One-shot Claude Code MCP registration: idempotent, silent on success.
+// Bails quietly if `claude` isn't on PATH (e.g. user installs in a
+// non-Claude-Code environment); returns true if registration ran.
+function tryRegisterWithClaudeCode() {
+  const probe = spawnSync('claude', ['--version'], { stdio: 'ignore' });
+  if (probe.error || probe.status !== 0) {
+    process.stdout.write(
+      "\n(Skipping `claude mcp add`: the `claude` CLI is not on PATH.\n" +
+      " Install Claude Code, then run:\n" +
+      "   claude mcp add osmcp -- npx onchain-strategy-mcp serve\n" +
+      " to register the MCP server.)\n"
+    );
+    return false;
+  }
+  process.stdout.write("\n→ Registering osmcp with Claude Code...\n");
+  const add = spawnSync(
+    'claude',
+    ['mcp', 'add', 'osmcp', '--', 'npx', '-y', 'onchain-strategy-mcp', 'serve'],
+    { stdio: 'inherit' }
+  );
+  if (add.status === 0) {
+    process.stdout.write("✓ osmcp registered with Claude Code. Run `claude` to start.\n");
+    return true;
+  }
+  process.stderr.write(
+    "(`claude mcp add` exited non-zero — it may already be registered. " +
+    "Verify with `claude mcp list`.)\n"
+  );
+  return false;
 }
 
 async function main(argv) {
@@ -70,15 +102,20 @@ async function main(argv) {
   }
 
   if (first === 'init') {
-    await runBinary(['init', ...args.slice(1)]);
-    return;
+    const code = await runBinary(['init', ...args.slice(1)]);
+    if (code === 0) {
+      // v1.13.1: fold the previously-separate `claude mcp add` step into
+      // init so first-time users get a one-command setup.
+      tryRegisterWithClaudeCode();
+    }
+    process.exit(code);
   }
 
   if (first === 'serve') {
     // The Rust binary defaults to serve mode with no args; it reads
     // ./.local/config.toml relative to cwd.
-    await runBinary([]);
-    return;
+    const code = await runBinary([]);
+    process.exit(code);
   }
 
   // Unknown subcommand — show usage and exit non-zero.

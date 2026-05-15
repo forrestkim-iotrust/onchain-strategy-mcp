@@ -1,6 +1,6 @@
 {
   "name": "onchain-strategy-mcp",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "description": "Onchain Strategy MCP — npx wrapper for the executor-mcp binary. One-line install for Claude Code.",
   "license": "Apache-2.0",
   "repository": {
