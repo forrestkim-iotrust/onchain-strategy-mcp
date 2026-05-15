@@ -1589,19 +1589,24 @@
         kv.appendChild(vCell);
       }
 
-      // view auto-render
+      // view auto-render — v1.13 P5: route through the generic
+      // `renderObject` so each top-level key of `data` (including
+      // `$assets`, which becomes an object-array table) becomes its
+      // own panel. The honesty-envelope chrome (confidence/reason/
+      // stale-foot/view-unavailable) is preserved around it.
       const view = d.view_output || {};
-      const data = view.data || view;
-      const obs = {};
-      if (data && typeof data === "object" && !Array.isArray(data)) {
-        Object.keys(data).forEach((k) => { if (k !== "$assets") obs[k] = data[k]; });
-      }
+      const rawData = (view && Object.prototype.hasOwnProperty.call(view, "data"))
+        ? view.data
+        : view;
+      const dataIsObject = rawData && typeof rawData === "object" && !Array.isArray(rawData);
+      const hasRenderableData = (rawData !== undefined && rawData !== null) &&
+        (!dataIsObject || Object.keys(rawData).some((k) => !k.startsWith("_")));
       const detailHealth = computeHealth(view);
       // Render the View-output section when either there's data to show OR
       // the view failed (so the copy-report button is reachable even on a
       // bare confidence:"partial"/"missing" envelope with null data).
       const viewFailed = view.confidence && view.confidence !== "full";
-      if (Object.keys(obs).length > 0 || viewFailed) {
+      if (hasRenderableData || viewFailed) {
         const sec = section("View output", (function () {
           const b = el("div", { class: "section-body" });
           if (viewFailed) {
@@ -1619,7 +1624,7 @@
             ]);
             b.appendChild(headRow);
           }
-          if (detailHealth === "failed" && Object.keys(obs).length === 0) {
+          if (detailHealth === "failed" && !hasRenderableData) {
             // No cached data — show the same dashed-amber bar as the
             // portfolio card so the affordance is identical across
             // surfaces. The strategy NAME is already prominent in
@@ -1631,7 +1636,16 @@
             ]));
           }
           if (view.reason) b.appendChild(el("div", { class: "dim", text: view.reason }));
-          if (Object.keys(obs).length > 0) b.appendChild(renderObjectAsKV(obs, chain));
+          if (hasRenderableData) {
+            // Backend doesn't ship `_field_kinds` on view bodies today
+            // (P2 emits them on policy responses only); renderObject's
+            // default field-name conventions (address/chain_id/*_wei/
+            // *_at/hash/selector) already cover the $assets shape. If
+            // the backend later attaches `_field_kinds` to the view
+            // envelope, threading it here keeps the override path open.
+            const opts = view._field_kinds ? { field_kinds: view._field_kinds } : {};
+            b.appendChild(window.osmcpRenderObject(rawData, opts));
+          }
           if (detailHealth === "stale") {
             const st = view.staleness || {};
             const rel = st.succeeded_at ? fmt.rel(st.succeeded_at) : "an earlier poll";
