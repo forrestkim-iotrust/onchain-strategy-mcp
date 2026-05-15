@@ -228,6 +228,21 @@ CREATE TABLE IF NOT EXISTS policies (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_policies_one_active
     ON policies(is_active) WHERE is_active = 1;
+
+-- v1.12 Track B1: per-strategy last-known-good cache for `strategy://{id}/view`.
+-- When a view function fails (eval / revert / RPC blip), the resource handler
+-- consults this cache to serve the previous successful body wrapped with a
+-- `confidence: "stale"` envelope instead of `data: null + confidence: "partial"`
+-- — UI no longer shows blank balances on a transient view error and users no
+-- longer mistake a view failure for asset loss. One row per `strategy_id`;
+-- upsert on every successful view evaluation. `body_json` is the FULL wrapped
+-- envelope body (data + confidence + logs) so the stale serve path can swap
+-- `confidence`/`reason`/`remediation` and reuse `data` verbatim.
+CREATE TABLE IF NOT EXISTS strategy_view_cache (
+    strategy_id  TEXT PRIMARY KEY,
+    body_json    TEXT NOT NULL,
+    succeeded_at TEXT NOT NULL
+);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {

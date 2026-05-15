@@ -19,6 +19,7 @@ pub mod schema;
 pub mod store;
 pub mod strategies;
 pub mod triggers;
+pub mod view_cache;
 
 pub use error::StateError;
 pub use executions::ExecutionActionEntry;
@@ -36,3 +37,4 @@ pub use strategies::{
     hash_source,
 };
 pub use triggers::TriggerRegisterOutcome;
+pub use view_cache::ViewCacheRow;

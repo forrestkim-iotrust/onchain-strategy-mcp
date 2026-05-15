@@ -444,6 +444,12 @@ balance fallback. Pass `dry_run: true` to validate without persisting (returns t
         let state = self.state.clone();
         let deleted_at = tokio::task::spawn_blocking(move || {
             let mut store = state.blocking_lock();
+            // v1.12 Track B2: drop the last-known-good view cache row alongside
+            // the soft-delete. Idempotent + best-effort — a cache-delete error
+            // never blocks the user-visible soft-delete. Soft-deleted rows
+            // shouldn't be queried via `strategy://{id}/view` anyway, but the
+            // row is harmless dead weight otherwise.
+            let _ = store.delete_view_cache(&id);
             store.soft_delete_strategy(&id)
         })
         .await

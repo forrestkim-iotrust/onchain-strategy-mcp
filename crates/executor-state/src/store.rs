@@ -12,7 +12,7 @@
 
 use crate::{
     error::StateError, executions, policy_revisions, records_capture, runs, schema, strategies,
-    triggers,
+    triggers, view_cache,
 };
 use executor_core::schema::trigger::{
     RegisterTriggerInput, Trigger, TriggerEvent, TriggerListFilter, TriggerSummary,
@@ -575,5 +575,36 @@ impl StateStore {
         limit: u64,
     ) -> Result<Vec<policy_revisions::PolicyRevisionSummary>, StateError> {
         policy_revisions::list_revisions(&self.conn, limit)
+    }
+
+    // ---- v1.12 Track B1 — `strategy://{id}/view` last-known-good cache ----
+
+    /// Insert-or-overwrite the cached view body for `strategy_id`.
+    /// Re-stamps `succeeded_at` to "now" on every call so the row's age is
+    /// the age of the latest successful view evaluation. Cache write failure
+    /// is the caller's problem to swallow — a successful view response must
+    /// not be blocked by a cache write hiccup (see `read_strategy_view`).
+    pub fn upsert_view_cache(
+        &mut self,
+        strategy_id: &str,
+        body_json: &str,
+    ) -> Result<(), StateError> {
+        view_cache::upsert(&self.conn, strategy_id, body_json)
+    }
+
+    /// Read the cached view body for `strategy_id`, if any.
+    pub fn get_view_cache(
+        &self,
+        strategy_id: &str,
+    ) -> Result<Option<view_cache::ViewCacheRow>, StateError> {
+        view_cache::get(&self.conn, strategy_id)
+    }
+
+    /// Delete the cached view body for `strategy_id`. Idempotent — returns
+    /// `true` if a row was removed, `false` if nothing was cached. Called
+    /// from `strategy_delete` so soft-deleted strategies don't keep stale
+    /// rows around (the row is otherwise harmless, but cleanliness is free).
+    pub fn delete_view_cache(&mut self, strategy_id: &str) -> Result<bool, StateError> {
+        view_cache::delete(&self.conn, strategy_id)
     }
 }

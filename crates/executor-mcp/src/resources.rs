@@ -2150,8 +2150,9 @@ async fn read_strategy_view(
     //    v1.8: records are pulled by `strategy_lineage_id`, NOT `strategy_id`,
     //    so captures survive view/records-spec re-registrations.
     let id_for_blocking = id.clone();
+    let state_for_lookup = state.clone();
     let lookup = tokio::task::spawn_blocking(move || -> Result<_, StateError> {
-        let store = state.blocking_lock();
+        let store = state_for_lookup.blocking_lock();
         let s = store.get_strategy_by_id(&id_for_blocking)?;
         let records = match &s {
             Some(row) => store.list_strategy_records_for_lineage(&row.lineage_id, None, 500)?,
@@ -2326,17 +2327,117 @@ async fn read_strategy_view(
             });
             let txt = serde_json::to_string(&body)
                 .map_err(|e| storage_error(format!("serialize view ok: {e}")))?;
+
+            // v1.12 Track B2: cache the full wrapped body so a subsequent
+            // view failure can serve last-known-good instead of `data: null`.
+            // Caching the WRAPPED body (not just `data`) lets the stale serve
+            // path reuse `data` verbatim by swapping confidence/reason fields
+            // and appending a `staleness` block. Cache write failure must NOT
+            // fail a successful view — log + continue (honesty over noise).
+            let sid_for_cache = id.clone();
+            let body_for_cache = txt.clone();
+            let state_for_cache = state.clone();
+            let cache_result = tokio::task::spawn_blocking(move || {
+                state_for_cache
+                    .blocking_lock()
+                    .upsert_view_cache(&sid_for_cache, &body_for_cache)
+            })
+            .await;
+            match cache_result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        strategy_id = %id,
+                        error = %e,
+                        "view cache upsert failed (non-fatal — successful view returned)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        strategy_id = %id,
+                        error = %e,
+                        "view cache upsert spawn_blocking join failed (non-fatal)"
+                    );
+                }
+            }
+
             Ok(ReadResourceResult::new(vec![
                 ResourceContents::text(txt, uri).with_mime_type("application/json"),
             ]))
         }
         Err(e) => {
-            // Honesty: report partial / unavailable rather than a 500. Agents
-            // can inspect `reason` and act (re-register, fix view source, etc.).
+            // v1.12 Track B2: consult last-known-good cache before falling
+            // back to `confidence: "partial"`. If we have a prior successful
+            // body, serve it with a `stale` envelope + `staleness` block so
+            // the UI keeps showing real balances and agents see the current
+            // failure reason next to the previous-success timestamp.
+            let current_error = format!("view function failed: {e}");
+
+            let sid_for_get = id.clone();
+            let state_for_get = state.clone();
+            let cache_lookup = tokio::task::spawn_blocking(move || {
+                state_for_get.blocking_lock().get_view_cache(&sid_for_get)
+            })
+            .await
+            .map_err(|err| storage_error(format!("spawn_blocking join: {err}")))?;
+
+            if let Ok(Some(row)) = &cache_lookup {
+                // Try to parse the cached wrapped body. Parse failure means
+                // somebody wrote junk into the row out-of-band (shouldn't
+                // happen via the typed façade) — log and fall through to
+                // the cache-miss path below.
+                match serde_json::from_str::<serde_json::Value>(&row.body_json) {
+                    Ok(cached_body) => {
+                        let cached_data =
+                            cached_body.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        let age_seconds = compute_age_seconds(&row.succeeded_at);
+                        let stale_body = json!({
+                            "data": cached_data,
+                            "confidence": "stale",
+                            "reason": format!(
+                                "showing last successful values from {} (~{})",
+                                row.succeeded_at,
+                                humanize_age(age_seconds),
+                            ),
+                            "remediation": "the strategy's view function is currently failing — \
+                                see staleness.current_error and re-inspect `strategy://{id}/view` \
+                                once the underlying issue is resolved",
+                            "staleness": {
+                                "succeeded_at": row.succeeded_at,
+                                "age_seconds": age_seconds,
+                                "current_error": current_error.clone(),
+                            },
+                        });
+                        let txt = serde_json::to_string(&stale_body).map_err(|err| {
+                            storage_error(format!("serialize view stale wrap: {err}"))
+                        })?;
+                        return Ok(ReadResourceResult::new(vec![
+                            ResourceContents::text(txt, uri).with_mime_type("application/json"),
+                        ]));
+                    }
+                    Err(parse_err) => {
+                        tracing::warn!(
+                            strategy_id = %id,
+                            error = %parse_err,
+                            "view cache row body_json parse failed — falling back to partial"
+                        );
+                    }
+                }
+            } else if let Err(state_err) = &cache_lookup {
+                // Read failure on the cache should also degrade gracefully.
+                tracing::warn!(
+                    strategy_id = %id,
+                    error = %state_err,
+                    "view cache get failed — falling back to partial"
+                );
+            }
+
+            // No usable cache: emit the original `partial` envelope unchanged.
+            // This is the genuinely "we have nothing to show" path.
             let body = json!({
                 "data": serde_json::Value::Null,
                 "confidence": "partial",
-                "reason": format!("view function failed: {e}"),
+                "reason": current_error,
                 "remediation": "inspect `strategy://{id}` for the view source and try `evm_view` with a minimal repro",
             });
             let txt = serde_json::to_string(&body)
@@ -2345,6 +2446,37 @@ async fn read_strategy_view(
                 ResourceContents::text(txt, uri).with_mime_type("application/json"),
             ]))
         }
+    }
+}
+
+/// v1.12 Track B2 helper: integer-second age between an RFC3339 timestamp
+/// and now. Saturates to 0 on parse failure or backward clock skew so the
+/// stale envelope never carries a nonsensical negative age.
+fn compute_age_seconds(succeeded_at: &str) -> u64 {
+    match chrono::DateTime::parse_from_rfc3339(succeeded_at) {
+        Ok(then) => {
+            let now = chrono::Utc::now();
+            let delta = now.signed_duration_since(then.with_timezone(&chrono::Utc));
+            // num_seconds() is i64; clamp negatives + overflow to 0 / u64::MAX.
+            let secs = delta.num_seconds();
+            if secs < 0 { 0 } else { secs as u64 }
+        }
+        Err(_) => 0,
+    }
+}
+
+/// v1.12 Track B2 helper: short human-readable age string for the stale
+/// `reason` line. Kept intentionally crude — the precise number lives in
+/// `staleness.age_seconds` for programmatic use.
+fn humanize_age(age_seconds: u64) -> String {
+    if age_seconds < 60 {
+        format!("{age_seconds}s ago")
+    } else if age_seconds < 3_600 {
+        format!("{}m ago", age_seconds / 60)
+    } else if age_seconds < 86_400 {
+        format!("{}h ago", age_seconds / 3_600)
+    } else {
+        format!("{}d ago", age_seconds / 86_400)
     }
 }
 
