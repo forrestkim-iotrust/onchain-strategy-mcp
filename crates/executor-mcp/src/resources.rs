@@ -2615,10 +2615,36 @@ async fn read_portfolio(
     //    that lived in `web::AppState`; MCP polling is rare enough that
     //    re-running views per call is fine and keeps semantics identical
     //    between transports.
+    //
+    //    v1.12 Track B4 — scope isolation. Each strategy's view body is
+    //    classified by its `confidence` field (+ shape of `data.$assets`)
+    //    into one of five health buckets:
+    //
+    //      Healthy → `full`, contributes to totals.
+    //      Stale   → `stale`, last-known-good in `data`; STILL contributes.
+    //      Partial → `partial` AND data is a non-null object; whatever
+    //                `$assets` is present contributes.
+    //      Missing → `missing` (no view function); contributes nothing
+    //                (idle balance walk handles this strategy's wallet
+    //                naturally — there is nothing strategy-specific to add).
+    //      Failed  → `partial` AND data is null/empty; contributes nothing
+    //                because we genuinely don't have a number. The
+    //                `view_output` is still surfaced under
+    //                `strategies[].view_output` so the dashboard can show
+    //                the error reason + remediation hint.
+    //
+    //    The Partial-vs-Failed distinction is "is `data` a non-null object?"
+    //    — both arrive on the wire as `confidence: "partial"` today; the
+    //    shape of `data` is what tells us whether there's anything to
+    //    aggregate. We never collapse healthy + stale strategies to zero
+    //    just because a sibling failed.
     let mut strategy_payloads = Vec::with_capacity(summaries.len());
     let mut sid_view_pairs: Vec<(String, serde_json::Value)> =
         Vec::with_capacity(summaries.len());
     let mut contracts_blobs: Vec<serde_json::Value> = Vec::with_capacity(summaries.len());
+    let mut health_counts = StrategyHealthCounts::default();
+    let mut failed_strategy_labels: Vec<String> = Vec::new();
+    let mut stale_strategy_labels: Vec<String> = Vec::new();
     for s in &summaries {
         let id = match s.get("id").and_then(serde_json::Value::as_str) {
             Some(i) => i.to_string(),
@@ -2654,12 +2680,44 @@ async fn read_portfolio(
         {
             contracts_blobs.push(ct.clone());
         }
-        sid_view_pairs.push((id.clone(), view.clone()));
-        strategy_payloads.push(json!({
+        let health = classify_strategy_health(&view);
+        // Failed strategies must NOT contribute to the assets total even
+        // when their `view_output.data` happens to be a non-null shape that
+        // would otherwise parse — the classifier already guards that, but
+        // we double-belt by only feeding non-Failed entries into the
+        // aggregator. Missing has nothing to feed.
+        match health {
+            StrategyHealth::Healthy | StrategyHealth::Stale | StrategyHealth::Partial => {
+                sid_view_pairs.push((id.clone(), view.clone()));
+            }
+            StrategyHealth::Missing | StrategyHealth::Failed => {}
+        }
+        let label = if name.is_empty() { id.clone() } else { name.clone() };
+        match health {
+            StrategyHealth::Healthy => health_counts.healthy += 1,
+            StrategyHealth::Stale => {
+                health_counts.stale += 1;
+                stale_strategy_labels.push(label.clone());
+            }
+            StrategyHealth::Partial => health_counts.partial += 1,
+            StrategyHealth::Missing => health_counts.missing += 1,
+            StrategyHealth::Failed => {
+                health_counts.failed += 1;
+                failed_strategy_labels.push(label.clone());
+            }
+        }
+        let mut payload = json!({
             "id": id,
             "name": name,
             "view_output": view,
-        }));
+        });
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "_health".to_string(),
+                serde_json::Value::String(health.as_str().to_string()),
+            );
+        }
+        strategy_payloads.push(payload);
     }
 
     // 3. Idle balance walk (Track 6C primitives). Provider, evm_config,
@@ -2723,26 +2781,104 @@ async fn read_portfolio(
         "assets": assets,
         "strategies": strategy_payloads,
         "_balance_walk_status": status_str,
+        "_health_summary": health_counts.to_json(),
     });
 
-    // 7. v1.4 honesty contract envelope (DESIGN §3). 0 strategies → still
-    //    `full` (legitimately empty). truncated/rpc_error → `partial`. All
-    //    other states → `full`.
-    let body = match final_status {
-        web_portfolio::BalanceWalkStatus::Truncated => json!({
+    // 7. v1.4 honesty contract envelope (DESIGN §3) — v1.12 Track B4 layers
+    //    strategy-health honesty on top of the existing balance-walk honesty.
+    //    Precedence (worst wins):
+    //
+    //      * any Failed strategy   → confidence: "partial" (some strategy
+    //                                data unreliable); reason lists the
+    //                                failed strategies + balance-walk reason
+    //                                if also degraded.
+    //      * any Stale strategy   → confidence: "stale"; reason mentions
+    //                                the stale count.
+    //      * balance walk degraded → confidence: "partial" with the existing
+    //                                truncated/rpc_error reason.
+    //      * all healthy (or
+    //        legitimately empty)   → confidence: "full".
+    //
+    //    All-missing or all-failed/missing collapses to "missing" so callers
+    //    can't mistake a wholly-blind aggregate for an honest empty wallet.
+    let walk_degraded = matches!(
+        final_status,
+        web_portfolio::BalanceWalkStatus::Truncated | web_portfolio::BalanceWalkStatus::RpcError
+    );
+    let only_blind_strategies = !summaries.is_empty()
+        && health_counts.healthy == 0
+        && health_counts.stale == 0
+        && health_counts.partial == 0;
+    let body = if only_blind_strategies {
+        json!({
+            "data": data,
+            "confidence": "missing",
+            "reason": format!(
+                "no strategy view data available ({} failed, {} missing view function)",
+                health_counts.failed, health_counts.missing
+            ),
+            "remediation": "register at least one strategy with a working `view` function (see docs://strategy-bundle) or wait for an existing strategy's view to succeed",
+        })
+    } else if health_counts.failed > 0 {
+        let mut reason = format!("{} strategy view{} failed", health_counts.failed, if health_counts.failed == 1 { "" } else { "s" });
+        if !failed_strategy_labels.is_empty() {
+            reason.push_str(" (");
+            reason.push_str(&failed_strategy_labels.join(", "));
+            reason.push(')');
+        }
+        if health_counts.stale > 0 {
+            reason.push_str(&format!(", {} stale", health_counts.stale));
+        }
+        if walk_degraded {
+            reason.push_str(&format!("; balance walk: {}", final_status.as_str()));
+        }
+        reason.push_str(" — failed strategies excluded from totals; stale/healthy contribute normally");
+        json!({
             "data": data,
             "confidence": "partial",
-            "reason": "balance walk hit MAX_TOTAL_ASSETS cap — response truncated",
-            "remediation": "narrow `contracts_touched` scope on noisy strategies or split positions across multiple views",
-        }),
-        web_portfolio::BalanceWalkStatus::RpcError => json!({
+            "reason": reason,
+            "remediation": "open `strategy://{id}/view` for each failed entry in `strategies[]` to inspect the error and decide whether to re-register or fix the `view` function",
+        })
+    } else if health_counts.stale > 0 {
+        let mut reason = format!(
+            "{} stale strategy view{} — returning last-known-good values",
+            health_counts.stale,
+            if health_counts.stale == 1 { "" } else { "s" }
+        );
+        if !stale_strategy_labels.is_empty() {
+            reason.push_str(" (");
+            reason.push_str(&stale_strategy_labels.join(", "));
+            reason.push(')');
+        }
+        if walk_degraded {
+            reason.push_str(&format!("; balance walk: {}", final_status.as_str()));
+        }
+        json!({
             "data": data,
-            "confidence": "partial",
-            "reason": "idle balance walk encountered an RPC error — some idle rows may be missing",
-            "remediation": "verify `[evm].rpc_url` is reachable; re-read this resource once the node is healthy",
-        }),
-        web_portfolio::BalanceWalkStatus::Ok | web_portfolio::BalanceWalkStatus::NoProvider => {
-            json!({ "data": data, "confidence": "full" })
+            "confidence": "stale",
+            "reason": reason,
+            "remediation": "trigger a fresh run for each stale strategy (strategy_run) to refresh the view cache; the values shown are the most recent successful evaluations",
+        })
+    } else {
+        // No failed/stale strategies. Honesty downgrades for balance-walk
+        // issues are unchanged from v1.11.
+        match final_status {
+            web_portfolio::BalanceWalkStatus::Truncated => json!({
+                "data": data,
+                "confidence": "partial",
+                "reason": "balance walk hit MAX_TOTAL_ASSETS cap — response truncated",
+                "remediation": "narrow `contracts_touched` scope on noisy strategies or split positions across multiple views",
+            }),
+            web_portfolio::BalanceWalkStatus::RpcError => json!({
+                "data": data,
+                "confidence": "partial",
+                "reason": "idle balance walk encountered an RPC error — some idle rows may be missing",
+                "remediation": "verify `[evm].rpc_url` is reachable; re-read this resource once the node is healthy",
+            }),
+            web_portfolio::BalanceWalkStatus::Ok
+            | web_portfolio::BalanceWalkStatus::NoProvider => {
+                json!({ "data": data, "confidence": "full" })
+            }
         }
     };
 
@@ -2751,6 +2887,173 @@ async fn read_portfolio(
     Ok(ReadResourceResult::new(vec![
         ResourceContents::text(txt, uri).with_mime_type("application/json"),
     ]))
+}
+
+// ─── v1.12 Track B4 — per-strategy view health classification ───
+
+/// Per-strategy health bucket derived from the `strategy://{id}/view` body.
+/// See the DESIGN §3 honesty contract + the v1.12 stale variant
+/// (`executor_core::schema::honesty`). This is a runtime-only refinement of
+/// the wire-level confidence string: the `Partial` vs `Failed` distinction
+/// is recovered from the shape of `data` since both currently arrive on the
+/// wire as `confidence: "partial"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StrategyHealth {
+    /// `confidence == "full"`. View ran successfully. Contributes to totals.
+    Healthy,
+    /// `confidence == "stale"`. Cached last-known-good. STILL contributes to
+    /// totals — those are the best truth we have for this strategy.
+    Stale,
+    /// `confidence == "partial"` AND `data` is a non-null object. Contributes
+    /// whatever `$assets` happens to be present.
+    Partial,
+    /// `confidence == "missing"`. No view function registered. Nothing to
+    /// aggregate (the idle balance walk will still capture wallet balances).
+    Missing,
+    /// `confidence == "partial"` AND `data` is null / not an object. The view
+    /// genuinely failed and we have no usable values. Excluded from totals.
+    Failed,
+}
+
+impl StrategyHealth {
+    fn as_str(self) -> &'static str {
+        match self {
+            StrategyHealth::Healthy => "healthy",
+            StrategyHealth::Stale => "stale",
+            StrategyHealth::Partial => "partial",
+            StrategyHealth::Missing => "missing",
+            StrategyHealth::Failed => "failed",
+        }
+    }
+}
+
+/// Inspect a `strategy://{id}/view` body and return its health bucket.
+///
+/// Decision tree (wire `confidence` first, then `data` shape for the
+/// "partial" ambiguity):
+///
+/// | confidence | data shape                                | → bucket |
+/// |------------|-------------------------------------------|----------|
+/// | "full"     | any                                       | Healthy  |
+/// | "stale"    | any                                       | Stale    |
+/// | "missing"  | any                                       | Missing  |
+/// | "partial"  | object (non-null)                         | Partial  |
+/// | "partial"  | null / non-object / absent                | Failed   |
+/// | unknown    | any                                       | Failed   |
+fn classify_strategy_health(view_body: &serde_json::Value) -> StrategyHealth {
+    let confidence = view_body
+        .get("confidence")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    match confidence {
+        "full" => StrategyHealth::Healthy,
+        "stale" => StrategyHealth::Stale,
+        "missing" => StrategyHealth::Missing,
+        "partial" => {
+            // Partial-vs-Failed: does `data` carry anything we could
+            // aggregate? An object (even one without `$assets`) means
+            // the view returned a body — that's Partial. A null,
+            // non-object, or absent `data` means the view threw before
+            // producing any output — that's Failed.
+            if view_body
+                .get("data")
+                .and_then(serde_json::Value::as_object)
+                .is_some()
+            {
+                StrategyHealth::Partial
+            } else {
+                StrategyHealth::Failed
+            }
+        }
+        _ => StrategyHealth::Failed,
+    }
+}
+
+/// Per-portfolio aggregate of strategy-health counts. Emitted under
+/// `data._health_summary` so dashboards / agents can render a one-glance
+/// honesty banner without rewalking `strategies[]`.
+#[derive(Debug, Default, Clone, Copy)]
+struct StrategyHealthCounts {
+    healthy: u64,
+    stale: u64,
+    partial: u64,
+    missing: u64,
+    failed: u64,
+}
+
+impl StrategyHealthCounts {
+    fn to_json(self) -> serde_json::Value {
+        json!({
+            "healthy": self.healthy,
+            "stale": self.stale,
+            "partial": self.partial,
+            "missing": self.missing,
+            "failed": self.failed,
+        })
+    }
+}
+
+#[cfg(test)]
+mod strategy_health_tests {
+    use super::*;
+
+    #[test]
+    fn full_confidence_classifies_healthy() {
+        let body = json!({ "data": { "$assets": [] }, "confidence": "full" });
+        assert_eq!(classify_strategy_health(&body), StrategyHealth::Healthy);
+    }
+
+    #[test]
+    fn stale_confidence_classifies_stale_regardless_of_data_shape() {
+        let body = json!({
+            "data": { "$assets": [{ "asset": "USDC", "amount": "1.0" }] },
+            "confidence": "stale",
+            "staleness": { "age_seconds": 42 }
+        });
+        assert_eq!(classify_strategy_health(&body), StrategyHealth::Stale);
+    }
+
+    #[test]
+    fn missing_confidence_classifies_missing() {
+        let body = json!({ "data": null, "confidence": "missing" });
+        assert_eq!(classify_strategy_health(&body), StrategyHealth::Missing);
+    }
+
+    #[test]
+    fn partial_with_object_data_classifies_partial() {
+        let body = json!({
+            "data": { "$assets": [], "principal": "10" },
+            "confidence": "partial",
+            "reason": "rpc blip on one of three calls"
+        });
+        assert_eq!(classify_strategy_health(&body), StrategyHealth::Partial);
+    }
+
+    #[test]
+    fn partial_with_null_data_classifies_failed() {
+        let body = json!({
+            "data": null,
+            "confidence": "partial",
+            "reason": "view function failed: evm revert"
+        });
+        assert_eq!(classify_strategy_health(&body), StrategyHealth::Failed);
+    }
+
+    #[test]
+    fn partial_with_non_object_data_classifies_failed() {
+        // Array, number, string at `data` — none can carry `$assets`, all
+        // are treated as Failed.
+        for non_obj in [json!([]), json!(42), json!("oops")] {
+            let body = json!({ "data": non_obj, "confidence": "partial" });
+            assert_eq!(classify_strategy_health(&body), StrategyHealth::Failed);
+        }
+    }
+
+    #[test]
+    fn unknown_confidence_classifies_failed() {
+        let body = json!({ "data": { "$assets": [] }, "confidence": "weird" });
+        assert_eq!(classify_strategy_health(&body), StrategyHealth::Failed);
+    }
 }
 
 /// Build the `records` argument the JS view function sees. The DESIGN spec
