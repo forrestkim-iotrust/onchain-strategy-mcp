@@ -302,7 +302,11 @@ the captured rows aggregated host-side as `{ count, latest, each, sum(field) }`
 per record name.
 
 The runtime wraps the return value with an honesty envelope:
-`{ data: <your return>, confidence: "full" | "partial" | "missing", reason?, remediation? }`.
+`{ data: <your return>, confidence: "full" | "partial" | "missing" | "stale", reason?, remediation?, staleness? }`.
+See **Honesty contract (v1.12)** below for the full semantics — in
+particular, transient `view` failures now surface as `stale` (last-known-good
+cache) rather than `partial`, so the dashboard doesn't go blank on RPC
+hiccups.
 
 Strategies without `view` get a generic fallback (burner balances only)
 with `confidence: "missing"`.
@@ -529,6 +533,96 @@ Rules:
 Discoverability: the `actions` field on `strategy://{id}` lists the
 declared action names; `strategy_register` likewise echoes them in the
 response when `dry_run` is true.
+
+## Honesty contract (v1.12)
+
+Every `strategy://{id}/view` response is wrapped:
+
+```jsonc
+{
+  "data": { /* whatever your view function returned, or last-known-good */ },
+  "confidence": "full" | "partial" | "missing" | "stale",
+  "reason": "<human-readable explainer when not full>",
+  "remediation": "<concrete next action>",
+  "staleness": {                                  // present iff confidence = "stale"
+    "succeeded_at": "<RFC3339>",
+    "age_seconds": 612,
+    "current_error": "<short string>"
+  }
+}
+```
+
+The four `confidence` values mean:
+
+- **`full`** — view ran successfully right now. `data` reflects current chain state.
+- **`partial`** — view ran but couldn't compute every field (e.g. one helper
+  RPC timed out mid-view). `data` carries what was computable; `reason` says
+  what's missing. With the v1.12 cache, this is now reserved for *successful
+  partial runs* — outright view failures fall through to `stale` instead.
+- **`missing`** — strategy has no `view` function; runtime emitted a generic
+  balance fallback. `remediation` tells you to add `view` to the bundle.
+- **`stale`** — view function is currently failing, **but the runtime has
+  prior successful values cached** (`strategy_view_cache`). `data` is the
+  last good body; `staleness` carries the timestamp + age + the current
+  error. The dashboard shows these as last-known-good with a yellow tint
+  rather than blank — so a transient view failure does **not** look like
+  balance loss to the user.
+
+### Why `stale` exists
+
+Without the cache, a single failing RPC turned the user's portfolio screen
+into a wall of zeros. That is *factually wrong*: the position hasn't moved,
+only the runtime's ability to read it has. `stale` lets the UI keep showing
+the last truthful number, clearly labelled as not-fresh, until the view
+recovers — preserving user trust while staying honest about the failure.
+
+### When you'll see `stale`
+
+Common causes — none of which mean the underlying position changed:
+
+- The view depends on an RPC call (e.g. `aavePoolDataProvider.getReserveData`)
+  and the RPC degraded or rate-limited.
+- The view references an onchain method that started reverting (contract
+  paused, upgrade in progress).
+- The view calls a price helper for a token whose oracle is temporarily down.
+
+If the view stays `stale` for more than a few minutes, inspect:
+
+- `strategy://{id}` for the view source (use `evm_view` with a minimal
+  repro to isolate the failing helper).
+- `runtime://status` to confirm the RPC plane is healthy.
+
+A `stale` confidence with `age_seconds` > 3600 and a clear `current_error`
+typically indicates a *strategy bug*, not a runtime issue.
+
+### Example — `stale` envelope from an Aave-supply strategy
+
+```jsonc
+{
+  "data": {
+    "$assets": [
+      { "address": "0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB",
+        "symbol":  "USDC",
+        "amount":  "11.563704",
+        "usd":     11.56,
+        "venue":   "aave-v3-base" }
+    ],
+    "earnings": {
+      "principal_usdc":        11.563687,
+      "accrued_interest_usdc":  0.000017,
+      "supply_apy_pct":         3.18
+    }
+  },
+  "confidence": "stale",
+  "reason":      "showing last successful values from 2026-05-15T10:32:00Z",
+  "remediation": "the strategy's view function is currently failing — see `staleness.current_error`",
+  "staleness": {
+    "succeeded_at":  "2026-05-15T10:32:00Z",
+    "age_seconds":   612,
+    "current_error": "view function failed: evm revert: unknown"
+  }
+}
+```
 
 ## Where to next
 
