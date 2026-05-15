@@ -461,6 +461,387 @@
     return tbl;
   }
 
+  // ─── v1.13 renderObject ────────────────────────────────────
+  //
+  // Generic, structure-aware renderer for arbitrary JSON bodies.
+  //
+  // Three layers:
+  //   1. Discovery — top-level keys of `body` are panels (no hardcoded list).
+  //   2. Shape inference — scalar-list ⇒ chips, homogeneous object-list ⇒
+  //      table, single object ⇒ kv pairs, allow/deny split when present,
+  //      empty ⇒ "(none)".
+  //   3. Value formatters — dispatch by field-name (chain_id, address,
+  //      selector, *_wei, *_at, hash). `opts.field_kinds` from the backend
+  //      may extend the defaults (`_field_kinds` envelope, Track P2).
+  //
+  // Single entry point: renderObject(body, opts). Returns a DOM Element.
+  //
+  // Wired:
+  //   - Policy tab (this track, P1).
+  //   - P5 (next wave): strategy view-output panel.
+  //   - P4 (next wave): diff lens — `opts.path_prefix` reserved for it.
+
+  const CHAIN_LABELS = {
+    1: "Ethereum",
+    10: "Optimism",
+    8453: "Base",
+    42161: "Arbitrum",
+    137: "Polygon",
+    11155111: "Sepolia",
+  };
+
+  const DEFAULT_FIELD_KINDS = {
+    chain_id:   ["chain_id", "chain"],
+    address:    ["address", "to", "from", "token", "contract", "burner",
+                 "pool_addr", "spender", "owner"],
+    selector:   ["selector", "fn", "function_selector"],
+    wei_amount: ["*_wei", "*_cap_wei", "value_wei", "amount_wei"],
+    timestamp:  ["*_at", "*_ts", "created_at", "set_at"],
+    hash:       ["tx_hash", "block_hash", "hash"],
+  };
+
+  // Order columns for table rendering — chain/address first, then alpha.
+  const IMPORTANT_KEYS = [
+    "chain", "chain_id", "address", "contract", "token",
+    "selector", "fn", "from", "to", "rationale",
+  ];
+
+  function titleCaseKey(k) {
+    return String(k).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
+  // Merge built-in field-name lists with backend overrides. For each kind,
+  // the final allowed set is the union (backend may add new names without
+  // a frontend change).
+  function mergeFieldKinds(override) {
+    const merged = {};
+    for (const k of Object.keys(DEFAULT_FIELD_KINDS)) {
+      merged[k] = DEFAULT_FIELD_KINDS[k].slice();
+    }
+    if (override && typeof override === "object") {
+      for (const kind of Object.keys(override)) {
+        const list = override[kind];
+        if (!Array.isArray(list)) continue;
+        const target = merged[kind] || (merged[kind] = []);
+        for (const name of list) {
+          if (typeof name === "string" && target.indexOf(name) < 0) target.push(name);
+        }
+      }
+    }
+    return merged;
+  }
+
+  // Match a field name against a list that may include `*_suffix` wildcards.
+  function fieldNameMatches(name, list) {
+    if (!name) return false;
+    const lk = String(name).toLowerCase();
+    for (const pat of list) {
+      if (pat.startsWith("*")) {
+        if (lk.endsWith(pat.slice(1).toLowerCase())) return true;
+      } else if (lk === pat.toLowerCase()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Resolve the formatter kind for a (key, value) pair. The key wins; the
+  // value shape only confirms (e.g. address-shaped string under unknown key).
+  // `ancestors` is an optional array of parent keys (closest-first) used to
+  // resolve transparent wrappers like `allow` / `deny` — a scalar list at
+  // `chains.allow` is chain ids, not "allows".
+  function kindOf(key, value, kinds, ancestors) {
+    // Walk through "structural" wrapper keys (allow/deny/etc.) to find the
+    // first key that's actually a field name. This is what makes
+    // `chains.allow = [8453]` chain-typed.
+    const STRUCTURAL = new Set(["allow", "deny", "allow_global"]);
+    const effective = (key != null && !STRUCTURAL.has(String(key).toLowerCase()))
+      ? key
+      : (ancestors || []).find((a) =>
+          a != null && !STRUCTURAL.has(String(a).toLowerCase()));
+    if (effective != null) {
+      for (const kind of Object.keys(kinds)) {
+        if (fieldNameMatches(effective, kinds[kind])) return kind;
+      }
+      // Singular-from-plural fallback: a list field named `chains` → its
+      // elements are chain_ids; `contracts` → addresses; `selectors`.
+      const lk = String(effective).toLowerCase();
+      if (lk === "chains") return "chain_id";
+      if (lk === "contracts" || lk === "tokens" || lk === "addresses") return "address";
+      if (lk === "selectors") return "selector";
+    }
+    // Value-shape fallbacks for unkeyed scalars (chip lists).
+    if (typeof value === "string") {
+      if (HEX_RE_ADDR.test(value)) return "address";
+      if (HEX_RE_TX.test(value))   return "hash";
+      if (/^0x[0-9a-fA-F]{8}$/.test(value)) return "selector";
+    }
+    return null;
+  }
+
+  // Render a primitive value according to the resolved formatter kind.
+  function formatScalar(value, kind) {
+    if (value === null || value === undefined) {
+      return el("span", { class: "muted", text: "—" });
+    }
+    if (kind === "chain_id") {
+      const num = Number(value);
+      const label = CHAIN_LABELS[num];
+      return el("span", { class: "mono",
+        text: label ? (label + " · " + num) : String(value) });
+    }
+    if (kind === "address" || kind === "hash") {
+      const s = String(value);
+      const short = (kind === "address")
+        ? fmt.shortHex(s, 6, 4)
+        : fmt.shortHex(s, 8, 6);
+      return el("button", {
+        class: "addr-copy mono",
+        title: s + " — click to copy",
+        "data-full": s,
+        text: short,
+      });
+    }
+    if (kind === "selector") {
+      return el("span", { class: "mono", title: String(value), text: String(value) });
+    }
+    if (kind === "wei_amount") {
+      // v1 fallback: human group-separated string. Strategy-specific
+      // decimals would require sibling-`decimals` lookup; we don't have
+      // it generically, so just make it parseable.
+      const s = String(value);
+      if (/^[0-9]+$/.test(s)) {
+        return el("span", { class: "mono", title: s + " wei",
+          text: s.replace(/\B(?=(\d{3})+(?!\d))/g, "_") + " wei" });
+      }
+      return el("span", { class: "mono", text: s });
+    }
+    if (kind === "timestamp") {
+      const s = String(value);
+      return el("span", { class: "mono", title: s, text: fmt.rel(s) });
+    }
+    if (typeof value === "boolean") {
+      return el("span", { class: "mono", text: value ? "true" : "false" });
+    }
+    if (typeof value === "number") {
+      return el("span", { class: "mono", text: fmt.n(value) });
+    }
+    return el("span", { class: "mono", text: String(value) });
+  }
+
+  // Shape inference for an arbitrary value. Returns one of:
+  //   "scalar" | "empty" | "scalar-list" | "object-table" |
+  //   "object-kv" | "allow-deny" | "mixed"
+  function classifyShape(v) {
+    if (v === null || v === undefined) return "empty";
+    if (typeof v !== "object") return "scalar";
+    if (Array.isArray(v)) {
+      if (v.length === 0) return "empty";
+      const allScalar = v.every((x) =>
+        x === null || x === undefined ||
+        typeof x === "string" || typeof x === "number" || typeof x === "boolean");
+      if (allScalar) return "scalar-list";
+      const allObj = v.every((x) => x && typeof x === "object" && !Array.isArray(x));
+      if (allObj) return "object-table";
+      return "mixed";
+    }
+    // Plain object.
+    const keys = Object.keys(v);
+    if (keys.length === 0) return "empty";
+    const hasAllow = "allow" in v;
+    const hasDeny  = "deny"  in v;
+    if ((hasAllow || hasDeny) && keys.every((k) => k === "allow" || k === "deny" || k === "allow_global")) {
+      return "allow-deny";
+    }
+    return "object-kv";
+  }
+
+  function renderEmpty() {
+    return el("span", { class: "muted", text: "(none)" });
+  }
+
+  function renderScalarList(arr, parentKey, kinds, ancestors) {
+    const wrap = el("div", { class: "chips" });
+    arr.forEach((v) => {
+      const kind = kindOf(parentKey, v, kinds, ancestors);
+      // Chips wrap formatted scalars — mostly chain ids, addresses,
+      // selectors. addr-copy buttons already look chip-shaped via CSS.
+      const chip = el("span", { class: "chip" }, [formatScalar(v, kind)]);
+      wrap.appendChild(chip);
+    });
+    return wrap;
+  }
+
+  function renderObjectTable(rows, kinds, ancestors) {
+    // Union of keys across rows, with IMPORTANT_KEYS first.
+    const seen = new Set();
+    rows.forEach((r) => Object.keys(r).forEach((k) => seen.add(k)));
+    const cols = [];
+    IMPORTANT_KEYS.forEach((k) => { if (seen.has(k)) { cols.push(k); seen.delete(k); } });
+    Array.from(seen).sort().forEach((k) => cols.push(k));
+
+    const tbl = el("table", { class: "render-table t" });
+    tbl.appendChild(el("thead", null, [el("tr", null,
+      cols.map((c) => el("th", { text: c })))]));
+    const tbody = el("tbody");
+    rows.forEach((r) => {
+      const tr = el("tr");
+      cols.forEach((c) => {
+        const td = el("td", { class: "mono" });
+        if (r[c] === undefined) {
+          td.appendChild(el("span", { class: "muted", text: "—" }));
+        } else {
+          td.appendChild(renderAny(r[c], c, kinds, ancestors));
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    return tbl;
+  }
+
+  function renderObjectKV(obj, kinds, ancestors) {
+    const kv = el("div", { class: "kv" });
+    Object.keys(obj).forEach((k) => {
+      kv.appendChild(el("div", { class: "k", text: k }));
+      const v = el("div", { class: "v" });
+      v.appendChild(renderAny(obj[k], k, kinds, ancestors));
+      kv.appendChild(v);
+    });
+    return kv;
+  }
+
+  function renderAllowDeny(obj, parentKey, kinds, ancestors) {
+    const wrap = el("div");
+    ["allow", "deny"].forEach((slot) => {
+      if (!(slot in obj)) return;
+      const label = el("div", { class: "render-subhead",
+        text: slot[0].toUpperCase() + slot.slice(1) });
+      wrap.appendChild(label);
+      wrap.appendChild(renderAny(obj[slot], slot, kinds,
+        [parentKey].concat(ancestors || []).filter((x) => x != null)));
+    });
+    if ("allow_global" in obj) {
+      const ag = el("div", { class: "kv" });
+      ag.appendChild(el("div", { class: "k", text: "allow_global" }));
+      const v = el("div", { class: "v" });
+      v.appendChild(formatScalar(obj.allow_global, null));
+      ag.appendChild(v);
+      wrap.appendChild(ag);
+    }
+    return wrap;
+  }
+
+  // Universal renderer — used by panels and recursively by table cells / kv
+  // values. `parentKey` is the field name in the containing object (or
+  // null at the top of a panel) — it drives both formatter dispatch and
+  // wildcard wei/at suffix matching. `ancestors` is the path of parent
+  // keys (closest-first) used to see through `allow`/`deny` wrappers.
+  function renderAny(v, parentKey, kinds, ancestors) {
+    ancestors = ancestors || [];
+    const shape = classifyShape(v);
+    if (shape === "empty")       return renderEmpty();
+    if (shape === "scalar") {
+      const kind = kindOf(parentKey, v, kinds, ancestors);
+      return formatScalar(v, kind);
+    }
+    if (shape === "scalar-list") return renderScalarList(v, parentKey, kinds, ancestors);
+    const nextAncestors = parentKey != null
+      ? [parentKey].concat(ancestors)
+      : ancestors;
+    if (shape === "object-table") return renderObjectTable(v, kinds, nextAncestors);
+    if (shape === "allow-deny")  return renderAllowDeny(v, parentKey, kinds, ancestors);
+    if (shape === "object-kv")   return renderObjectKV(v, kinds, nextAncestors);
+    // Mixed — fallback to list of recursive renders.
+    if (Array.isArray(v)) {
+      const wrap = el("div");
+      v.forEach((x, i) => {
+        const row = el("div", { class: "kv" });
+        row.appendChild(el("div", { class: "k", text: "[" + i + "]" }));
+        const cell = el("div", { class: "v" });
+        cell.appendChild(renderAny(x, parentKey, kinds, ancestors));
+        row.appendChild(cell);
+        wrap.appendChild(row);
+      });
+      return wrap;
+    }
+    return el("span", { class: "mono", text: String(v) });
+  }
+
+  function renderObjectPanel(title, key, value, kinds) {
+    const shape = classifyShape(value);
+    const panel = el("div", { class: "render-panel",
+      "data-empty": shape === "empty" ? "true" : "false" });
+    panel.appendChild(el("div", { class: "render-panel-title", text: title }));
+    const body = el("div", { class: "render-panel-body" });
+    body.appendChild(renderAny(value, key, kinds, []));
+    panel.appendChild(body);
+    return panel;
+  }
+
+  // Public entry point.
+  //
+  //   renderObject(body, opts?)
+  //     body  — object | array | scalar (any JSON value)
+  //     opts  — {
+  //       field_kinds: { kind: [name, "*_suffix", ...], ... }  // backend override
+  //       path_prefix: string                                  // reserved for P4 diff
+  //     }
+  //
+  // Returns a DOM Element. Caller owns mounting.
+  function renderObject(body, opts) {
+    opts = opts || {};
+    // `_field_kinds` may travel inside the body (P2 envelope) or via opts.
+    const inlineKinds = (body && typeof body === "object" && !Array.isArray(body))
+      ? body._field_kinds
+      : null;
+    const kinds = mergeFieldKinds(opts.field_kinds || inlineKinds || null);
+
+    // Scalar / array / null at the top — render as one anonymous panel.
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      const wrap = el("div", { class: "render-grid" });
+      wrap.appendChild(renderObjectPanel("value", null, body, kinds));
+      return wrap;
+    }
+
+    // Discovery: each top-level key (minus reserved underscore keys) is a
+    // panel. NO hardcoded list of allowed dimensions.
+    const grid = el("div", { class: "render-grid" });
+    const keys = Object.keys(body).filter((k) => !k.startsWith("_"));
+    if (keys.length === 0) {
+      grid.appendChild(el("div", { class: "muted", text: "(empty)" }));
+      return grid;
+    }
+    keys.forEach((k) => {
+      // Pass the raw key (`chains`) — not the title-cased label — into the
+      // renderer so kindOf can recognise it (and singular-from-plural
+      // inference: chains → chain_id elements).
+      grid.appendChild(renderObjectPanel(titleCaseKey(k), k, body[k], kinds));
+    });
+    return grid;
+  }
+
+  // Expose for tests / other modules / P5 reuse.
+  window.osmcpRenderObject = renderObject;
+
+  // Central click handler for addr-copy buttons. Single delegation —
+  // independent of which renderer mounted the button.
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest && e.target.closest(".addr-copy");
+    if (!btn) return;
+    const full = btn.getAttribute("data-full");
+    if (!full) return;
+    e.preventDefault();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(full).catch(() => {});
+    } else {
+      fallbackCopy(full, function () {});
+    }
+    btn.setAttribute("data-copied", "1");
+    setTimeout(() => btn.removeAttribute("data-copied"), 1200);
+  });
+
   // ─── Fetch helper ──────────────────────────────────────────
   async function getJson(path) {
     const res = await fetch(path, { headers: { "Accept": "application/json" } });
@@ -1057,22 +1438,18 @@
         set_at: current.set_at,
         rationale: current.rationale,
       }, null));
-      // policy body — collapsed by default
-      const sk = "policy_body";
-      const open = S.expanded.has(sk);
-      const disc = el("div", { class: open ? "" : "collapsed" });
-      const head = el("span", {
-        class: "disclose",
-        onclick: () => {
-          if (S.expanded.has(sk)) S.expanded.delete(sk); else S.expanded.add(sk);
-          disc.classList.toggle("collapsed");
-        },
-        text: (open ? "▾" : "▸") + " policy body",
-      });
-      const nested = el("div", { class: "nested" });
-      nested.appendChild(renderValue(current.policy, "policy", null));
-      disc.appendChild(head); disc.appendChild(nested);
-      body.appendChild(disc);
+      // v1.13 P1: schema-aware policy body — no click-to-expand. Each
+      // top-level key of `current.policy` (chains/contracts/selectors/
+      // erc20_spend/native_value/raw_call — or whatever the backend ships
+      // next) becomes its own panel. Backend may ship `_field_kinds` to
+      // extend the value-formatter dispatch without a UI change (Track P2).
+      if (current.policy && typeof current.policy === "object") {
+        body.appendChild(renderObject(current.policy, {
+          field_kinds: current._field_kinds,
+        }));
+      } else {
+        body.appendChild(el("div", { class: "muted", text: "(empty policy body)" }));
+      }
       root.appendChild(section("Current policy " +
         (current.revision_id ? "(rev " + current.revision_id + ")" : ""), body));
     }
