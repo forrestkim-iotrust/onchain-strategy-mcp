@@ -300,37 +300,54 @@
   /* ─── INTEGRATIONS ─── */
   .logo-grid {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
-    gap: 1px;
-    background: var(--bd);
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 0;
     border: 1px solid var(--bd);
     border-radius: 12px;
     overflow: hidden;
   }
-  @media (max-width: 880px) { .logo-grid { grid-template-columns: repeat(3, 1fr); } }
-  @media (max-width: 480px) { .logo-grid { grid-template-columns: repeat(2, 1fr); } }
+  .logo-grid .logo-cell { border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd); }
+  .logo-grid .logo-cell:nth-child(6n)  { border-right: none; }
+  .logo-grid .logo-cell:nth-last-child(-n+6) { border-bottom: none; }
+  @media (max-width: 880px) {
+    .logo-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .logo-grid .logo-cell { border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd); }
+    .logo-grid .logo-cell:nth-child(n)   { border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd); }
+    .logo-grid .logo-cell:nth-child(3n)  { border-right: none; }
+    .logo-grid .logo-cell:nth-last-child(-n+3) { border-bottom: none; }
+  }
+  @media (max-width: 480px) {
+    .logo-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .logo-grid .logo-cell:nth-child(n)   { border-right: 1px solid var(--bd); border-bottom: 1px solid var(--bd); }
+    .logo-grid .logo-cell:nth-child(2n)  { border-right: none; }
+    .logo-grid .logo-cell:nth-last-child(-n+2) { border-bottom: none; }
+  }
   .logo-cell {
     background: var(--bg);
-    aspect-ratio: 5/2;
+    min-height: 100px;
     display: flex; align-items: center; justify-content: center;
-    padding: 1.5rem;
+    padding: 1.1rem .9rem;
     transition: background .15s;
+    overflow: hidden;
   }
   .logo-cell:hover { background: var(--bg-soft); }
   .logo-cell img {
-    max-height: 28px;
+    max-height: 42px;
     max-width: 100%;
     height: auto;
     width: auto;
     object-fit: contain;
     filter: brightness(0) saturate(0);
-    opacity: .55;
+    opacity: .6;
     transition: opacity .15s, filter .15s;
   }
   .logo-cell:hover img { opacity: 1; }
   @media (prefers-color-scheme: dark) {
     .logo-cell img { filter: brightness(0) saturate(0) invert(1); }
   }
+  /* Icon-shaped logos render bigger to match wordmark visual weight */
+  .logo-cell.icon img { max-height: 36px; }
+  .logo-cell.wide img { max-height: 30px; }
 
   /* ─── HOW IT WORKS ─── */
   .steps {
