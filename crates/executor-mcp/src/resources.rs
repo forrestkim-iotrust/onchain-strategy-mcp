@@ -1990,6 +1990,22 @@ async fn read_trigger_list(
 
 // ─────────── v1.4 Track B / v1.5 Track 1A — policy://current ───────────
 
+/// v1.13 Track P2: field-name → formatter-kind hints for the dashboard
+/// renderer. Returned at response top level under `_field_kinds`.
+/// Frontend P1 merges these with its built-in defaults (backend takes
+/// precedence). Patterns are exact names or suffix wildcards (`*_xxx`);
+/// emit is a static map, no per-response computation.
+fn policy_field_kinds() -> serde_json::Value {
+    json!({
+        "chain_id":   ["chain_id", "chain", "*_chain"],
+        "address":    ["address", "to", "from", "token", "contract", "burner", "pool", "spender", "recipient", "owner"],
+        "selector":   ["selector", "fn", "function_selector", "*_selector"],
+        "wei_amount": ["per_tx_cap_wei", "daily_cap_wei", "value_wei", "amount_wei", "max_per_action", "max_per_run", "*_wei"],
+        "timestamp":  ["set_at", "created_at", "deleted_at", "last_fired_at", "succeeded_at", "updated_at", "*_at"],
+        "hash":       ["tx_hash", "block_hash", "revision_id", "*_hash"]
+    })
+}
+
 async fn read_policy_current(
     uri: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
@@ -2005,7 +2021,7 @@ async fn read_policy_current(
     .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
     .map_err(map_state_error)?;
 
-    let body = match active {
+    let mut body = match active {
         Some(rev) => {
             let policy_value: serde_json::Value = serde_json::from_str(&rev.body_json)
                 .unwrap_or(serde_json::json!(null));
@@ -2026,6 +2042,8 @@ async fn read_policy_current(
             "remediation": "call the policy_set MCP tool with a full policy JSON body — see docs://policy-model",
         }),
     };
+    // v1.13 Track P2: declare formatter hints for the dashboard renderer.
+    body["_field_kinds"] = policy_field_kinds();
     let body_text = serde_json::to_string(&body)
         .map_err(|e| storage_error(format!("policy://current encode: {e}")))?;
     Ok(ReadResourceResult::new(vec![
@@ -2040,50 +2058,95 @@ async fn read_policy_history(
     query: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
-    // Parse `?limit=N`. Default 20, cap 200.
+    // Parse `?limit=N&include_body=true|false`.
+    //   - `limit` — default 20, cap 200 (v1.5 Track 1A).
+    //   - `include_body` — default false; when true each revision entry gains
+    //     a parsed `body` field (v1.13 Track P3, backs the Policy-tab diff
+    //     lens). Default response is byte-identical to pre-v1.13.
     let mut limit: u64 = 20;
+    let mut include_body = false;
     if !query.is_empty() {
         for pair in query.split('&') {
             let (k, v) = match pair.split_once('=') {
                 Some(p) => p,
                 None => continue,
             };
-            if k == "limit" {
-                match v.parse::<u64>() {
+            match k {
+                "limit" => match v.parse::<u64>() {
                     Ok(n) if n > 0 => limit = n.min(200),
                     _ => {
                         return Err(crate::errors::invalid_params(
                             "policy://history?limit must be a positive integer between 1 and 200",
                         ));
                     }
+                },
+                "include_body" => {
+                    include_body = v == "true" || v == "1";
                 }
+                _ => {}
             }
         }
     }
 
-    let summaries = tokio::task::spawn_blocking(move || {
-        let store = state.blocking_lock();
-        store.list_policy_revisions(limit)
-    })
-    .await
-    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-    .map_err(map_state_error)?;
-
-    let revisions: Vec<serde_json::Value> = summaries
-        .iter()
-        .map(|s| {
-            json!({
-                "revision_id": s.revision_id,
-                "set_at": s.set_at,
-                "rationale": s.rationale,
-                "is_active": s.is_active,
-            })
+    let revisions: Vec<serde_json::Value> = if include_body {
+        let rows = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_policy_revisions_with_body(limit)
         })
-        .collect();
-    let body = json!({
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        rows.iter()
+            .map(|r| {
+                // Parse `body_json` per-row. A corrupt row should NOT fail
+                // the whole listing — emit `body: null` + a per-row
+                // `body_parse_error` so the frontend can degrade gracefully.
+                match serde_json::from_str::<serde_json::Value>(&r.body_json) {
+                    Ok(parsed) => json!({
+                        "revision_id": r.revision_id,
+                        "set_at": r.set_at,
+                        "rationale": r.rationale,
+                        "is_active": r.is_active,
+                        "body": parsed,
+                    }),
+                    Err(e) => json!({
+                        "revision_id": r.revision_id,
+                        "set_at": r.set_at,
+                        "rationale": r.rationale,
+                        "is_active": r.is_active,
+                        "body": serde_json::Value::Null,
+                        "body_parse_error": e.to_string(),
+                    }),
+                }
+            })
+            .collect()
+    } else {
+        let summaries = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_policy_revisions(limit)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        summaries
+            .iter()
+            .map(|s| {
+                json!({
+                    "revision_id": s.revision_id,
+                    "set_at": s.set_at,
+                    "rationale": s.rationale,
+                    "is_active": s.is_active,
+                })
+            })
+            .collect()
+    };
+
+    let mut body = json!({
         "revisions": revisions,
-        "count": summaries.len(),
+        "count": revisions.len(),
     });
+    // v1.13 Track P2: declare formatter hints for the dashboard renderer.
+    body["_field_kinds"] = policy_field_kinds();
     let body_text = serde_json::to_string(&body)
         .map_err(|e| storage_error(format!("policy://history encode: {e}")))?;
     Ok(ReadResourceResult::new(vec![
