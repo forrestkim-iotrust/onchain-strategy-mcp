@@ -228,6 +228,19 @@ CREATE TABLE IF NOT EXISTS policies (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_policies_one_active
     ON policies(is_active) WHERE is_active = 1;
+
+-- v1.12 Track B1: last-known-good cache for the strategy bundle `view`
+-- function. When `view` evaluation fails (e.g. transient `evm revert`),
+-- the dashboard falls back to the most recent successful body and renders
+-- a STALE badge instead of a scary blank state. Keyed by the active row's
+-- `id` (NOT lineage_id) — a fresh re-register under the same name starts
+-- a new id and therefore an empty cache. body_json is the full successful
+-- view response body; succeeded_at is RFC3339 UTC.
+CREATE TABLE IF NOT EXISTS strategy_view_cache (
+    strategy_id  TEXT PRIMARY KEY REFERENCES strategies(id),
+    body_json    TEXT NOT NULL,
+    succeeded_at TEXT NOT NULL
+);
 "#;
 
 pub(crate) fn open_conn(path: &Path) -> Result<Connection, StateError> {
