@@ -19,6 +19,12 @@
   --row-hover: #f7f7f6;
   --code-bg:   #f3f3f2;
 
+  /* v1.13 P4 — policy diff lens palette. Muted to match DESIGN.md. */
+  --diff-add:       #2e7d4f;
+  --diff-add-tint:  #eaf4ee;
+  --warn-amber:     #b9740a;
+  --bg-warn-tint:   #fbf3e4;
+
   --ff: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
         Arial, sans-serif;
   --ff-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
@@ -464,5 +470,111 @@ code, .code {
 }
 .chip > .addr-copy { padding: 0; }
 .chip > .addr-copy:hover { background: transparent; }
+
+/* ─── v1.13 P4 — policy diff lens ─────────────────────────── */
+/* A checkbox above the policy body toggles between the standard
+   renderObject layout and a side-by-side / annotated render. The
+   diff tree carries one of three CSS classes per row. */
+
+.diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 10px;
+  padding: 4px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--body);
+  cursor: pointer;
+  user-select: none;
+}
+.diff-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+.diff-banner {
+  margin: 8px 0;
+  padding: 6px 10px;
+  background: var(--soft);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--mute);
+}
+.diff-header {
+  margin: 6px 0 8px;
+  padding: 6px 10px;
+  background: var(--soft);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--body);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+}
+.diff-header .diff-header-arrow { color: var(--mute); }
+
+.diff-count {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: 6px;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+.diff-count > span {
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: var(--soft);
+  color: var(--mute);
+  font-family: var(--ff-mono);
+}
+.diff-count > .diff-count-add     { color: var(--diff-add);   background: var(--diff-add-tint); }
+.diff-count > .diff-count-changed { color: var(--warn-amber); background: var(--bg-warn-tint); }
+.diff-count > .diff-count-removed { color: var(--mute);       background: var(--soft); text-decoration: line-through; }
+.diff-count > .diff-count-zero    { opacity: 0.45; }
+
+.diff-row {
+  /* shared base; per-state rules add the actual styling. The diff tree
+     reuses renderObject's .kv grid + .render-panel-body wrappers, so
+     `.diff-row` is applied to the row's container element. */
+  border-left: 3px solid transparent;
+  padding-left: 6px;
+}
+.diff-added {
+  border-left: 3px solid var(--diff-add);
+  background: var(--diff-add-tint);
+}
+.diff-removed {
+  color: var(--mute);
+  text-decoration: line-through;
+}
+.diff-changed {
+  border-left: 3px solid var(--warn-amber);
+  background: var(--bg-warn-tint);
+}
+.diff-changed .diff-changed-grid {
+  display: grid;
+  grid-template-columns: 1fr 12px 1fr;
+  gap: 6px;
+  align-items: baseline;
+}
+.diff-changed .diff-changed-grid > .diff-arrow {
+  color: var(--warn-amber);
+  font-family: var(--ff-mono);
+  text-align: center;
+}
+.diff-changed .diff-changed-grid > .diff-from {
+  text-decoration: line-through;
+  color: var(--mute);
+}
+.render-panel[data-diff-unchanged="true"] .render-panel-body {
+  padding: 4px 10px;
+  font-style: italic;
+  color: var(--mute);
+}
 
 .muted { color: var(--mute); font-style: italic; }

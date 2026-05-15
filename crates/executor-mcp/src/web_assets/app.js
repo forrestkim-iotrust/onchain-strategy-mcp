@@ -22,7 +22,7 @@
     // cache of last data so partial-failure re-renders don't blank tabs.
     // `detail` is keyed by strategy_id — populated by pollOnce when on the
     // strategy-detail page so renderStrategyDetail can read synchronously.
-    cache: { portfolio: null, strategies: null, policy: null, triggers: null, runs: null, detail: {} },
+    cache: { portfolio: null, strategies: null, policy: null, policyDiff: null, triggers: null, runs: null, detail: {} },
     // Anti-flicker: stable JSON hash of the LAST RENDERED tab payload.
     // pollOnce compares the fresh payload against this — identical ⇒ skip
     // the full renderTab() rebuild so the DOM doesn't blink on no-op ticks.
@@ -825,6 +825,287 @@
   // Expose for tests / other modules / P5 reuse.
   window.osmcpRenderObject = renderObject;
 
+  // ─── v1.13 P4 — policy diff lens ──────────────────────────
+  //
+  // A structure-aware JSON diff that reuses P1's value-formatter
+  // dispatch (`formatScalar` + `kindOf`) so chain_id / address /
+  // selector / *_wei / *_at / hash render identically in both modes.
+  //
+  // Public surface:
+  //   - diffJson(prev, curr)               → diff tree (see node kinds below)
+  //   - renderObjectDiff(diffNode, opts?)  → DOM Element
+  //   - window.osmcpDiffJson / window.osmcpRenderObjectDiff (for P5 / tests)
+  //
+  // Array strategy: by-index. Trusts the backend to emit stable order
+  // (policy bodies are deterministic). Shifted order will produce noisy
+  // but correct diffs — a future LCS-lite pass is parked for v1.14+.
+
+  // Cheap structural equality. Order-sensitive for arrays. Sorts object
+  // keys before comparing so {a,b} === {b,a}.
+  function diffDeepEqual(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null) return false;
+    if (typeof a !== typeof b) return false;
+    if (typeof a !== "object") return a === b;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        if (!diffDeepEqual(a[i], b[i])) return false;
+      }
+      return true;
+    }
+    const ak = Object.keys(a).sort();
+    const bk = Object.keys(b).sort();
+    if (ak.length !== bk.length) return false;
+    for (let i = 0; i < ak.length; i++) {
+      if (ak[i] !== bk[i]) return false;
+      if (!diffDeepEqual(a[ak[i]], b[bk[i]])) return false;
+    }
+    return true;
+  }
+
+  // Recursive structural diff. Returns a tree of nodes:
+  //   { kind: "unchanged", value }
+  //   { kind: "added",     value }
+  //   { kind: "removed",   value }
+  //   { kind: "changed",   from, to }
+  //   { kind: "object",    keys: { <key>: <node>, ... } }
+  //   { kind: "array",     entries: [ <node>, ... ] }
+  function diffJson(prev, curr) {
+    if (diffDeepEqual(prev, curr)) {
+      return { kind: "unchanged", value: curr };
+    }
+    const prevIsObj = prev && typeof prev === "object" && !Array.isArray(prev);
+    const currIsObj = curr && typeof curr === "object" && !Array.isArray(curr);
+    const prevIsArr = Array.isArray(prev);
+    const currIsArr = Array.isArray(curr);
+
+    if (prevIsObj && currIsObj) {
+      const keys = new Set();
+      Object.keys(prev).forEach((k) => keys.add(k));
+      Object.keys(curr).forEach((k) => keys.add(k));
+      const out = {};
+      keys.forEach((k) => {
+        const inPrev = Object.prototype.hasOwnProperty.call(prev, k);
+        const inCurr = Object.prototype.hasOwnProperty.call(curr, k);
+        if (inPrev && !inCurr) {
+          out[k] = { kind: "removed", value: prev[k] };
+        } else if (!inPrev && inCurr) {
+          out[k] = { kind: "added", value: curr[k] };
+        } else {
+          out[k] = diffJson(prev[k], curr[k]);
+        }
+      });
+      return { kind: "object", keys: out };
+    }
+
+    if (prevIsArr && currIsArr) {
+      // By-index. Trusts backend order; shifted lists produce noisy diffs.
+      const n = Math.max(prev.length, curr.length);
+      const entries = [];
+      for (let i = 0; i < n; i++) {
+        const hasP = i < prev.length;
+        const hasC = i < curr.length;
+        if (hasP && !hasC) {
+          entries.push({ kind: "removed", value: prev[i] });
+        } else if (!hasP && hasC) {
+          entries.push({ kind: "added", value: curr[i] });
+        } else {
+          entries.push(diffJson(prev[i], curr[i]));
+        }
+      }
+      return { kind: "array", entries };
+    }
+
+    // Type mismatch or scalar inequality.
+    return { kind: "changed", from: prev, to: curr };
+  }
+
+  // Count +N ~M -K within a node (for panel badges).
+  function diffCounts(node) {
+    const acc = { added: 0, changed: 0, removed: 0 };
+    function walk(n) {
+      if (!n) return;
+      switch (n.kind) {
+        case "added":     acc.added++;   return;
+        case "removed":   acc.removed++; return;
+        case "changed":   acc.changed++; return;
+        case "object":
+          Object.keys(n.keys).forEach((k) => walk(n.keys[k]));
+          return;
+        case "array":
+          n.entries.forEach(walk);
+          return;
+        default: return;
+      }
+    }
+    walk(node);
+    return acc;
+  }
+
+  // Format a scalar via P1's dispatch. Thin shim — keeps renderObjectDiff
+  // free of formatter knowledge.
+  function formatValue(value, parentKey, kinds, ancestors) {
+    const kind = kindOf(parentKey, value, kinds, ancestors || []);
+    return formatScalar(value, kind);
+  }
+
+  // Render a single leaf node (added / removed / changed / unchanged
+  // scalar). Uses renderAny for nested values so object/array shapes
+  // render with the same kv/table machinery as the non-diff view.
+  function renderDiffLeaf(node, parentKey, kinds, ancestors) {
+    const ancs = ancestors || [];
+    if (node.kind === "unchanged") {
+      // Unchanged: render normally — no special styling.
+      return renderAny(node.value, parentKey, kinds, ancs);
+    }
+    if (node.kind === "added") {
+      const wrap = el("div", { class: "diff-row diff-added" });
+      wrap.appendChild(renderAny(node.value, parentKey, kinds, ancs));
+      return wrap;
+    }
+    if (node.kind === "removed") {
+      const wrap = el("div", { class: "diff-row diff-removed" });
+      wrap.appendChild(renderAny(node.value, parentKey, kinds, ancs));
+      return wrap;
+    }
+    if (node.kind === "changed") {
+      const wrap = el("div", { class: "diff-row diff-changed" });
+      const grid = el("div", { class: "diff-changed-grid" });
+      const fromCell = el("div", { class: "diff-from" });
+      fromCell.appendChild(renderAny(node.from, parentKey, kinds, ancs));
+      const arrow = el("div", { class: "diff-arrow", text: "→" });
+      const toCell = el("div", { class: "diff-to" });
+      toCell.appendChild(renderAny(node.to, parentKey, kinds, ancs));
+      grid.appendChild(fromCell);
+      grid.appendChild(arrow);
+      grid.appendChild(toCell);
+      wrap.appendChild(grid);
+      return wrap;
+    }
+    // Container kinds — recurse.
+    return renderDiffNode(node, parentKey, kinds, ancs);
+  }
+
+  // Render a container node (object / array) into a kv grid or list.
+  function renderDiffNode(node, parentKey, kinds, ancestors) {
+    const ancs = ancestors || [];
+    if (node.kind === "object") {
+      const kv = el("div", { class: "kv" });
+      const keys = Object.keys(node.keys);
+      // Stable key order: alpha — diffs don't need IMPORTANT_KEYS priority.
+      keys.sort();
+      const nextAncestors = parentKey != null
+        ? [parentKey].concat(ancs)
+        : ancs;
+      keys.forEach((k) => {
+        const child = node.keys[k];
+        const kCell = el("div", { class: "k", text: k });
+        const vCell = el("div", { class: "v" });
+        vCell.appendChild(renderDiffLeaf(child, k, kinds, nextAncestors));
+        // For added/removed top-level keys, color the key cell too.
+        if (child.kind === "added")   kCell.classList.add("diff-added");
+        if (child.kind === "removed") kCell.classList.add("diff-removed");
+        kv.appendChild(kCell);
+        kv.appendChild(vCell);
+      });
+      return kv;
+    }
+    if (node.kind === "array") {
+      const nextAncestors = parentKey != null
+        ? [parentKey].concat(ancs)
+        : ancs;
+      const wrap = el("div");
+      node.entries.forEach((entry, i) => {
+        const row = el("div", { class: "kv" });
+        row.appendChild(el("div", { class: "k", text: "[" + i + "]" }));
+        const cell = el("div", { class: "v" });
+        cell.appendChild(renderDiffLeaf(entry, parentKey, kinds, nextAncestors));
+        row.appendChild(cell);
+        wrap.appendChild(row);
+      });
+      return wrap;
+    }
+    // Leaf — defer.
+    return renderDiffLeaf(node, parentKey, kinds, ancs);
+  }
+
+  function renderDiffCountBadge(counts) {
+    const wrap = el("span", { class: "diff-count" });
+    wrap.appendChild(el("span", {
+      class: "diff-count-add" + (counts.added === 0 ? " diff-count-zero" : ""),
+      text: "+" + counts.added,
+    }));
+    wrap.appendChild(el("span", {
+      class: "diff-count-changed" + (counts.changed === 0 ? " diff-count-zero" : ""),
+      text: "~" + counts.changed,
+    }));
+    wrap.appendChild(el("span", {
+      class: "diff-count-removed" + (counts.removed === 0 ? " diff-count-zero" : ""),
+      text: "-" + counts.removed,
+    }));
+    return wrap;
+  }
+
+  // Public entry point. Renders a top-level diff (object expected as the
+  // common case for policy bodies). Mirrors renderObject's layout:
+  // one panel per top-level key. Unchanged panels collapse to "(unchanged)".
+  function renderObjectDiff(diffNode, opts) {
+    opts = opts || {};
+    const kinds = mergeFieldKinds(opts.field_kinds || null);
+
+    // Non-object top-level diffs fall back to a single anonymous panel.
+    if (!diffNode || diffNode.kind !== "object") {
+      const wrap = el("div", { class: "render-grid" });
+      const panel = el("div", { class: "render-panel" });
+      panel.appendChild(el("div", { class: "render-panel-title", text: "value" }));
+      const pb = el("div", { class: "render-panel-body" });
+      pb.appendChild(renderDiffLeaf(diffNode, null, kinds, []));
+      panel.appendChild(pb);
+      wrap.appendChild(panel);
+      return wrap;
+    }
+
+    const grid = el("div", { class: "render-grid" });
+    const keys = Object.keys(diffNode.keys).filter((k) => !k.startsWith("_"));
+    if (keys.length === 0) {
+      grid.appendChild(el("div", { class: "muted", text: "(empty)" }));
+      return grid;
+    }
+    keys.forEach((k) => {
+      const child = diffNode.keys[k];
+      const counts = diffCounts(child);
+      const isUnchanged = child.kind === "unchanged" ||
+        (counts.added === 0 && counts.changed === 0 && counts.removed === 0);
+      const panel = el("div", { class: "render-panel" });
+      if (isUnchanged) panel.setAttribute("data-diff-unchanged", "true");
+      const title = el("div", { class: "render-panel-title", text: titleCaseKey(k) });
+      if (!isUnchanged) title.appendChild(renderDiffCountBadge(counts));
+      panel.appendChild(title);
+      const pb = el("div", { class: "render-panel-body" });
+      if (isUnchanged) {
+        pb.appendChild(el("span", { text: "(unchanged)" }));
+      } else if (child.kind === "added") {
+        pb.appendChild(renderDiffLeaf(child, k, kinds, []));
+      } else if (child.kind === "removed") {
+        pb.appendChild(renderDiffLeaf(child, k, kinds, []));
+      } else {
+        pb.appendChild(renderDiffNode(child, k, kinds, []));
+      }
+      panel.appendChild(pb);
+      grid.appendChild(panel);
+    });
+    return grid;
+  }
+
+  // Expose for tests / P5 reuse.
+  window.osmcpDiffJson         = diffJson;
+  window.osmcpRenderObjectDiff = renderObjectDiff;
+  // Surface formatValue for any external module that wants to share the
+  // same dispatch table (P5 may use it for view-output cells).
+  window.osmcpFormatValue      = formatValue;
+
   // Central click handler for addr-copy buttons. Single delegation —
   // independent of which renderer mounted the button.
   document.addEventListener("click", (e) => {
@@ -1421,6 +1702,21 @@
   }
 
   // ─── Tab: Policy ───────────────────────────────────────────
+  // v1.13 P4 — diff lens. A checkbox above the policy body toggles
+  // between the standard renderObject layout (current revision only) and
+  // a diff render against the immediately-previous revision. State is
+  // persisted in localStorage so it survives reloads. The diff body is
+  // fetched lazily via /api/policy/history?include_body=true&limit=2.
+  const POLICY_DIFF_LS_KEY = "osmcp.policyDiffEnabled";
+  function policyDiffEnabled() {
+    try { return localStorage.getItem(POLICY_DIFF_LS_KEY) === "1"; }
+    catch (e) { return false; }
+  }
+  function setPolicyDiffEnabled(v) {
+    try { localStorage.setItem(POLICY_DIFF_LS_KEY, v ? "1" : "0"); }
+    catch (e) {}
+  }
+
   function renderPolicy(data) {
     const root = el("div");
     const current = (data && data.current) || {};
@@ -1438,18 +1734,48 @@
         set_at: current.set_at,
         rationale: current.rationale,
       }, null));
+
+      // v1.13 P4: diff toggle row. Checkbox state survives reloads.
+      const diffOn = policyDiffEnabled();
+      const toggle = el("label", { class: "diff-toggle" });
+      const checkbox = el("input", { type: "checkbox", id: "policy-diff-toggle" });
+      if (diffOn) checkbox.checked = true;
+      checkbox.addEventListener("change", function () {
+        setPolicyDiffEnabled(!!this.checked);
+        // Clear the cached diff payload so the next pollOnce refetches
+        // (or the manual reload below catches it immediately).
+        S.cache.policyDiff = null;
+        // Trigger a fresh render — pollOnce is async; renderTab is sync.
+        renderTab();
+        // Kick off the diff fetch if we're now on; otherwise leave alone.
+        if (this.checked) ensurePolicyDiffLoaded();
+      });
+      toggle.appendChild(checkbox);
+      toggle.appendChild(document.createTextNode(" show diff vs previous revision"));
+      body.appendChild(toggle);
+
+      // Body: either schema-aware single render OR diff render.
       // v1.13 P1: schema-aware policy body — no click-to-expand. Each
       // top-level key of `current.policy` (chains/contracts/selectors/
       // erc20_spend/native_value/raw_call — or whatever the backend ships
       // next) becomes its own panel. Backend may ship `_field_kinds` to
       // extend the value-formatter dispatch without a UI change (Track P2).
-      if (current.policy && typeof current.policy === "object") {
-        body.appendChild(renderObject(current.policy, {
-          field_kinds: current._field_kinds,
-        }));
+      if (!diffOn) {
+        if (current.policy && typeof current.policy === "object") {
+          body.appendChild(renderObject(current.policy, {
+            field_kinds: current._field_kinds,
+          }));
+        } else {
+          body.appendChild(el("div", { class: "muted", text: "(empty policy body)" }));
+        }
       } else {
-        body.appendChild(el("div", { class: "muted", text: "(empty policy body)" }));
+        // Diff mode — render whatever we have cached. The cache is
+        // populated by ensurePolicyDiffLoaded() (kicked off in pollOnce
+        // when the toggle is on, or on the change event above).
+        body.appendChild(renderPolicyDiffBlock(current));
+        ensurePolicyDiffLoaded();
       }
+
       root.appendChild(section("Current policy " +
         (current.revision_id ? "(rev " + current.revision_id + ")" : ""), body));
     }
@@ -1484,6 +1810,99 @@
       root.appendChild(section("History (" + history.length + ")", body));
     }
     return root;
+  }
+
+  // v1.13 P4 — lazy fetch of /api/policy/history?include_body=true&limit=2.
+  // Result lands in S.cache.policyDiff and triggers a re-render via
+  // renderTab(). De-duplicated by an inflight flag so multiple renders
+  // don't pile up requests.
+  let _policyDiffInflight = false;
+  async function ensurePolicyDiffLoaded() {
+    if (S.cache.policyDiff) return;
+    if (_policyDiffInflight) return;
+    _policyDiffInflight = true;
+    try {
+      const r = await getJson("/api/policy/history?include_body=true&limit=2");
+      S.cache.policyDiff = r;
+    } catch (e) {
+      S.cache.policyDiff = { _err: e && e.message ? e.message : String(e) };
+    } finally {
+      _policyDiffInflight = false;
+      renderTab();
+    }
+  }
+
+  // Build the diff-body block for the policy panel. Reads from
+  // S.cache.policyDiff which is populated by ensurePolicyDiffLoaded.
+  // Falls back to graceful banners when the data isn't ready, when
+  // there's no previous revision, or when bodies failed to parse.
+  function renderPolicyDiffBlock(current) {
+    const wrap = el("div");
+    const diffCache = S.cache.policyDiff;
+    if (!diffCache) {
+      wrap.appendChild(el("div", { class: "diff-banner", text: "Loading diff…" }));
+      return wrap;
+    }
+    if (diffCache._err) {
+      wrap.appendChild(el("div", { class: "diff-banner",
+        text: "diff unavailable: " + diffCache._err }));
+      // Still show current body so the page isn't empty.
+      if (current.policy && typeof current.policy === "object") {
+        wrap.appendChild(renderObject(current.policy, { field_kinds: current._field_kinds }));
+      }
+      return wrap;
+    }
+    const revisions = (diffCache.revisions || []);
+    if (revisions.length < 2) {
+      wrap.appendChild(el("div", { class: "diff-banner",
+        text: "this is the initial revision; nothing to diff against" }));
+      if (current.policy && typeof current.policy === "object") {
+        wrap.appendChild(renderObject(current.policy, { field_kinds: current._field_kinds }));
+      }
+      return wrap;
+    }
+    // The history list is descending by set_at; the first entry is the
+    // active (current) revision, the second is the immediately-previous.
+    // Defensive: if `is_active` is set, prefer that as the curr anchor.
+    const curr = revisions.find((r) => r.is_active) || revisions[0];
+    const prev = revisions.find((r) => r.revision_id !== curr.revision_id) || revisions[1];
+    if (!prev) {
+      wrap.appendChild(el("div", { class: "diff-banner",
+        text: "no previous revision available to diff against" }));
+      if (current.policy && typeof current.policy === "object") {
+        wrap.appendChild(renderObject(current.policy, { field_kinds: current._field_kinds }));
+      }
+      return wrap;
+    }
+    if (curr.body_parse_error || prev.body_parse_error) {
+      const reason = curr.body_parse_error || prev.body_parse_error;
+      wrap.appendChild(el("div", { class: "diff-banner",
+        text: "diff unavailable: " + reason }));
+      if (current.policy && typeof current.policy === "object") {
+        wrap.appendChild(renderObject(current.policy, { field_kinds: current._field_kinds }));
+      }
+      return wrap;
+    }
+
+    // Diff header: prev → curr with set_at timestamps.
+    const header = el("div", { class: "diff-header" });
+    const short = (s) => s ? String(s).slice(0, 8) : "—";
+    header.appendChild(el("span", { class: "mono",
+      title: prev.set_at || "", text: short(prev.revision_id) + " @ " +
+        (prev.set_at ? fmt.rel(prev.set_at) : "—") }));
+    header.appendChild(el("span", { class: "diff-header-arrow", text: "→" }));
+    header.appendChild(el("span", { class: "mono",
+      title: curr.set_at || "", text: short(curr.revision_id) + " @ " +
+        (curr.set_at ? fmt.rel(curr.set_at) : "—") }));
+    wrap.appendChild(header);
+
+    // Compute and render the diff. Reuse field_kinds from the cached
+    // body if present (it travels inside `policy://history`'s body),
+    // else fall back to current._field_kinds from the top-level cache.
+    const fieldKinds = (diffCache._field_kinds) || (current && current._field_kinds) || null;
+    const tree = diffJson(prev.body || {}, curr.body || {});
+    wrap.appendChild(renderObjectDiff(tree, { field_kinds: fieldKinds }));
+    return wrap;
   }
 
   // ─── Tab: Triggers ─────────────────────────────────────────
@@ -1800,6 +2219,12 @@
       if (!results[1]._err) S.cache.strategies = results[1];
       const tail = results.slice(2);
       if (S.tab === "policy"   && tail[0] && !tail[0]._err) S.cache.policy   = tail[0];
+      // v1.13 P4: kick off the diff fetch only when the user has the
+      // toggle on. Result lands in S.cache.policyDiff and triggers its
+      // own renderTab() when complete.
+      if (S.tab === "policy" && policyDiffEnabled() && !S.cache.policyDiff) {
+        ensurePolicyDiffLoaded();
+      }
       if (S.tab === "triggers" && tail[0] && !tail[0]._err) S.cache.triggers = tail[0];
       if (S.tab === "history"  && tail[0] && !tail[0]._err) S.cache.runs     = tail[0];
       if (onDetail) {
@@ -1853,7 +2278,8 @@
         return { t: "strategies", s: S.cache.strategies, p: S.cache.portfolio };
       }
       case "policy":
-        return { t: "policy", p: S.cache.policy };
+        return { t: "policy", p: S.cache.policy,
+                 diffOn: policyDiffEnabled(), pd: S.cache.policyDiff };
       case "triggers":
         return { t: "triggers", g: S.cache.triggers, s: S.cache.strategies };
       case "history":
