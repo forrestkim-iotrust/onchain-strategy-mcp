@@ -607,4 +607,5 @@ impl StateStore {
     ) -> Result<Vec<policy_revisions::PolicyRevisionSummary>, StateError> {
         policy_revisions::list_revisions(&self.conn, limit)
     }
+
 }
