@@ -102,12 +102,10 @@ async function main(argv) {
   }
 
   if (first === 'init') {
+    // The Rust binary's `init` already prompts the user and runs
+    // `claude mcp add osmcp -- npx onchain-strategy-mcp serve` when
+    // they accept. Don't double-register from this wrapper.
     const code = await runBinary(['init', ...args.slice(1)]);
-    if (code === 0) {
-      // v1.13.1: fold the previously-separate `claude mcp add` step into
-      // init so first-time users get a one-command setup.
-      tryRegisterWithClaudeCode();
-    }
     process.exit(code);
   }
 
