@@ -332,22 +332,20 @@
   }
   .logo-cell:hover { background: var(--bg-soft); }
   .logo-cell img {
-    max-height: 42px;
-    max-width: 100%;
-    height: auto;
+    height: 36px;
     width: auto;
+    max-width: 86%;
     object-fit: contain;
     filter: brightness(0) saturate(0);
-    opacity: .6;
+    opacity: .58;
     transition: opacity .15s, filter .15s;
   }
   .logo-cell:hover img { opacity: 1; }
   @media (prefers-color-scheme: dark) {
     .logo-cell img { filter: brightness(0) saturate(0) invert(1); }
   }
-  /* Icon-shaped logos render bigger to match wordmark visual weight */
-  .logo-cell.icon img { max-height: 36px; }
-  .logo-cell.wide img { max-height: 30px; }
+  /* Wide wordmarks (>4:1 aspect) — auto-cap by max-width so they shrink in height */
+  .logo-cell.wide img { height: auto; max-height: 28px; }
 
   /* ─── HOW IT WORKS ─── */
   .steps {
@@ -594,7 +592,7 @@
 
     <div class="logo-grid">
       <div class="logo-cell"><img src="./logos/aave.svg" alt="Aave" /></div>
-      <div class="logo-cell"><img src="./logos/compound.svg" alt="Compound" /></div>
+      <div class="logo-cell"><img src="./logos/compound.png" alt="Compound" /></div>
       <div class="logo-cell"><img src="./logos/morpho.svg" alt="Morpho" /></div>
       <div class="logo-cell"><img src="./logos/uniswap.svg" alt="Uniswap" /></div>
       <div class="logo-cell"><img src="./logos/curve.png" alt="Curve" /></div>
