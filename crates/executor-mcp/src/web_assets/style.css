@@ -19,6 +19,18 @@
   --row-hover: #f7f7f6;
   --code-bg:   #f3f3f2;
 
+  /* v1.12: 3-state strategy health palette. Amber, NOT red — view
+     refresh failures are an informational warning. Red implies error /
+     loss; the user's money is fine, only the read-side reporter is
+     stuck. --warn-amber is the badge / border accent (muted, readable
+     on white). --bg-warn-tint is the light wash applied to "view
+     unavailable" cards — clearly different from the white surface so
+     a glancing user reads "this card is in a weird state" instead of
+     "I have $0". */
+  --warn-amber:   #b9740a;
+  --warn-amber-2: #d9931f;
+  --bg-warn-tint: #faf3e3;
+
   --ff: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
         Arial, sans-serif;
   --ff-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
@@ -357,4 +369,128 @@ code, .code {
   padding: 0 4px;
   border-radius: 2px;
   font-size: 12px;
+}
+
+/* ─── v1.12 strategy-card health states ─────────────────── */
+/* Three states encoded as a data-health attribute on the .section
+   that wraps each per-strategy card. The Healthy state leaves the
+   card untouched (default). Stale gets a left-edge amber rule + a
+   "STALE · <age>" badge but KEEPS asset rows visible — last-good
+   cache is being served. Failed gets a soft amber wash AND a
+   dashed amber border so a glance reads "this strategy card is
+   in a weird state", never "my balance went to zero". */
+.section[data-health="stale"] {
+  border-left: 3px solid var(--warn-amber);
+}
+.section[data-health="failed"] {
+  background: var(--bg-warn-tint);
+  border: 1px dashed var(--warn-amber);
+}
+.section[data-health="failed"] .section-head {
+  border-bottom-color: var(--warn-amber-2);
+}
+
+.health-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-family: var(--ff-mono);
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+  margin-left: 6px;
+  cursor: help;
+}
+.health-badge[data-state="stale"] {
+  background: var(--warn-amber);
+  color: #ffffff;
+  border: 1px solid var(--warn-amber);
+}
+.health-badge[data-state="failed"] {
+  background: var(--bg-warn-tint);
+  color: var(--warn-amber);
+  border: 1px solid var(--warn-amber);
+}
+
+.stale-foot {
+  margin-top: 6px;
+  color: var(--warn-amber);
+  font-size: 11px;
+  font-family: var(--ff-mono);
+}
+.stale-foot .err {
+  color: var(--mute);
+  margin-left: 8px;
+}
+
+.view-unavailable {
+  margin: 6px 0;
+  padding: 8px 12px;
+  border-top: 1px dashed var(--warn-amber-2);
+  border-bottom: 1px dashed var(--warn-amber-2);
+  color: var(--warn-amber);
+  font-family: var(--ff-mono);
+  font-size: 12px;
+}
+.view-unavailable .hint {
+  color: var(--mute);
+  margin-left: 6px;
+}
+
+/* portfolio-level health summary banner — only rendered when at
+   least one strategy is non-healthy. Muted amber tint, single line,
+   stays out of the way when everything is fine (in which case the
+   banner is not rendered at all — see renderHealthSummaryBanner). */
+.health-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  background: var(--bg-warn-tint);
+  border: 1px solid var(--warn-amber-2);
+  border-left: 3px solid var(--warn-amber);
+  border-radius: 3px;
+  font-size: 12px;
+  color: var(--ink);
+}
+.health-summary .icon { color: var(--warn-amber); }
+.health-summary .dim { color: var(--mute); }
+
+/* ─── v1.12 transition toasts ───────────────────────────── */
+.toast-stack {
+  position: fixed;
+  top: 56px;       /* clear of header + tab strip */
+  right: 18px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+  pointer-events: none;   /* individual toasts re-enable */
+}
+.toast {
+  pointer-events: auto;
+  background: var(--surface);
+  border: 1px solid var(--hairline2);
+  border-left: 3px solid var(--warn-amber);
+  border-radius: 3px;
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--ink);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  animation: toast-in 0.18s ease-out;
+}
+.toast.info {
+  border-left-color: var(--ok);
+}
+.toast .toast-title {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.toast .toast-msg { color: var(--body); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(8px); }
+  to   { opacity: 1; transform: translateX(0); }
 }
