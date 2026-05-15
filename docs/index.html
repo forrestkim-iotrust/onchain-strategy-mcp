@@ -313,15 +313,24 @@
     background: var(--bg);
     aspect-ratio: 5/2;
     display: flex; align-items: center; justify-content: center;
-    color: var(--fg-soft);
-    font-weight: 600;
-    font-size: 1.05rem;
-    letter-spacing: -.01em;
+    padding: 1.5rem;
     transition: background .15s;
   }
-  .logo-cell:hover { background: var(--bg-soft); color: var(--fg); }
-  .logo-cell .mark { display: inline-flex; align-items: center; gap: .4rem; }
-  .logo-cell .mark .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .6; }
+  .logo-cell:hover { background: var(--bg-soft); }
+  .logo-cell img {
+    max-height: 28px;
+    max-width: 100%;
+    height: auto;
+    width: auto;
+    object-fit: contain;
+    filter: brightness(0) saturate(0);
+    opacity: .55;
+    transition: opacity .15s, filter .15s;
+  }
+  .logo-cell:hover img { opacity: 1; }
+  @media (prefers-color-scheme: dark) {
+    .logo-cell img { filter: brightness(0) saturate(0) invert(1); }
+  }
 
   /* ─── HOW IT WORKS ─── */
   .steps {
@@ -567,26 +576,26 @@
     <p class="h2-sub">Lending, perps, prediction markets, oracles, chat — all behind a single connector grammar. Anyone can publish a new one.</p>
 
     <div class="logo-grid">
-      <div class="logo-cell"><span class="mark">Aave</span></div>
-      <div class="logo-cell"><span class="mark">Compound</span></div>
-      <div class="logo-cell"><span class="mark">Morpho</span></div>
-      <div class="logo-cell"><span class="mark">Uniswap</span></div>
-      <div class="logo-cell"><span class="mark">Curve</span></div>
-      <div class="logo-cell"><span class="mark">Pendle</span></div>
+      <div class="logo-cell"><img src="./logos/aave.svg" alt="Aave" /></div>
+      <div class="logo-cell"><img src="./logos/compound.svg" alt="Compound" /></div>
+      <div class="logo-cell"><img src="./logos/morpho.svg" alt="Morpho" /></div>
+      <div class="logo-cell"><img src="./logos/uniswap.svg" alt="Uniswap" /></div>
+      <div class="logo-cell"><img src="./logos/curve.png" alt="Curve" /></div>
+      <div class="logo-cell"><img src="./logos/pendle.svg" alt="Pendle" /></div>
 
-      <div class="logo-cell"><span class="mark">Hyperliquid</span></div>
-      <div class="logo-cell"><span class="mark">dYdX</span></div>
-      <div class="logo-cell"><span class="mark">Drift</span></div>
-      <div class="logo-cell"><span class="mark">Polymarket</span></div>
-      <div class="logo-cell"><span class="mark">Kalshi</span></div>
-      <div class="logo-cell"><span class="mark">Chainlink</span></div>
+      <div class="logo-cell"><img src="./logos/hyperliquid.png" alt="Hyperliquid" /></div>
+      <div class="logo-cell"><img src="./logos/dydx.svg" alt="dYdX" /></div>
+      <div class="logo-cell"><img src="./logos/drift.svg" alt="Drift" /></div>
+      <div class="logo-cell"><img src="./logos/polymarket.svg" alt="Polymarket" /></div>
+      <div class="logo-cell"><img src="./logos/kalshi.svg" alt="Kalshi" /></div>
+      <div class="logo-cell"><img src="./logos/chainlink.svg" alt="Chainlink" /></div>
 
-      <div class="logo-cell"><span class="mark">Ethereum</span></div>
-      <div class="logo-cell"><span class="mark">Base</span></div>
-      <div class="logo-cell"><span class="mark">Arbitrum</span></div>
-      <div class="logo-cell"><span class="mark">Optimism</span></div>
-      <div class="logo-cell"><span class="mark">Polygon</span></div>
-      <div class="logo-cell"><span class="mark">Solana</span></div>
+      <div class="logo-cell"><img src="./logos/ethereum.svg" alt="Ethereum" /></div>
+      <div class="logo-cell"><img src="./logos/base.svg" alt="Base" /></div>
+      <div class="logo-cell"><img src="./logos/arbitrum.svg" alt="Arbitrum" /></div>
+      <div class="logo-cell"><img src="./logos/optimism.svg" alt="Optimism" /></div>
+      <div class="logo-cell"><img src="./logos/polygon.svg" alt="Polygon" /></div>
+      <div class="logo-cell"><img src="./logos/solana.svg" alt="Solana" /></div>
     </div>
   </div>
 </section>
