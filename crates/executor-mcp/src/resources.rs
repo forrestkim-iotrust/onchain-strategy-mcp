@@ -2296,8 +2296,10 @@ async fn read_policy_history(
     query: String,
     state: Arc<tokio::sync::Mutex<StateStore>>,
 ) -> Result<ReadResourceResult, McpError> {
-    // Parse `?limit=N`. Default 20, cap 200.
+    // Parse `?limit=N` (default 20, cap 200) and `?include_body=true|false`
+    // (default false — v1.13 Track P3 opt-in for diff lens).
     let mut limit: u64 = 20;
+    let mut include_body = false;
     if !query.is_empty() {
         for pair in query.split('&') {
             let (k, v) = match pair.split_once('=') {
@@ -2313,32 +2315,62 @@ async fn read_policy_history(
                         ));
                     }
                 }
+            } else if k == "include_body" {
+                include_body = v == "true" || v == "1";
             }
         }
     }
 
-    let summaries = tokio::task::spawn_blocking(move || {
-        let store = state.blocking_lock();
-        store.list_policy_revisions(limit)
-    })
-    .await
-    .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
-    .map_err(map_state_error)?;
-
-    let revisions: Vec<serde_json::Value> = summaries
-        .iter()
-        .map(|s| {
-            json!({
-                "revision_id": s.revision_id,
-                "set_at": s.set_at,
-                "rationale": s.rationale,
-                "is_active": s.is_active,
-            })
+    let revisions: Vec<serde_json::Value> = if include_body {
+        let rows = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_policy_revisions_with_body(limit)
         })
-        .collect();
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        rows.iter()
+            .map(|r| match serde_json::from_str::<serde_json::Value>(&r.body_json) {
+                Ok(parsed) => json!({
+                    "revision_id": r.revision_id,
+                    "set_at": r.set_at,
+                    "rationale": r.rationale,
+                    "is_active": r.is_active,
+                    "body": parsed,
+                }),
+                Err(e) => json!({
+                    "revision_id": r.revision_id,
+                    "set_at": r.set_at,
+                    "rationale": r.rationale,
+                    "is_active": r.is_active,
+                    "body": serde_json::Value::Null,
+                    "body_parse_error": e.to_string(),
+                }),
+            })
+            .collect()
+    } else {
+        let summaries = tokio::task::spawn_blocking(move || {
+            let store = state.blocking_lock();
+            store.list_policy_revisions(limit)
+        })
+        .await
+        .map_err(|e| storage_error(format!("spawn_blocking join: {e}")))?
+        .map_err(map_state_error)?;
+        summaries
+            .iter()
+            .map(|s| {
+                json!({
+                    "revision_id": s.revision_id,
+                    "set_at": s.set_at,
+                    "rationale": s.rationale,
+                    "is_active": s.is_active,
+                })
+            })
+            .collect()
+    };
     let mut body = json!({
         "revisions": revisions,
-        "count": summaries.len(),
+        "count": revisions.len(),
     });
     // v1.13 Track P2: declare formatter hints for the dashboard renderer.
     body["_field_kinds"] = policy_field_kinds();

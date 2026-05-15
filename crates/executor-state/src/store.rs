@@ -201,37 +201,6 @@ impl StateStore {
         records_capture::list_for_lineage(&self.conn, lineage_id, since, limit)
     }
 
-    // ---- v1.12 Track B1 — last-known-good view cache façade ----
-
-    /// Upsert the cached successful view body for `strategy_id`. Stamps
-    /// `succeeded_at = now` on every call (insert AND conflict-update).
-    /// The cache is keyed by the active row's `id`; a fresh re-register
-    /// under the same name produces a new id and therefore an empty
-    /// cache for the new version — that's intentional.
-    pub fn upsert_view_cache(
-        &self,
-        strategy_id: &str,
-        body_json: &str,
-    ) -> Result<(), StateError> {
-        view_cache::upsert(&self.conn, strategy_id, body_json)
-    }
-
-    /// Fetch the last-known-good view body for `strategy_id`. Returns
-    /// `Ok(None)` when no successful view has been cached.
-    pub fn get_view_cache(
-        &self,
-        strategy_id: &str,
-    ) -> Result<Option<view_cache::ViewCacheRow>, StateError> {
-        view_cache::get(&self.conn, strategy_id)
-    }
-
-    /// Delete the cached view body for `strategy_id`. No-op when absent.
-    /// Used in tests today; future purge / strategy-delete cleanup will
-    /// also route through here.
-    pub fn delete_view_cache(&self, strategy_id: &str) -> Result<(), StateError> {
-        view_cache::delete(&self.conn, strategy_id)
-    }
-
     // ---- Run façade ----
 
     pub fn insert_run(
@@ -608,4 +577,34 @@ impl StateStore {
         policy_revisions::list_revisions(&self.conn, limit)
     }
 
+    /// List policy revisions newest-first **with** `body_json` payload —
+    /// backs the opt-in `policy://history?include_body=true` query
+    /// (v1.13 Track P3). `limit` is hard-capped at 200.
+    pub fn list_policy_revisions_with_body(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<policy_revisions::PolicyRevisionWithBody>, StateError> {
+        policy_revisions::list_revisions_with_body(&self.conn, limit)
+    }
+
+    // ---- v1.12 Track B1 — last-known-good view cache façade ----
+
+    pub fn upsert_view_cache(
+        &self,
+        strategy_id: &str,
+        body_json: &str,
+    ) -> Result<(), StateError> {
+        view_cache::upsert(&self.conn, strategy_id, body_json)
+    }
+
+    pub fn get_view_cache(
+        &self,
+        strategy_id: &str,
+    ) -> Result<Option<view_cache::ViewCacheRow>, StateError> {
+        view_cache::get(&self.conn, strategy_id)
+    }
+
+    pub fn delete_view_cache(&self, strategy_id: &str) -> Result<(), StateError> {
+        view_cache::delete(&self.conn, strategy_id)
+    }
 }

@@ -32,6 +32,19 @@ pub struct PolicyRevisionSummary {
     pub is_active: bool,
 }
 
+/// Summary row + raw `body_json` blob, used by `policy://history?include_body=true`
+/// (v1.13 Track P3). The blob is the raw JSON string from SQLite; the resource
+/// layer is responsible for parsing it into a structured value and surfacing
+/// per-row parse errors without failing the whole listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyRevisionWithBody {
+    pub revision_id: String,
+    pub rationale: Option<String>,
+    pub set_at: String,
+    pub is_active: bool,
+    pub body_json: String,
+}
+
 fn now_rfc3339_millis() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -107,6 +120,36 @@ pub(crate) fn list_revisions(
                 rationale: r.get(1)?,
                 set_at: r.get(2)?,
                 is_active: r.get::<_, i64>(3)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Newest-first revision listing **with** `body_json` blob — backs the opt-in
+/// `policy://history?include_body=true` query (v1.13 Track P3). Same ordering
+/// and limit cap as [`list_revisions`]; we keep it as a parallel method rather
+/// than mutating the cheap [`PolicyRevisionSummary`] shape so existing callers
+/// (and the default `policy://history` response) stay byte-identical.
+pub(crate) fn list_revisions_with_body(
+    conn: &Connection,
+    limit: u64,
+) -> Result<Vec<PolicyRevisionWithBody>, StateError> {
+    let capped = limit.min(200) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT revision_id, rationale, set_at, is_active, body_json \
+         FROM policies \
+         ORDER BY set_at DESC, revision_id DESC \
+         LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![capped], |r| {
+            Ok(PolicyRevisionWithBody {
+                revision_id: r.get(0)?,
+                rationale: r.get(1)?,
+                set_at: r.get(2)?,
+                is_active: r.get::<_, i64>(3)? != 0,
+                body_json: r.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
