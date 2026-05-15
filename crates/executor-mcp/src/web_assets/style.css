@@ -494,3 +494,110 @@ code, .code {
   from { opacity: 0; transform: translateX(8px); }
   to   { opacity: 1; transform: translateX(0); }
 }
+/* ─── v1.13 renderObject (P1) ───────────────────────────── */
+/* Generic structure-aware renderer. Used by Policy tab today;
+   strategy view (P5) and diff lens (P4) reuse the same module. */
+
+.render-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+@media (max-width: 900px) {
+  .render-grid { grid-template-columns: 1fr; }
+}
+
+.render-panel {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.render-panel[data-empty="true"] {
+  background: var(--soft);
+  opacity: 0.75;
+}
+.render-panel-title {
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--mute);
+  background: var(--soft);
+  border-bottom: 1px solid var(--hairline);
+}
+.render-panel-body {
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.render-panel-body .kv {
+  /* Tighter than the page-level .kv (180px label gutter is too wide
+     for a half-width panel). */
+  grid-template-columns: 120px 1fr;
+}
+.render-panel-body .kv > .k,
+.render-panel-body .kv > .v {
+  padding: 4px 8px;
+}
+
+.render-subhead {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--mute);
+  margin: 4px 0 2px;
+}
+
+.render-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.render-table th, .render-table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+.render-table th {
+  color: var(--mute);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: var(--soft);
+}
+.render-table tbody tr:hover { background: var(--row-hover); }
+.render-table tr:last-child td { border-bottom: none; }
+
+/* addr-copy: looks like inline mono text, click-to-copy via central
+   delegate in app.js. `.chip > .addr-copy` strips the outer chip border
+   so a chip wrapping an address still reads as one pill. */
+.addr-copy {
+  font-family: var(--ff-mono);
+  font-size: 12px;
+  background: none;
+  border: 1px dashed transparent;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.addr-copy:hover {
+  border-color: var(--hairline2);
+  background: var(--soft);
+}
+.addr-copy[data-copied="1"] {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.addr-copy[data-copied="1"]::after {
+  content: " ✓";
+  font-size: 10px;
+}
+.chip > .addr-copy { padding: 0; }
+.chip > .addr-copy:hover { background: transparent; }
+
+.muted { color: var(--mute); font-style: italic; }
